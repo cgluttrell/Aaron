@@ -93,7 +93,7 @@ export function registerMemoryCli(program: Command) {
           ["openclaw memory status", "Show index and provider status."],
           [
             "openclaw memory status --fix",
-            "Repair stale recall locks and normalize promotion metadata.",
+            "Repair missing memory scaffold, stale recall locks, and promotion metadata.",
           ],
           ["openclaw memory status --deep", "Probe embedding provider readiness."],
           ["openclaw memory index --force", "Force a full reindex."],
@@ -137,7 +137,7 @@ export function registerMemoryCli(program: Command) {
     .option("--json", "Print JSON")
     .option("--deep", "Probe embedding provider availability")
     .option("--index", "Reindex if dirty (implies --deep)")
-    .option("--fix", "Repair stale recall locks and normalize promotion metadata")
+    .option("--fix", "Repair missing memory scaffold, stale recall locks, and promotion metadata")
     .option("--verbose", "Verbose logging", false)
     .action(async (opts: MemoryCommandOptions & { force?: boolean }) => {
       await runMemoryStatus(opts);
