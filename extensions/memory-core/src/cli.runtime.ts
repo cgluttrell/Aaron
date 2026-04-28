@@ -80,6 +80,10 @@ type MemorySourceScan = {
   issues: string[];
 };
 
+type MemoryScaffoldRepairResult = {
+  created: string[];
+};
+
 type LoadedMemoryCommandConfig = {
   config: OpenClawConfig;
   diagnostics: string[];
@@ -599,6 +603,37 @@ async function scanMemoryFiles(
   return { source: "memory", totalFiles, issues };
 }
 
+async function repairMemoryScaffold(workspaceDir: string): Promise<MemoryScaffoldRepairResult> {
+  const created: string[] = [];
+  const paths = [
+    path.join(workspaceDir, "memory"),
+    path.join(workspaceDir, "memory", ".dreams"),
+    path.join(workspaceDir, "memory", ".dreams", "session-corpus"),
+  ];
+  for (const entryPath of paths) {
+    try {
+      const stat = await fs.stat(entryPath);
+      if (!stat.isDirectory()) {
+        continue;
+      }
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw err;
+      }
+      await fs.mkdir(entryPath, { recursive: true });
+      created.push(entryPath);
+    }
+  }
+  return { created };
+}
+
+function formatMemoryScaffoldRepairSummary(repair: MemoryScaffoldRepairResult): string {
+  if (repair.created.length === 0) {
+    return "no scaffold changes";
+  }
+  return `created ${repair.created.map((entry) => shortenHomePath(entry)).join(", ")}`;
+}
+
 async function summarizeQmdIndexArtifact(manager: MemoryManager): Promise<string | null> {
   const status = manager.status?.();
   if (!status || status.backend !== "qmd") {
@@ -665,6 +700,7 @@ export async function runMemoryStatus(opts: MemoryCommandOptions) {
     scan?: MemorySourceScan;
     audit?: ShortTermAuditSummary;
     repair?: RepairShortTermPromotionArtifactsResult;
+    memoryRepair?: MemoryScaffoldRepairResult;
     dreamingAudit?: DreamingArtifactsAuditSummary;
     dreamingRepair?: RepairDreamingArtifactsResult;
   }> = [];
@@ -744,6 +780,10 @@ export async function runMemoryStatus(opts: MemoryCommandOptions) {
           status.sources?.length ? status.sources : ["memory"]
         ) as MemorySourceName[];
         const workspaceDir = status.workspaceDir;
+        let memoryRepair: MemoryScaffoldRepairResult | undefined;
+        if (workspaceDir && opts.fix) {
+          memoryRepair = await repairMemoryScaffold(workspaceDir);
+        }
         const scan = workspaceDir
           ? await scanMemorySources({
               workspaceDir,
@@ -788,6 +828,7 @@ export async function runMemoryStatus(opts: MemoryCommandOptions) {
           scan,
           audit,
           repair,
+          memoryRepair,
           dreamingAudit,
           dreamingRepair,
         });
@@ -818,6 +859,7 @@ export async function runMemoryStatus(opts: MemoryCommandOptions) {
       scan,
       audit,
       repair,
+      memoryRepair,
       dreamingAudit,
       dreamingRepair,
     } = result;
@@ -983,6 +1025,11 @@ export async function runMemoryStatus(opts: MemoryCommandOptions) {
     }
     if (repair) {
       lines.push(`${label("Repair")} ${info(formatRepairSummary(repair))}`);
+    }
+    if (memoryRepair) {
+      lines.push(
+        `${label("Memory repair")} ${info(formatMemoryScaffoldRepairSummary(memoryRepair))}`,
+      );
     }
     if (dreamingRepair) {
       lines.push(`${label("Dream repair")} ${info(formatDreamingRepairSummary(dreamingRepair))}`);

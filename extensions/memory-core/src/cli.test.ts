@@ -391,7 +391,9 @@ describe("memory cli", () => {
     const helpText = getMemoryHelpText();
 
     expect(helpText).toContain("openclaw memory status --fix");
-    expect(helpText).toContain("Repair stale recall locks and normalize promotion metadata.");
+    expect(helpText).toContain(
+      "Repair missing memory scaffold, stale recall locks, and promotion metadata.",
+    );
     expect(helpText).toContain("openclaw memory status --deep");
     expect(helpText).toContain("Probe embedding provider readiness.");
     expect(helpText).toContain('openclaw memory search "meeting notes"');
@@ -649,6 +651,30 @@ describe("memory cli", () => {
       await runMemoryCli(["status", "--fix"]);
       expectNotLogged(log, "Fix: openclaw memory status --fix --agent main");
     });
+  });
+
+  it("creates missing memory scaffold directories during status --fix", async () => {
+    const workspaceDir = path.join(workspaceFixtureRoot, `missing-scaffold-${workspaceCaseId++}`);
+    await fs.mkdir(workspaceDir, { recursive: true });
+
+    const close = vi.fn(async () => {});
+    mockManager({
+      probeVectorAvailability: vi.fn(async () => true),
+      status: () => makeMemoryStatus({ workspaceDir }),
+      close,
+    });
+
+    const log = spyRuntimeLogs(defaultRuntime);
+    await runMemoryCli(["status", "--fix"]);
+
+    await expect(fs.stat(path.join(workspaceDir, "memory"))).resolves.toMatchObject({});
+    await expect(fs.stat(path.join(workspaceDir, "memory", ".dreams"))).resolves.toMatchObject({});
+    await expect(
+      fs.stat(path.join(workspaceDir, "memory", ".dreams", "session-corpus")),
+    ).resolves.toMatchObject({});
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("Memory repair: created"));
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining("memory directory missing"));
+    expect(close).toHaveBeenCalled();
   });
 
   it("repairs contaminated dreaming artifacts during status --fix", async () => {
