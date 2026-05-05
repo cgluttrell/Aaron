@@ -987,6 +987,15 @@ describe("readMessagesDiscord", () => {
     );
     expect(options).toEqual({ limit: 5, before: "10" });
   });
+
+  it("uses a conservative default limit when omitted", async () => {
+    const { rest, getMock } = makeDiscordRest();
+    getMock.mockResolvedValue([]);
+    await readMessagesDiscord("chan1", {}, { rest, token: "t", cfg: DISCORD_TEST_CFG });
+    const call = getMock.mock.calls[0];
+    const options = call?.[1] as Record<string, unknown>;
+    expect(options).toEqual({ limit: 10 });
+  });
 });
 
 describe("edit/delete message helpers", () => {
