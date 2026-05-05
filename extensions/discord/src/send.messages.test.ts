@@ -24,6 +24,13 @@ describe("Discord message reads", () => {
     expect(getMock).toHaveBeenCalledWith(Routes.channelMessages("C1"), { limit: 5, before: "10" });
   });
 
+  it("uses a conservative default limit when omitted", async () => {
+    const { getMock, opts } = client();
+    getMock.mockResolvedValueOnce([]);
+    await readMessagesDiscord("C1", {}, opts);
+    expect(getMock).toHaveBeenCalledWith(Routes.channelMessages("C1"), { limit: 10 });
+  });
+
   it("rejects non-array message responses", async () => {
     const { getMock, opts } = client();
     getMock.mockResolvedValueOnce("\u001f\ufffd\u0008raw gzip bytes");
