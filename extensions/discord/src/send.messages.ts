@@ -19,7 +19,7 @@ export async function readMessagesDiscord(
   const limit =
     typeof query.limit === "number" && Number.isFinite(query.limit)
       ? Math.min(Math.max(Math.floor(query.limit), 1), 100)
-      : undefined;
+      : 10;
   const params: Record<string, string | number> = {};
   if (limit) {
     params.limit = limit;
