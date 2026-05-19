@@ -200,6 +200,7 @@ describe("runCronIsolatedAgentTurn isolated session identity", () => {
       promptCacheKey?: string;
       bootstrapContextMode?: string;
       bootstrapContextRunKind?: string;
+      toolsAllow?: string[];
     };
     expect(runRequest.sessionId).toBe("isolated-cli-run-1");
     expect(runRequest.sessionKey).toBe("agent:default:cron:cli-monitor:run:isolated-cli-run-1");
@@ -207,6 +208,36 @@ describe("runCronIsolatedAgentTurn isolated session identity", () => {
     expect(runRequest.promptCacheKey).toBeUndefined();
     expect(runRequest.bootstrapContextMode).toBe("lightweight");
     expect(runRequest.bootstrapContextRunKind).toBe("cron");
+    expect(runRequest.toolsAllow).toBeUndefined();
+  });
+
+  it("forwards runtime toolsAllow to CLI cron execution so unsupported restricted runs fail closed", async () => {
+    isCliProviderMock.mockReturnValue(true);
+    mockRunCronFallbackPassthrough();
+    runCliAgentMock.mockResolvedValue({
+      payloads: [{ text: "done" }],
+      meta: { agentMeta: { usage: { input: 10, output: 20 } } },
+    });
+
+    const result = await runCronIsolatedAgentTurn(
+      makeIsolatedAgentTurnParams({
+        sessionKey: "cron:cli-monitor",
+        job: makeIsolatedAgentTurnJob({
+          payload: {
+            kind: "agentTurn",
+            message: "test",
+            toolsAllow: ["exec"],
+          },
+        }),
+      }),
+    );
+
+    expect(result.status).toBe("ok");
+    expect(runCliAgentMock).toHaveBeenCalledOnce();
+    const runRequest = requireFirstMockArg(runCliAgentMock, "runCliAgentMock") as {
+      toolsAllow?: string[];
+    };
+    expect(runRequest.toolsAllow).toEqual(["exec"]);
   });
 
   it("runs externally sourced CLI hook turns", async () => {

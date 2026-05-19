@@ -241,6 +241,7 @@ export function createCronPromptExecutor(params: {
             bootstrapContextRunKind: "cron",
             bootstrapPromptWarningSignaturesSeen,
             bootstrapPromptWarningSignature,
+            toolsAllow: params.agentPayload?.toolsAllow,
           });
           bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
             result.meta?.systemPromptReport,

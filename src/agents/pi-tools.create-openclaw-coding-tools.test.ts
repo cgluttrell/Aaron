@@ -342,6 +342,26 @@ describe("createOpenClawCodingTools", () => {
     ).toBeNull();
   });
 
+  it("does not apply anonymous sender tool policy to cron runtime toolsAllow", () => {
+    const tools = applyRuntimeToolsAllow(
+      createOpenClawCodingTools({
+        config: {
+          tools: {
+            toolsBySender: {
+              "*": { allow: ["message"] },
+            },
+          },
+        },
+        trigger: "cron",
+        senderIsOwner: false,
+        runtimeToolAllowlist: ["exec"],
+      }),
+      ["exec"],
+    );
+
+    expect(tools.map((tool) => tool.name)).toEqual(["exec"]);
+  });
+
   it("uses runtime toolsAllow when materializing plugin tools", () => {
     const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
     createOpenClawToolsMock.mockClear();
