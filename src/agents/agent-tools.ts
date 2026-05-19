@@ -588,6 +588,7 @@ export function createOpenClawCodingTools(options?: {
       senderUsername: options?.senderUsername,
       senderE164: options?.senderE164,
       senderIsOwner: options?.senderIsOwner,
+      trigger: options?.trigger,
       modelProvider: options?.modelProvider,
       modelId: options?.modelId,
       modelApi: options?.modelApi,

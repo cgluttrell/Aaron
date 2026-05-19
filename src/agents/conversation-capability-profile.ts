@@ -43,6 +43,8 @@ export type ConversationCapabilityProfileParams = {
   sandboxSessionKey?: string;
   sessionId?: string;
   runId?: string;
+  /** What initiated this run; cron bypasses group/sender tool policy (T1071/T1278). */
+  trigger?: string;
   agentId?: string;
   agentDir?: string;
   agentAccountId?: string | null;
@@ -194,28 +196,36 @@ export function resolveConversationCapabilityProfile(
   // against; mask them whenever the trust check dropped the caller group id.
   const trustedGroupChannel = trustedGroup.dropped ? null : params.groupChannel;
   const trustedGroupSpace = trustedGroup.dropped ? null : params.groupSpace;
-  const groupPolicy = resolveGroupToolPolicy({
-    config: params.config,
-    sessionKey: params.sessionKey,
-    spawnedBy: params.spawnedBy,
-    messageProvider: messageProvider ?? undefined,
-    groupId: trustedGroup.groupId,
-    groupChannel: trustedGroupChannel,
-    groupSpace: trustedGroupSpace,
-    accountId: params.agentAccountId,
-    senderId: params.senderId,
-    senderName: params.senderName,
-    senderUsername: params.senderUsername,
-    senderE164: params.senderE164,
-  });
+  // Cron runs carry their own explicit runtime toolsAllow; skip group/sender tool
+  // policy so a restricted sender/group config cannot clobber the cron allowlist.
+  // Single owner for the cron bypass now that agent-tools, attempt, and
+  // effective-tool-policy all read group/sender policy from this profile (T1071/T1278).
+  const isCronTrigger = params.trigger === "cron";
+  const groupPolicy = isCronTrigger
+    ? undefined
+    : resolveGroupToolPolicy({
+        config: params.config,
+        sessionKey: params.sessionKey,
+        spawnedBy: params.spawnedBy,
+        messageProvider: messageProvider ?? undefined,
+        groupId: trustedGroup.groupId,
+        groupChannel: trustedGroupChannel,
+        groupSpace: trustedGroupSpace,
+        accountId: params.agentAccountId,
+        senderId: params.senderId,
+        senderName: params.senderName,
+        senderUsername: params.senderUsername,
+        senderE164: params.senderE164,
+      });
   // Owner WebChat intentionally has no external sender identity. Its trusted
   // owner state must not fall through to the wildcard policy for guests.
   const isOwnerInternalSession =
     params.senderIsOwner === true &&
     normalizeMessageChannel(messageProvider ?? params.messageChannel) === INTERNAL_MESSAGE_CHANNEL;
-  const senderPolicy = isOwnerInternalSession
-    ? undefined
-    : resolveSenderToolPolicy({
+  const senderPolicy =
+    isCronTrigger || isOwnerInternalSession
+      ? undefined
+      : resolveSenderToolPolicy({
         config: params.config,
         agentId: effective.agentId,
         messageProvider,

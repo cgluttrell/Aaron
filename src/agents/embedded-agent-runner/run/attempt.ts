@@ -1293,6 +1293,7 @@ export async function runEmbeddedAttempt(
           : undefined,
       sessionId: params.sessionId,
       runId: params.runId,
+      trigger: params.trigger,
       agentId: sessionAgentId,
       agentDir,
       agentAccountId: params.agentAccountId,
