@@ -57,10 +57,8 @@ async function loadCronSubagentRegistryRuntime() {
 }
 
 function resolveCronOwnerOnlyToolAllowlist(toolsAllow: string[] | undefined): string[] | undefined {
-  if (!normalizeToolList(toolsAllow).includes("cron")) {
-    return undefined;
-  }
-  return ["cron"];
+  const normalized = normalizeToolList(toolsAllow);
+  return normalized.length > 0 ? normalized : undefined;
 }
 
 const COMMAND_STYLE_CRON_PREFIX =
@@ -224,6 +222,7 @@ export function createCronPromptExecutor(params: {
             bootstrapPromptWarningSignaturesSeen,
             bootstrapPromptWarningSignature,
             senderIsOwner: params.senderIsOwner,
+            toolsAllow: params.agentPayload?.toolsAllow,
           });
           bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
             result.meta?.systemPromptReport,

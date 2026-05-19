@@ -1074,6 +1074,7 @@ function collectAttemptExplicitToolAllowlistSources(params: {
   senderE164?: string | null;
   sandboxToolPolicy?: { allow?: string[]; deny?: string[] };
   toolsAllow?: string[];
+  trigger?: EmbeddedRunAttemptParams["trigger"];
 }) {
   const { agentId, globalPolicy, globalProviderPolicy, agentPolicy, agentProviderPolicy } =
     resolveEffectiveToolPolicy({
@@ -1083,20 +1084,23 @@ function collectAttemptExplicitToolAllowlistSources(params: {
       modelProvider: params.modelProvider,
       modelId: params.modelId,
     });
-  const groupPolicy = resolveGroupToolPolicy({
-    config: params.config,
-    sessionKey: params.sessionKey,
-    spawnedBy: params.spawnedBy,
-    messageProvider: params.messageProvider,
-    groupId: params.groupId,
-    groupChannel: params.groupChannel,
-    groupSpace: params.groupSpace,
-    accountId: params.agentAccountId,
-    senderId: params.senderId,
-    senderName: params.senderName,
-    senderUsername: params.senderUsername,
-    senderE164: params.senderE164,
-  });
+  const groupPolicy =
+    params.trigger === "cron"
+      ? undefined
+      : resolveGroupToolPolicy({
+          config: params.config,
+          sessionKey: params.sessionKey,
+          spawnedBy: params.spawnedBy,
+          messageProvider: params.messageProvider,
+          groupId: params.groupId,
+          groupChannel: params.groupChannel,
+          groupSpace: params.groupSpace,
+          accountId: params.agentAccountId,
+          senderId: params.senderId,
+          senderName: params.senderName,
+          senderUsername: params.senderUsername,
+          senderE164: params.senderE164,
+        });
   const subagentStore = resolveSubagentCapabilityStore(params.sandboxSessionKey, {
     cfg: params.config,
   });
@@ -1761,6 +1765,7 @@ export async function runEmbeddedAttempt(
       senderE164: params.senderE164,
       sandboxToolPolicy: sandbox?.tools,
       toolsAllow: params.toolsAllow,
+      trigger: params.trigger,
     });
     const toolSearchRunPlan = buildToolSearchRunPlan({
       visibleTools: effectiveTools,
