@@ -504,29 +504,35 @@ export function createOpenClawCodingTools(options?: {
   // sessionKey/config can lose the real sandbox agent when callers pass a
   // legacy alias like `main` instead of an agent session key.
   const sandboxToolPolicy = sandbox?.tools;
-  const groupPolicy = resolveGroupToolPolicy({
-    config: options?.config,
-    sessionKey: options?.sessionKey,
-    spawnedBy: options?.spawnedBy,
-    messageProvider: options?.messageProvider,
-    groupId: options?.groupId,
-    groupChannel: options?.groupChannel,
-    groupSpace: options?.groupSpace,
-    accountId: options?.agentAccountId,
-    senderId: options?.senderId,
-    senderName: options?.senderName,
-    senderUsername: options?.senderUsername,
-    senderE164: options?.senderE164,
-  });
-  const senderPolicy = resolveSenderToolPolicy({
-    config: options?.config,
-    agentId,
-    messageProvider: options?.messageProvider,
-    senderId: options?.senderId,
-    senderName: options?.senderName,
-    senderUsername: options?.senderUsername,
-    senderE164: options?.senderE164,
-  });
+  const groupPolicy =
+    options?.trigger === "cron"
+      ? undefined
+      : resolveGroupToolPolicy({
+          config: options?.config,
+          sessionKey: options?.sessionKey,
+          spawnedBy: options?.spawnedBy,
+          messageProvider: options?.messageProvider,
+          groupId: options?.groupId,
+          groupChannel: options?.groupChannel,
+          groupSpace: options?.groupSpace,
+          accountId: options?.agentAccountId,
+          senderId: options?.senderId,
+          senderName: options?.senderName,
+          senderUsername: options?.senderUsername,
+          senderE164: options?.senderE164,
+        });
+  const senderPolicy =
+    options?.trigger === "cron"
+      ? undefined
+      : resolveSenderToolPolicy({
+          config: options?.config,
+          agentId,
+          messageProvider: options?.messageProvider,
+          senderId: options?.senderId,
+          senderName: options?.senderName,
+          senderUsername: options?.senderUsername,
+          senderE164: options?.senderE164,
+        });
   const profilePolicy = resolveToolProfilePolicy(profile);
   const providerProfilePolicy = resolveToolProfilePolicy(providerProfile);
 
