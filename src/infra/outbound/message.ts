@@ -35,12 +35,18 @@ let messageGatewayRuntimePromise: Promise<typeof import("./message.gateway.runti
   null;
 
 function loadMessageConfigRuntime() {
-  messageConfigRuntimePromise ??= import("./message.config.runtime.js");
+  messageConfigRuntimePromise ??= import("./message.config.runtime.js").catch((err) => {
+    messageConfigRuntimePromise = null;
+    throw err;
+  });
   return messageConfigRuntimePromise;
 }
 
 function loadMessageGatewayRuntime() {
-  messageGatewayRuntimePromise ??= import("./message.gateway.runtime.js");
+  messageGatewayRuntimePromise ??= import("./message.gateway.runtime.js").catch((err) => {
+    messageGatewayRuntimePromise = null;
+    throw err;
+  });
   return messageGatewayRuntimePromise;
 }
 
