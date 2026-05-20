@@ -14,6 +14,7 @@ import {
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { resolveProviderRequestHeaders } from "../provider-request-config.js";
+import { saveAuthProfileBookkeepingBestEffort } from "./bookkeeping-persistence.js";
 import { notifyAuthProfileFailureHook, setAuthProfileFailureHook } from "./failure-hook.js";
 import { logAuthProfileFailureStateChange } from "./state-observation.js";
 
@@ -812,7 +813,10 @@ export async function markAuthProfileFailure(params: {
         })
       : computed;
   updateUsageStatsEntry(store, profileId, () => nextStats ?? computed);
-  authProfileUsageDeps.saveAuthProfileStore(store, agentDir);
+  saveAuthProfileBookkeepingBestEffort({
+    action: "markAuthProfileFailure",
+    save: () => authProfileUsageDeps.saveAuthProfileStore(store, agentDir),
+  });
   logAuthProfileFailureStateChange({
     runId,
     profileId,
@@ -941,7 +945,10 @@ export async function markAuthProfileBlockedUntil(params: {
     now,
   });
   updateUsageStatsEntry(store, profileId, () => nextStats as ProfileUsageStats);
-  authProfileUsageDeps.saveAuthProfileStore(store, agentDir);
+  saveAuthProfileBookkeepingBestEffort({
+    action: "markAuthProfileBlockedUntil",
+    save: () => authProfileUsageDeps.saveAuthProfileStore(store, agentDir),
+  });
   logAuthProfileFailureStateChange({
     runId,
     profileId,
