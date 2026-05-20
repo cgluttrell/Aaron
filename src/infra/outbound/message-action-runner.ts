@@ -42,7 +42,7 @@ import { extractToolPayload } from "../../plugin-sdk/tool-payload.js";
 import { hasPollCreationParams } from "../../poll-params.js";
 import { resolvePollMaxSelections } from "../../polls.js";
 import { resolveFirstBoundAccountId } from "../../routing/bound-account-read.js";
-import { createLazyRuntimeModule } from "../../shared/lazy-runtime.js";
+import { createLazyPromiseLoader } from "../../shared/lazy-runtime.js";
 import { stripUnsupportedCitationControlMarkers } from "../../shared/text/citation-control-markers.js";
 import { stripFormattedReasoningMessage } from "../../shared/text/formatted-reasoning-message.js";
 import { parseInlineDirectives } from "../../utils/directive-tags.js";
@@ -109,10 +109,23 @@ export type MessageActionRunnerGateway = {
 };
 
 // Gateway runtime is only needed for remote message action dispatch or
-// idempotency keys; keep normal in-process actions import-light.
-const loadMessageActionGatewayRuntime = createLazyRuntimeModule(
+// idempotency keys; keep normal in-process actions import-light. Use the
+// retry-by-default lazy loader (evicts rejected imports) so a transient
+// dist-rebuild ERR_MODULE_NOT_FOUND recovers on the next call (T1048).
+const messageActionGatewayRuntimeLoader = createLazyPromiseLoader(
   () => import("./message.gateway.runtime.js"),
 );
+
+function loadMessageActionGatewayRuntime() {
+  return messageActionGatewayRuntimeLoader.load();
+}
+
+export const __testing = {
+  resetMessageActionGatewayRuntimeForTests() {
+    messageActionGatewayRuntimeLoader.clear();
+  },
+  loadMessageActionGatewayRuntimeForTests: loadMessageActionGatewayRuntime,
+};
 
 export type RunMessageActionParams = {
   cfg: OpenClawConfig;

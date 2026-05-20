@@ -11,7 +11,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { OutboundMediaAccess } from "../../media/load-options.js";
 import type { PollInput } from "../../polls.js";
 import { normalizePollInput } from "../../polls.js";
-import { createLazyRuntimeModule } from "../../shared/lazy-runtime.js";
+import { createLazyPromise } from "../../shared/lazy-runtime.js";
 import { formatErrorMessage } from "../errors.js";
 import { resolveOutboundChannelPlugin } from "./channel-resolution.js";
 import { resolveMessageChannelSelection } from "./channel-selection.js";
@@ -37,13 +37,15 @@ import { resolveOutboundTarget } from "./targets.js";
 
 const SEND_BUFFER_MEDIA_URL = "buffer://message-send/attachment";
 
-const loadMessageConfigRuntime = createLazyRuntimeModule(
+// Keep config/runtime loading lazy so importing message helpers does not
+// bootstrap plugin registries or gateway clients. Use the retry-by-default lazy
+// promise (evicts rejected imports) so a transient dist-rebuild
+// ERR_MODULE_NOT_FOUND recovers on the next call instead of caching the failure (T1048).
+const loadMessageConfigRuntime = createLazyPromise(
   () => import("./message.config.runtime.js"),
 );
 
-// Keep config/runtime loading lazy so importing message helpers does not
-// bootstrap plugin registries or gateway clients.
-const loadMessageGatewayRuntime = createLazyRuntimeModule(
+const loadMessageGatewayRuntime = createLazyPromise(
   () => import("./message.gateway.runtime.js"),
 );
 
