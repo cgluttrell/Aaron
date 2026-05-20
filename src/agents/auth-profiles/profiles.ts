@@ -2,6 +2,7 @@ import { normalizeStringEntries } from "../../shared/string-normalization.js";
 import { normalizeSecretInput } from "../../utils/normalize-secret-input.js";
 import { resolveProviderIdForAuth } from "../provider-auth-aliases.js";
 import { findNormalizedProviderKey, normalizeProviderId } from "../provider-id.js";
+import { saveAuthProfileBookkeepingBestEffort } from "./bookkeeping-persistence.js";
 import { dedupeProfileIds, listProfilesForProvider } from "./profile-list.js";
 import {
   ensureAuthProfileStoreForLocalUpdate,
@@ -258,5 +259,8 @@ export async function markAuthProfileSuccess(params: {
   }
   store.lastGood = { ...store.lastGood, [providerKey]: profileId };
   updateSuccessfulUsageStatsEntry(store, profileId, lastUsed);
-  saveAuthProfileStore(store, agentDir);
+  saveAuthProfileBookkeepingBestEffort({
+    action: "markAuthProfileSuccess",
+    save: () => saveAuthProfileStore(store, agentDir),
+  });
 }
