@@ -100,9 +100,19 @@ let messageActionGatewayRuntimePromise: Promise<
 > | null = null;
 
 function loadMessageActionGatewayRuntime() {
-  messageActionGatewayRuntimePromise ??= import("./message.gateway.runtime.js");
+  messageActionGatewayRuntimePromise ??= import("./message.gateway.runtime.js").catch((err) => {
+    messageActionGatewayRuntimePromise = null;
+    throw err;
+  });
   return messageActionGatewayRuntimePromise;
 }
+
+export const __testing = {
+  resetMessageActionGatewayRuntimeForTests() {
+    messageActionGatewayRuntimePromise = null;
+  },
+  loadMessageActionGatewayRuntimeForTests: loadMessageActionGatewayRuntime,
+};
 
 export type RunMessageActionParams = {
   cfg: OpenClawConfig;
