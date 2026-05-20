@@ -107,9 +107,19 @@ let messageActionGatewayRuntimePromise: Promise<
 function loadMessageActionGatewayRuntime() {
   // Gateway runtime is only needed for remote message action dispatch or
   // idempotency keys; keep normal in-process actions import-light.
-  messageActionGatewayRuntimePromise ??= import("./message.gateway.runtime.js");
+  messageActionGatewayRuntimePromise ??= import("./message.gateway.runtime.js").catch((err) => {
+    messageActionGatewayRuntimePromise = null;
+    throw err;
+  });
   return messageActionGatewayRuntimePromise;
 }
+
+export const __testing = {
+  resetMessageActionGatewayRuntimeForTests() {
+    messageActionGatewayRuntimePromise = null;
+  },
+  loadMessageActionGatewayRuntimeForTests: loadMessageActionGatewayRuntime,
+};
 
 export type RunMessageActionParams = {
   cfg: OpenClawConfig;
