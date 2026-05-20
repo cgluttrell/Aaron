@@ -38,12 +38,18 @@ const SEND_BUFFER_MEDIA_URL = "buffer://message-send/attachment";
 function loadMessageConfigRuntime() {
   // Keep config/runtime loading lazy so importing message helpers does not
   // bootstrap plugin registries or gateway clients.
-  messageConfigRuntimePromise ??= import("./message.config.runtime.js");
+  messageConfigRuntimePromise ??= import("./message.config.runtime.js").catch((err) => {
+    messageConfigRuntimePromise = null;
+    throw err;
+  });
   return messageConfigRuntimePromise;
 }
 
 function loadMessageGatewayRuntime() {
-  messageGatewayRuntimePromise ??= import("./message.gateway.runtime.js");
+  messageGatewayRuntimePromise ??= import("./message.gateway.runtime.js").catch((err) => {
+    messageGatewayRuntimePromise = null;
+    throw err;
+  });
   return messageGatewayRuntimePromise;
 }
 
