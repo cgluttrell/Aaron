@@ -115,4 +115,42 @@ describe("resolveEmbeddedRunFailureSignal", () => {
       fatalForCron: true,
     });
   });
+
+  it("classifies unavailable exec tools as fatal cron failures", () => {
+    expect(
+      resolveEmbeddedRunFailureSignal({
+        trigger: "cron",
+        lastToolError: {
+          toolName: "exec",
+          error: "exec tool unavailable in this environment",
+        },
+      }),
+    ).toEqual({
+      kind: "execution_denied",
+      source: "tool",
+      toolName: "exec",
+      code: "INVALID_REQUEST",
+      message: "exec tool unavailable in this environment",
+      fatalForCron: true,
+    });
+  });
+
+  it("treats exec_command as an exec-like alias for cron failure classification", () => {
+    expect(
+      resolveEmbeddedRunFailureSignal({
+        trigger: "cron",
+        lastToolError: {
+          toolName: "exec_command",
+          error: "exec_command tool is unavailable in this environment",
+        },
+      }),
+    ).toEqual({
+      kind: "execution_denied",
+      source: "tool",
+      toolName: "exec_command",
+      code: "INVALID_REQUEST",
+      message: "exec_command tool is unavailable in this environment",
+      fatalForCron: true,
+    });
+  });
 });

@@ -152,13 +152,50 @@ describe("pickDeliverablePayloads", () => {
 });
 
 describe("resolveCronPayloadOutcome", () => {
-  it("marks unavailable required tool summaries as fatal", () => {
+  it("treats final assistant visible text as recovery from earlier tool errors", () => {
     const outcome = resolveCronPayloadOutcome({
-      payloads: [{ text: "FAILED: exec tool is not available in this session." }],
+      payloads: [
+        { text: "Invalid Form Body", isError: true },
+        { text: "run python3 scripts/log-task-cost.py (agent) failed", isError: true },
+      ],
+      finalAssistantVisibleText: "Nightly completed successfully. Session log completed.",
+      preferFinalAssistantVisibleText: true,
+    });
+
+    expect(outcome.hasFatalErrorPayload).toBe(false);
+    expect(outcome.embeddedRunError).toBeUndefined();
+    expect(outcome.synthesizedText).toBe("Nightly completed successfully. Session log completed.");
+    expect(outcome.deliveryPayloads).toEqual([
+      { text: "Nightly completed successfully. Session log completed." },
+    ]);
+  });
+
+  it("keeps unrecovered tool errors fatal when no final assistant text exists", () => {
+    const outcome = resolveCronPayloadOutcome({
+      payloads: [{ text: "run python3 scripts/log-task-cost.py (agent) failed", isError: true }],
+      preferFinalAssistantVisibleText: true,
     });
 
     expect(outcome.hasFatalErrorPayload).toBe(true);
-    expect(outcome.embeddedRunError).toContain("denial token");
+    expect(outcome.embeddedRunError).toBe("run python3 scripts/log-task-cost.py (agent) failed");
+  });
+
+  it("keeps non-recoverable trailing errors fatal even when final assistant text exists", () => {
+    const outcome = resolveCronPayloadOutcome({
+      payloads: [
+        { text: "newsletter processor failed: required work did not complete", isError: true },
+      ],
+      finalAssistantVisibleText: "Newsletter processing complete.",
+      preferFinalAssistantVisibleText: true,
+    });
+
+    expect(outcome.hasFatalErrorPayload).toBe(true);
+    expect(outcome.embeddedRunError).toBe(
+      "newsletter processor failed: required work did not complete",
+    );
+    expect(outcome.synthesizedText).toBe(
+      "newsletter processor failed: required work did not complete",
+    );
   });
 });
 
