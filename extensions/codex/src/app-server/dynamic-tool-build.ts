@@ -328,11 +328,15 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
     nativeProviderWebSearchSupport: input.nativeProviderWebSearchSupport,
   });
   const readableAllTools = [...readableAllToolProjection.tools];
+  const toolsAllow = includeForcedCodexDynamicToolAllow(params.toolsAllow, messagePolicyParams);
   const codexFilteredTools = addNodeShellDynamicToolsIfNeeded(
     addSandboxShellDynamicToolsIfAvailable(
       isCodexMemoryFlushRun(params)
         ? filterCodexMemoryFlushDynamicTools(readableAllTools)
-        : filterCodexDynamicTools(readableAllTools, input.pluginConfig),
+        : filterCodexDynamicTools(readableAllTools, input.pluginConfig, process.env, {
+            runtimeToolAllowlist:
+              toolsAllow && !hasWildcardCodexToolsAllow(toolsAllow) ? toolsAllow : undefined,
+          }),
       readableAllTools,
       input,
     ),
@@ -380,7 +384,6 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
         transientWebSearchRestriction &&
         webSearchPolicy.persistentAllowed),
   );
-  const toolsAllow = includeForcedCodexDynamicToolAllow(params.toolsAllow, messagePolicyParams);
   const filteredTools = filterCodexDynamicToolsForAllowlist(visionFilteredTools, toolsAllow);
   toolBuildStages.mark("allowlist-filter");
   const normalizedTools = normalizeAgentRuntimeTools({
