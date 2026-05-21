@@ -11,7 +11,7 @@ export type ToolErrorSummary = {
   fileTarget?: FileTarget;
 };
 
-const EXEC_LIKE_TOOL_NAMES = new Set(["exec", "bash"]);
+const EXEC_LIKE_TOOL_NAMES = new Set(["exec", "exec_command", "bash"]);
 
 export function isExecLikeToolName(toolName: string): boolean {
   return EXEC_LIKE_TOOL_NAMES.has(normalizeOptionalLowercaseString(toolName) ?? "");
