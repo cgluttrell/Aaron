@@ -449,6 +449,16 @@ describe("Codex app-server dynamic tool build", () => {
     ).toEqual(["message"]);
   });
 
+  it("exposes explicitly allowlisted app-server-owned tools for restricted runs", () => {
+    const tools = ["read", "exec", "apply_patch", "message"].map((name) => ({ name }));
+
+    expect(
+      filterCodexDynamicTools(tools, {}, {}, { runtimeToolAllowlist: [" exec "] }).map(
+        (tool) => tool.name,
+      ),
+    ).toEqual(["exec", "message"]);
+  });
+
   it("exposes app-server-owned tools directly for forced private QA Codex runtime", () => {
     const tools = ["read", "write", "image_generate", "message"].map((name) => ({ name }));
     const privateQaCodexEnv = {
