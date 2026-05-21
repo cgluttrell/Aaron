@@ -4409,11 +4409,15 @@ async function buildDynamicTools(input: DynamicToolBuildParams) {
     },
   });
   toolBuildStages.mark("create-openclaw-coding-tools");
+  const toolsAllow = includeForcedCodexDynamicToolAllow(params.toolsAllow, params);
   const codexFilteredTools = addNodeShellDynamicToolsIfNeeded(
     addSandboxShellDynamicToolsIfAvailable(
       isCodexMemoryFlushRun(params)
         ? filterCodexMemoryFlushDynamicTools(allTools)
-        : filterCodexDynamicTools(allTools, input.pluginConfig),
+        : filterCodexDynamicTools(allTools, input.pluginConfig, process.env, {
+            runtimeToolAllowlist:
+              toolsAllow && !hasWildcardCodexToolsAllow(toolsAllow) ? toolsAllow : undefined,
+          }),
       allTools,
       input,
     ),
@@ -4426,7 +4430,6 @@ async function buildDynamicTools(input: DynamicToolBuildParams) {
     hasInboundImages: (params.images?.length ?? 0) > 0,
   });
   toolBuildStages.mark("vision-filtering");
-  const toolsAllow = includeForcedCodexDynamicToolAllow(params.toolsAllow, params);
   const filteredTools = filterCodexDynamicToolsForAllowlist(visionFilteredTools, toolsAllow);
   toolBuildStages.mark("allowlist-filter");
   const normalizedTools = normalizeAgentRuntimeTools({
