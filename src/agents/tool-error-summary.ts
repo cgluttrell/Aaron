@@ -19,7 +19,7 @@ export type ToolErrorSummary = {
   fileTarget?: FileTarget;
 };
 
-const EXEC_LIKE_TOOL_NAMES = new Set(["exec", "bash"]);
+const EXEC_LIKE_TOOL_NAMES = new Set(["exec", "exec_command", "bash"]);
 
 /** Detects shell-execution tools that share retry and mutation semantics. */
 export function isExecLikeToolName(toolName: string): boolean {
