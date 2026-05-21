@@ -287,11 +287,15 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
   const readableAllToolProjection = filterProviderNormalizableTools(allTools);
   preNormalizationDiagnostics.push(...readableAllToolProjection.diagnostics);
   const readableAllTools = [...readableAllToolProjection.tools];
+  const toolsAllow = includeForcedCodexDynamicToolAllow(params.toolsAllow, params);
   const codexFilteredTools = addNodeShellDynamicToolsIfNeeded(
     addSandboxShellDynamicToolsIfAvailable(
       isCodexMemoryFlushRun(params)
         ? filterCodexMemoryFlushDynamicTools(readableAllTools)
-        : filterCodexDynamicTools(readableAllTools, input.pluginConfig),
+        : filterCodexDynamicTools(readableAllTools, input.pluginConfig, process.env, {
+            runtimeToolAllowlist:
+              toolsAllow && !hasWildcardCodexToolsAllow(toolsAllow) ? toolsAllow : undefined,
+          }),
       readableAllTools,
       input,
     ),
@@ -304,7 +308,6 @@ export async function buildDynamicTools(input: DynamicToolBuildParams) {
     hasInboundImages: (params.images?.length ?? 0) > 0,
   });
   toolBuildStages.mark("vision-filtering");
-  const toolsAllow = includeForcedCodexDynamicToolAllow(params.toolsAllow, params);
   const filteredTools = filterCodexDynamicToolsForAllowlist(visionFilteredTools, toolsAllow);
   toolBuildStages.mark("allowlist-filter");
   const normalizedTools = normalizeAgentRuntimeTools({
