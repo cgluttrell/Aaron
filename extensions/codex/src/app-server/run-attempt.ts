@@ -3118,12 +3118,15 @@ async function buildDynamicTools(input: DynamicToolBuildParams) {
       input.runAbortController.abort("sessions_yield");
     },
   });
-  const codexFilteredTools = filterCodexDynamicTools(allTools, input.pluginConfig);
+  const toolsAllow = includeForcedMessageToolAllow(params.toolsAllow, params);
+  const codexFilteredTools = filterCodexDynamicTools(allTools, input.pluginConfig, process.env, {
+    runtimeToolAllowlist:
+      toolsAllow && !hasWildcardCodexToolsAllow(toolsAllow) ? toolsAllow : undefined,
+  });
   const visionFilteredTools = filterToolsForVisionInputs(codexFilteredTools, {
     modelHasVision,
     hasInboundImages: (params.images?.length ?? 0) > 0,
   });
-  const toolsAllow = includeForcedMessageToolAllow(params.toolsAllow, params);
   const filteredTools = filterCodexDynamicToolsForAllowlist(visionFilteredTools, toolsAllow);
   return normalizeAgentRuntimeTools({
     runtimePlan: params.runtimePlan,
