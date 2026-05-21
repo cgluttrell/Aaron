@@ -51,11 +51,17 @@ export function filterCodexDynamicTools<T extends { name: string }>(
   tools: T[],
   config: Pick<CodexPluginConfig, "codexDynamicToolsExclude">,
   env: CodexDynamicToolProfileEnv = process.env,
+  options?: { runtimeToolAllowlist?: readonly string[] },
 ): T[] {
+  const runtimeAllowlist = new Set(
+    (options?.runtimeToolAllowlist ?? []).map((name) => normalizeCodexDynamicToolName(name)),
+  );
   const excludes = new Set<string>();
   if (!isForcedPrivateQaCodexRuntime(env)) {
     for (const name of CODEX_APP_SERVER_OWNED_DYNAMIC_TOOL_EXCLUDES) {
-      excludes.add(name);
+      if (!runtimeAllowlist.has(name)) {
+        excludes.add(name);
+      }
     }
   }
   for (const name of config.codexDynamicToolsExclude ?? []) {

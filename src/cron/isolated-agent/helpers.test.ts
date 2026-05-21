@@ -5,6 +5,7 @@ import {
   pickLastDeliverablePayload,
   pickLastNonEmptyTextFromPayloads,
   pickSummaryFromPayloads,
+  resolveCronPayloadOutcome,
 } from "./helpers.js";
 
 type TextPayload = { text?: string | undefined; isError?: boolean | undefined };
@@ -147,6 +148,17 @@ describe("pickDeliverablePayloads", () => {
     ];
 
     expect(pickDeliverablePayloads(payloads)).toEqual([{ text: "last error", isError: true }]);
+  });
+});
+
+describe("resolveCronPayloadOutcome", () => {
+  it("marks unavailable required tool summaries as fatal", () => {
+    const outcome = resolveCronPayloadOutcome({
+      payloads: [{ text: "FAILED: exec tool is not available in this session." }],
+    });
+
+    expect(outcome.hasFatalErrorPayload).toBe(true);
+    expect(outcome.embeddedRunError).toContain("denial token");
   });
 });
 

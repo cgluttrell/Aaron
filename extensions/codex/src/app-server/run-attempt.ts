@@ -3976,11 +3976,15 @@ async function buildDynamicTools(input: DynamicToolBuildParams) {
       });
     },
   });
+  const toolsAllow = includeForcedCodexDynamicToolAllow(params.toolsAllow, params);
   const codexFilteredTools = addNodeShellDynamicToolsIfNeeded(
     addSandboxShellDynamicToolsIfAvailable(
       isCodexMemoryFlushRun(params)
         ? filterCodexMemoryFlushDynamicTools(allTools)
-        : filterCodexDynamicTools(allTools, input.pluginConfig),
+        : filterCodexDynamicTools(allTools, input.pluginConfig, process.env, {
+            runtimeToolAllowlist:
+              toolsAllow && !hasWildcardCodexToolsAllow(toolsAllow) ? toolsAllow : undefined,
+          }),
       allTools,
       input,
     ),
@@ -3991,7 +3995,6 @@ async function buildDynamicTools(input: DynamicToolBuildParams) {
     modelHasVision,
     hasInboundImages: (params.images?.length ?? 0) > 0,
   });
-  const toolsAllow = includeForcedCodexDynamicToolAllow(params.toolsAllow, params);
   const filteredTools = filterCodexDynamicToolsForAllowlist(visionFilteredTools, toolsAllow);
   return normalizeAgentRuntimeTools({
     runtimePlan: input.ignoreRuntimePlan ? undefined : params.runtimePlan,
