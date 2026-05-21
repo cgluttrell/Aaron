@@ -989,7 +989,7 @@ describe("runCodexAppServerAttempt", () => {
     const tools = ["read", "exec", "apply_patch", "message"].map((name) => ({ name }));
 
     expect(
-      __testing
+      testing
         .filterCodexDynamicTools(tools, {}, {}, { runtimeToolAllowlist: [" exec "] })
         .map((tool) => tool.name),
     ).toEqual(["exec", "message"]);
