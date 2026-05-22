@@ -10,8 +10,16 @@ function resolveFailureSignalCode(message: string): EmbeddedRunFailureSignal["co
       return code;
     }
   }
-  if (message.toLowerCase().includes("approval cannot safely bind")) {
+  const normalizedMessage = message.toLowerCase();
+  if (normalizedMessage.includes("approval cannot safely bind")) {
     return "SYSTEM_RUN_DENIED";
+  }
+  if (
+    normalizedMessage.includes("tool unavailable") ||
+    normalizedMessage.includes("tool is unavailable") ||
+    normalizedMessage.includes("unavailable in this environment")
+  ) {
+    return "INVALID_REQUEST";
   }
   return undefined;
 }
