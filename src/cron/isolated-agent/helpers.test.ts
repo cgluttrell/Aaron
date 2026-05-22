@@ -152,6 +152,15 @@ describe("pickDeliverablePayloads", () => {
 });
 
 describe("resolveCronPayloadOutcome", () => {
+  it("marks unavailable required tool summaries as fatal", () => {
+    const outcome = resolveCronPayloadOutcome({
+      payloads: [{ text: "FAILED: exec tool is not available in this session." }],
+    });
+
+    expect(outcome.hasFatalErrorPayload).toBe(true);
+    expect(outcome.embeddedRunError).toContain("denial token");
+  });
+
   it("treats final assistant visible text as recovery from earlier tool errors", () => {
     const outcome = resolveCronPayloadOutcome({
       payloads: [

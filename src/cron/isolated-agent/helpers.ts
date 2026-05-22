@@ -47,6 +47,11 @@ const CRON_DENIAL_CASE_INSENSITIVE_TOKENS = [
   "runtime denied",
   "could not run",
   "did not run",
+  "not exposed in this session",
+  "not available in this session",
+  "tool unavailable",
+  "tool is unavailable",
+  "tool is not available",
   "was denied",
 ] as const;
 
