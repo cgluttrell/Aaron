@@ -254,6 +254,19 @@ function isCronMessagePresentationWarning(text: string | undefined): boolean {
   );
 }
 
+function isRecoverableCronToolWarning(text: string | undefined): boolean {
+  const normalized = normalizeOptionalString(text);
+  if (!normalized) {
+    return false;
+  }
+  const lower = normalized.toLowerCase();
+  return (
+    /\(agent\)\s+failed\b/i.test(normalized) ||
+    /^⚠️\s*(?:🛠️|exec\b|bash\b)/iu.test(normalized) ||
+    lower.startsWith("invalid form body")
+  );
+}
+
 export function resolveCronPayloadOutcome(params: {
   payloads: DeliveryPayload[];
   runLevelError?: unknown;
@@ -282,9 +295,11 @@ export function resolveCronPayloadOutcome(params: {
   const hasSuccessfulPayloadAfterLastError =
     !params.runLevelError &&
     lastErrorPayloadIndex >= 0 &&
-    params.payloads
+    (params.payloads
       .slice(lastErrorPayloadIndex + 1)
-      .some((payload) => payload?.isError !== true && Boolean(payload?.text?.trim()));
+      .some((payload) => payload?.isError !== true && Boolean(payload?.text?.trim())) ||
+      (normalizedFinalAssistantVisibleText !== undefined &&
+        isRecoverableCronToolWarning(lastErrorPayloadText)));
   const hasSuccessfulPayloadBeforeLastError =
     !params.runLevelError &&
     lastErrorPayloadIndex > 0 &&
