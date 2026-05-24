@@ -362,6 +362,24 @@ describe("createOpenClawCodingTools", () => {
     expect(tools.map((tool) => tool.name)).toEqual(["exec"]);
   });
 
+  it("keeps cron exec available when anonymous sender policy only allows message", () => {
+    const tools = createOpenClawCodingTools({
+      config: {
+        tools: {
+          toolsBySender: {
+            "*": { allow: ["message"] },
+          },
+        },
+      },
+      trigger: "cron",
+      senderIsOwner: false,
+    });
+    const names = new Set(tools.map((tool) => tool.name));
+
+    expect(names.has("exec")).toBe(true);
+    expect(names.has("message")).toBe(true);
+  });
+
   it("uses runtime toolsAllow when materializing plugin tools", () => {
     const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
     createOpenClawToolsMock.mockClear();
