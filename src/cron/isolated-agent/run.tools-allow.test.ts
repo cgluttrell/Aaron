@@ -90,15 +90,15 @@ describe("runCronIsolatedAgentTurn toolsAllow passthrough", () => {
   });
 
   it(
-    "passes through isolated cron toolsAllow=cron self-removal path",
+    "passes through isolated cron toolsAllow entries",
     { timeout: RUN_TOOLS_ALLOW_TIMEOUT_MS },
     async () => {
-      await runCronIsolatedAgentTurn(makeParamsWithToolsAllow(["cron"]));
+      await runCronIsolatedAgentTurn(makeParamsWithToolsAllow(["exec", "cron"]));
 
       expect(runEmbeddedPiAgentMock).toHaveBeenCalledTimes(1);
       const call = requireEmbeddedAgentCall();
       expect(call.jobId).toBe("tools-allow");
-      expect(call.toolsAllow).toEqual(["cron"]);
+      expect(call.toolsAllow).toEqual(["exec", "cron"]);
     },
   );
 
