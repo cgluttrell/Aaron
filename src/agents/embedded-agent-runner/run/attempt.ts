@@ -1203,16 +1203,20 @@ export async function runEmbeddedAttempt(
     const corePluginToolStages = createEmbeddedRunStageTracker();
     const forceDirectMessageTool =
       params.forceMessageTool === true || params.sourceReplyDeliveryMode === "message_tool_only";
+    const forceHeartbeatResponseTool =
+      params.forceHeartbeatTool === true || params.trigger === "heartbeat";
     const toolsAllowWithForcedRuntimeTools = mergeForcedEmbeddedAttemptToolsAllow(
       params.toolsAllow,
       {
         forceMessageTool: forceDirectMessageTool,
+        forceHeartbeatTool: forceHeartbeatResponseTool,
       },
     );
     const toolConstructionPlan = resolveEmbeddedAttemptToolConstructionPlan({
       disableTools: params.disableTools,
       isRawModelRun,
       toolsAllow: toolsAllowWithForcedRuntimeTools,
+      forceHeartbeatTool: forceHeartbeatResponseTool,
     });
     const toolsEnabled = supportsModelTools(params.model);
     const codeModeConfig = resolveCodeModeConfig(params.config, sessionAgentId);
