@@ -42,6 +42,7 @@ import {
   stripHeartbeatToken,
   type HeartbeatTask,
 } from "../auto-reply/heartbeat.js";
+import { getReplyPayloadMetadata } from "../auto-reply/reply-payload.js";
 import { replaceGenericExternalRunFailureText } from "../auto-reply/reply/agent-runner-failure-copy.js";
 import { resolveDefaultModel } from "../auto-reply/reply/directive-handling.defaults.js";
 import {
@@ -1175,6 +1176,39 @@ function appendHeartbeatFileDirectives(prompt: string, heartbeatFileContent?: st
   return `${prompt}\n\nAdditional context from HEARTBEAT.md:\n${directives}`;
 }
 
+function isHeartbeatToolModeFallbackDeliverable(payload: ReplyPayload): boolean {
+  if (payload.isError === true) {
+    return true;
+  }
+  return getReplyPayloadMetadata(payload)?.deliverDespiteSourceReplySuppression === true;
+}
+
+function isActionableHeartbeatFallbackText(text: string): boolean {
+  const actionableText = text.replace(/\bnothing needs attention\b/gi, "");
+  return (
+    /\bneeds?\s+(?:attention|review|action|intervention)\b/i.test(actionableText) ||
+    /\baction\s+required\b/i.test(actionableText) ||
+    /\b(?:blocked|failed|failing|failure|error|overdue|stalled|stuck|warning|alert)\b/i.test(
+      actionableText,
+    )
+  );
+}
+
+function isQuietHeartbeatToolFallbackText(payload: ReplyPayload): boolean {
+  const text = payload.text?.trim();
+  if (!text) {
+    return false;
+  }
+  const hasQuietIntent =
+    /\bnotify\s*=\s*false\b/i.test(text) ||
+    /\bheartbeat stayed quiet\b/i.test(text) ||
+    /\bnothing needs attention\b/i.test(text) ||
+    /\bno (?:user-facing )?update (?:is )?needed\b/i.test(text) ||
+    /\bno changes?\b/i.test(text);
+
+  return hasQuietIntent && !isActionableHeartbeatFallbackText(text);
+}
+
 function resolveHeartbeatRunPrompt(params: {
   cfg: OpenClawConfig;
   heartbeat?: HeartbeatConfig;
@@ -1828,7 +1862,14 @@ export async function runHeartbeatOnce(opts: {
       opts.deps?.getReplyFromConfig ?? (await loadHeartbeatRunnerRuntime()).getReplyFromConfig;
     const replyResult = await getReplyFromConfig(ctx, replyOpts, cfg);
     const heartbeatToolResponse = resolveHeartbeatToolResponseFromReplyResult(replyResult);
-    const replyPayload = resolveHeartbeatReplyPayload(replyResult);
+    const rawReplyPayload = resolveHeartbeatReplyPayload(replyResult);
+    const replyPayload =
+      usesHeartbeatResponseTool && !heartbeatToolResponse && rawReplyPayload
+        ? !isHeartbeatToolModeFallbackDeliverable(rawReplyPayload) &&
+          isQuietHeartbeatToolFallbackText(rawReplyPayload)
+          ? undefined
+          : rawReplyPayload
+        : rawReplyPayload;
     if (
       !heartbeatToolResponse &&
       (!replyPayload || !hasOutboundReplyContent(replyPayload)) &&
