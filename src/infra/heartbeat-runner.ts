@@ -41,6 +41,7 @@ import {
   stripHeartbeatToken,
   type HeartbeatTask,
 } from "../auto-reply/heartbeat.js";
+import { getReplyPayloadMetadata } from "../auto-reply/reply-payload.js";
 import { replaceGenericExternalRunFailureText } from "../auto-reply/reply/agent-runner-failure-copy.js";
 import { resolveDefaultModel } from "../auto-reply/reply/directive-handling.defaults.js";
 import {
@@ -1160,6 +1161,25 @@ function appendHeartbeatFileDirectives(prompt: string, heartbeatFileContent?: st
   return `${prompt}\n\nAdditional context from HEARTBEAT.md:\n${directives}`;
 }
 
+function isHeartbeatToolModeFallbackDeliverable(payload: ReplyPayload): boolean {
+  if (payload.isError === true) {
+    return true;
+  }
+  return getReplyPayloadMetadata(payload)?.deliverDespiteSourceReplySuppression === true;
+}
+
+function isQuietHeartbeatToolFallbackText(payload: ReplyPayload): boolean {
+  const text = payload.text?.trim();
+  if (!text) {
+    return false;
+  }
+  return (
+    /\bheartbeat_respond\b/i.test(text) ||
+    /\bnotify\s*=\s*false\b/i.test(text) ||
+    /\bheartbeat stayed quiet\b/i.test(text)
+  );
+}
+
 function resolveHeartbeatRunPrompt(params: {
   cfg: OpenClawConfig;
   heartbeat?: HeartbeatConfig;
@@ -1799,7 +1819,14 @@ export async function runHeartbeatOnce(opts: {
       opts.deps?.getReplyFromConfig ?? (await loadHeartbeatRunnerRuntime()).getReplyFromConfig;
     const replyResult = await getReplyFromConfig(ctx, replyOpts, cfg);
     const heartbeatToolResponse = resolveHeartbeatToolResponseFromReplyResult(replyResult);
-    const replyPayload = resolveHeartbeatReplyPayload(replyResult);
+    const rawReplyPayload = resolveHeartbeatReplyPayload(replyResult);
+    const replyPayload =
+      usesHeartbeatResponseTool && !heartbeatToolResponse && rawReplyPayload
+        ? !isHeartbeatToolModeFallbackDeliverable(rawReplyPayload) &&
+          isQuietHeartbeatToolFallbackText(rawReplyPayload)
+          ? undefined
+          : rawReplyPayload
+        : rawReplyPayload;
     const includeReasoning = heartbeat?.includeReasoning === true;
     const reasoningPayloads = includeReasoning
       ? resolveHeartbeatReasoningPayloads(replyResult).filter((payload) => payload !== replyPayload)
