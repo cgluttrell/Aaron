@@ -1222,10 +1222,13 @@ export async function runEmbeddedAttempt(
     const corePluginToolStages = createEmbeddedRunStageTracker();
     const forceDirectMessageTool =
       params.forceMessageTool === true || params.sourceReplyDeliveryMode === "message_tool_only";
+    const forceHeartbeatResponseTool =
+      params.forceHeartbeatTool === true || params.trigger === "heartbeat";
     const toolsAllowWithForcedRuntimeTools = mergeForcedEmbeddedAttemptToolsAllow(
       params.toolsAllow,
       {
         forceMessageTool: forceDirectMessageTool,
+        forceHeartbeatTool: forceHeartbeatResponseTool,
       },
     );
     const toolsEnabled = supportsModelTools(params.model);
@@ -1234,6 +1237,7 @@ export async function runEmbeddedAttempt(
       isRawModelRun,
       toolsEnabled,
       toolsAllow: toolsAllowWithForcedRuntimeTools,
+      forceHeartbeatTool: forceHeartbeatResponseTool,
     });
     const codeModeConfig = resolveCodeModeConfig(params.config, sessionAgentId);
     const toolSearchRuntimeConfig = forceDirectMessageTool

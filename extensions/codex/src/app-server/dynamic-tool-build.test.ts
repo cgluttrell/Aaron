@@ -514,6 +514,33 @@ describe("Codex app-server dynamic tool build", () => {
     expect(toolBridge.specs.some((tool) => tool.type === "namespace")).toBe(false);
   });
 
+  it("keeps forced heartbeat tool inside narrow Codex allowlists", () => {
+    const params = createParams(
+      path.join(tempDir, "session.jsonl"),
+      path.join(tempDir, "workspace"),
+    );
+    params.forceHeartbeatTool = true;
+    params.toolsAllow = ["message"];
+
+    expect(includeForcedCodexDynamicToolAllow(params.toolsAllow, params)).toEqual([
+      "message",
+      "heartbeat_respond",
+    ]);
+  });
+
+  it("materializes heartbeat-only allowlist when heartbeat turns start from no tools", () => {
+    const params = createParams(
+      path.join(tempDir, "session.jsonl"),
+      path.join(tempDir, "workspace"),
+    );
+    params.trigger = "heartbeat";
+    params.toolsAllow = [];
+
+    expect(includeForcedCodexDynamicToolAllow(params.toolsAllow, params)).toEqual([
+      "heartbeat_respond",
+    ]);
+  });
+
   it("quarantines unreadable tool entries before Codex-specific filtering", async () => {
     const messageTool = createRuntimeDynamicTool("message");
     const sourceTools = new Proxy([messageTool] as RuntimeDynamicToolForTest[], {

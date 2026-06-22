@@ -133,20 +133,25 @@ export function applyEmbeddedAttemptToolsAllow<T extends { name: string }>(
  */
 export function mergeForcedEmbeddedAttemptToolsAllow(
   toolsAllow: string[] | undefined,
-  params: { forceMessageTool?: boolean },
+  params: { forceMessageTool?: boolean; forceHeartbeatTool?: boolean },
 ): string[] | undefined {
+  const forcedToolNames = [
+    ...(params.forceMessageTool ? ["message"] : []),
+    ...(params.forceHeartbeatTool ? ["heartbeat_respond"] : []),
+  ];
   if (
-    !params.forceMessageTool ||
+    forcedToolNames.length === 0 ||
     toolsAllow === undefined ||
     hasWildcardToolAllowlist(toolsAllow)
   ) {
     return toolsAllow;
   }
   if (toolsAllow.length === 0) {
-    return ["message"];
+    return forcedToolNames;
   }
   const normalized = new Set(toolsAllow.map((entry) => normalizeToolName(entry)));
-  return normalized.has("message") ? toolsAllow : [...toolsAllow, "message"];
+  const missingToolNames = forcedToolNames.filter((toolName) => !normalized.has(toolName));
+  return missingToolNames.length === 0 ? toolsAllow : [...toolsAllow, ...missingToolNames];
 }
 
 function resolveCodingToolConstructionPlanForAllowlist(
@@ -197,6 +202,7 @@ export function resolveEmbeddedAttemptToolConstructionPlan(params: {
   toolsEnabled?: boolean;
   toolsAllow?: string[];
   forceMessageTool?: boolean;
+  forceHeartbeatTool?: boolean;
 }): {
   constructTools: boolean;
   includeCoreTools: boolean;
@@ -218,6 +224,7 @@ export function resolveEmbeddedAttemptToolConstructionPlan(params: {
   }
   const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow(params.toolsAllow, {
     forceMessageTool: params.forceMessageTool,
+    forceHeartbeatTool: params.forceHeartbeatTool,
   });
   const codingToolConstructionPlan = resolveCodingToolConstructionPlanForAllowlist(toolsAllow);
   const includeCoreTools =

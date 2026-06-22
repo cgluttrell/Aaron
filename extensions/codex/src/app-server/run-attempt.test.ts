@@ -1581,11 +1581,12 @@ describe("runCodexAppServerAttempt", () => {
     const params = createParams(path.join(tempDir, "session.jsonl"), workspaceDir);
     params.disableTools = false;
     params.runtimePlan = createCodexRuntimePlanFixture();
+    params.forceHeartbeatTool = true;
     params.toolsAllow = ["message"];
 
     const dynamicToolNames = filterAllowedRuntimeToolNamesForTest(params, tools);
 
-    expect(dynamicToolNames).toEqual(["message"]);
+    expect(dynamicToolNames).toEqual(["message", "heartbeat_respond"]);
   });
 
   it("keeps OpenClaw control-path tools direct when code-mode-only is enabled", () => {
@@ -4367,6 +4368,28 @@ describe("runCodexAppServerAttempt", () => {
             ],
             mcpServers: ["google-calendar"],
           },
+        };
+      }
+      if (method === "app/list") {
+        return {
+          data: [
+            {
+              id: "google-calendar-app",
+              name: "Google Calendar",
+              description: null,
+              logoUrl: null,
+              logoUrlDark: null,
+              distributionChannel: null,
+              branding: null,
+              appMetadata: null,
+              labels: null,
+              installUrl: null,
+              isAccessible: true,
+              isEnabled: true,
+              pluginDisplayNames: [],
+            },
+          ],
+          nextCursor: null,
         };
       }
       if (method === "thread/start") {

@@ -456,7 +456,12 @@ export function includeForcedCodexDynamicToolAllow(
   if (toolsAllow === undefined || hasWildcardCodexToolsAllow(toolsAllow)) {
     return toolsAllow;
   }
-  const forcedToolNames = shouldForceMessageTool(params) ? ["message"] : [];
+  const forcedToolNames = [
+    ...(shouldForceMessageTool(params) ? ["message"] : []),
+    ...(params.forceHeartbeatTool === true || params.trigger === "heartbeat"
+      ? ["heartbeat_respond"]
+      : []),
+  ];
   if (forcedToolNames.length === 0) {
     return toolsAllow;
   }

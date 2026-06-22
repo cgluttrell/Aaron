@@ -423,6 +423,24 @@ describe("createOpenClawCodingTools", () => {
     expect(names.has("message")).toBe(true);
   });
 
+  it("keeps heartbeat response available when sender policy only allows message", () => {
+    const tools = createOpenClawCodingTools({
+      config: {
+        tools: {
+          toolsBySender: {
+            "*": { allow: ["message"] },
+          },
+        },
+      },
+      trigger: "heartbeat",
+      senderIsOwner: false,
+    });
+    const names = new Set(tools.map((tool) => tool.name));
+
+    expect(names.has("message")).toBe(true);
+    expect(names.has("heartbeat_respond")).toBe(true);
+  });
+
   it("uses runtime toolsAllow when materializing plugin tools", () => {
     const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
     createOpenClawToolsMock.mockClear();
@@ -1407,6 +1425,18 @@ describe("createOpenClawCodingTools", () => {
     const tools = createOpenClawCodingTools({
       config: {
         messages: { visibleReplies: "message_tool" },
+        tools: { profile: "coding" },
+      } as OpenClawConfig,
+      trigger: "heartbeat",
+    });
+
+    expect(toolNameList(tools)).toContain("heartbeat_respond");
+  });
+
+  it("enables heartbeat response when group-chat visible replies are message-tool-only", () => {
+    const tools = createOpenClawCodingTools({
+      config: {
+        messages: { groupChat: { visibleReplies: "message_tool" } },
         tools: { profile: "coding" },
       } as OpenClawConfig,
       trigger: "heartbeat",

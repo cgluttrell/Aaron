@@ -75,6 +75,31 @@ describe("applyEmbeddedAttemptToolsAllow", () => {
     ]);
   });
 
+  it("keeps forced heartbeat tool through explicit runtime allowlists", () => {
+    const tools = [{ name: "message" }, { name: "heartbeat_respond" }];
+    const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow(["message"], {
+      forceHeartbeatTool: true,
+    });
+
+    expect(toolsAllow).toEqual(["message", "heartbeat_respond"]);
+    expect(applyEmbeddedAttemptToolsAllow(tools, toolsAllow).map((tool) => tool.name)).toEqual([
+      "message",
+      "heartbeat_respond",
+    ]);
+  });
+
+  it("materializes forced heartbeat tool through empty runtime allowlists", () => {
+    const tools = [{ name: "heartbeat_respond" }];
+    const toolsAllow = mergeForcedEmbeddedAttemptToolsAllow([], {
+      forceHeartbeatTool: true,
+    });
+
+    expect(toolsAllow).toEqual(["heartbeat_respond"]);
+    expect(applyEmbeddedAttemptToolsAllow(tools, toolsAllow).map((tool) => tool.name)).toEqual([
+      "heartbeat_respond",
+    ]);
+  });
+
   it("normalizes explicit toolsAllow entries before filtering", () => {
     const tools = [{ name: "cron" }, { name: "read" }, { name: "message" }];
 
@@ -239,6 +264,24 @@ describe("resolveEmbeddedAttemptToolConstructionPlan", () => {
         constructTools: true,
         includeCoreTools: true,
         runtimeToolAllowlist: ["message"],
+        coding: {
+          includeBaseCodingTools: false,
+          includeShellTools: false,
+          includeChannelTools: false,
+          includeOpenClawTools: true,
+          includePluginTools: false,
+        },
+      },
+    );
+  });
+
+  it("constructs heartbeat tool for forced heartbeat delivery on explicit no-tools runs", () => {
+    expectConstructionPlan(
+      resolveEmbeddedAttemptToolConstructionPlan({ toolsAllow: [], forceHeartbeatTool: true }),
+      {
+        constructTools: true,
+        includeCoreTools: true,
+        runtimeToolAllowlist: ["heartbeat_respond"],
         coding: {
           includeBaseCodingTools: false,
           includeShellTools: false,
