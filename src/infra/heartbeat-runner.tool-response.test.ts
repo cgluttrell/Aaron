@@ -310,6 +310,61 @@ describe("runHeartbeatOnce heartbeat response tool", () => {
     });
   });
 
+  it("keeps private quiet fallback text quiet when heartbeat_respond was expected", async () => {
+    await withTempTelegramHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const cfg = createConfig({ tmpDir, storePath, visibleReplies: "message_tool" });
+      await seedMainSessionStore(storePath, cfg, {
+        lastChannel: "telegram",
+        lastProvider: "telegram",
+        lastTo: TELEGRAM_GROUP,
+      });
+      replySpy.mockResolvedValue({
+        text: "heartbeat_respond is unavailable here. Effective notify=false; nothing needs attention.",
+      });
+      const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1" });
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        deps: createDeps({ sendTelegram, getReplyFromConfig: replySpy }),
+      });
+
+      const calledOpts = replyOptions(replySpy);
+      expect(result.status).toBe("ran");
+      expect(calledOpts.sourceReplyDeliveryMode).toBe("message_tool_only");
+      expect(sendTelegram).not.toHaveBeenCalled();
+      expect(getLastHeartbeatEvent()).toMatchObject({
+        status: "ok-empty",
+        silent: true,
+      });
+    });
+  });
+
+  it("delivers actionable fallback text when heartbeat_respond was unavailable", async () => {
+    await withTempTelegramHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const cfg = createConfig({ tmpDir, storePath, visibleReplies: "message_tool" });
+      await seedMainSessionStore(storePath, cfg, {
+        lastChannel: "telegram",
+        lastProvider: "telegram",
+        lastTo: TELEGRAM_GROUP,
+      });
+      const fallbackText =
+        "heartbeat_respond is unavailable here. T154 is overdue and needs attention.";
+      replySpy.mockResolvedValue({ text: fallbackText });
+      const sendTelegram = vi.fn().mockResolvedValue({ messageId: "m1" });
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        deps: createDeps({ sendTelegram, getReplyFromConfig: replySpy }),
+      });
+
+      expect(result.status).toBe("ran");
+      expectTelegramSend(sendTelegram, {
+        text: fallbackText,
+        cfg,
+      });
+    });
+  });
+
   it("rewrites foreground generic runner failure payloads before heartbeat delivery", async () => {
     await withTempTelegramHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const cfg = createConfig({ tmpDir, storePath });
