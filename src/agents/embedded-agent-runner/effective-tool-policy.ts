@@ -48,6 +48,7 @@ type FinalEffectiveToolPolicyParams = {
   config?: OpenClawConfig;
   sandboxToolPolicy?: { allow?: string[]; deny?: string[] };
   sessionKey?: string;
+  trigger?: string;
   agentId?: string;
   modelProvider?: string;
   modelId?: string;
@@ -97,29 +98,35 @@ export function applyFinalEffectiveToolPolicy(
     modelId: params.modelId,
   });
 
-  const groupPolicy = resolveGroupToolPolicy({
-    config: params.config,
-    sessionKey: params.sessionKey,
-    spawnedBy: params.spawnedBy,
-    messageProvider: params.messageProvider,
-    groupId: trustedGroup.groupId,
-    groupChannel: trustedGroup.dropped ? null : params.groupChannel,
-    groupSpace: trustedGroup.dropped ? null : params.groupSpace,
-    accountId: params.agentAccountId,
-    senderId: params.senderId,
-    senderName: params.senderName,
-    senderUsername: params.senderUsername,
-    senderE164: params.senderE164,
-  });
-  const senderPolicy = resolveSenderToolPolicy({
-    config: params.config,
-    agentId,
-    messageProvider: params.messageProvider,
-    senderId: params.senderId,
-    senderName: params.senderName,
-    senderUsername: params.senderUsername,
-    senderE164: params.senderE164,
-  });
+  const groupPolicy =
+    params.trigger === "cron"
+      ? undefined
+      : resolveGroupToolPolicy({
+          config: params.config,
+          sessionKey: params.sessionKey,
+          spawnedBy: params.spawnedBy,
+          messageProvider: params.messageProvider,
+          groupId: trustedGroup.groupId,
+          groupChannel: trustedGroup.dropped ? null : params.groupChannel,
+          groupSpace: trustedGroup.dropped ? null : params.groupSpace,
+          accountId: params.agentAccountId,
+          senderId: params.senderId,
+          senderName: params.senderName,
+          senderUsername: params.senderUsername,
+          senderE164: params.senderE164,
+        });
+  const senderPolicy =
+    params.trigger === "cron"
+      ? undefined
+      : resolveSenderToolPolicy({
+          config: params.config,
+          agentId,
+          messageProvider: params.messageProvider,
+          senderId: params.senderId,
+          senderName: params.senderName,
+          senderUsername: params.senderUsername,
+          senderE164: params.senderE164,
+        });
   const profilePolicy = resolveToolProfilePolicy(profile);
   const providerProfilePolicy = resolveToolProfilePolicy(providerProfile);
   const profilePolicyWithAlsoAllow = mergeAlsoAllowPolicy(profilePolicy, profileAlsoAllow);
