@@ -137,6 +137,76 @@ describe("applyFinalEffectiveToolPolicy", () => {
     expect(filtered.map((tool) => tool.name)).toEqual(["mcp__bundle__read"]);
   });
 
+  it("preserves bundled tools for cron-triggered sender policy lookups", () => {
+    const filtered = applyFinalEffectiveToolPolicy({
+      bundledTools: [makeTool("mcp__bundle__exec"), makeTool("mcp__bundle__read")],
+      config: {
+        tools: {
+          toolsBySender: {
+            "channel:msteams:alice": { deny: ["mcp__bundle__exec"] },
+          },
+        },
+      },
+      trigger: "cron",
+      messageProvider: "teams",
+      senderId: "alice",
+      warn: () => {},
+    });
+
+    expect(filtered.map((tool) => tool.name)).toEqual(["mcp__bundle__exec", "mcp__bundle__read"]);
+  });
+
+  it("applies group deny policy to bundled tools for non-cron runs", () => {
+    const filtered = applyFinalEffectiveToolPolicy({
+      bundledTools: [makeTool("mcp__bundle__exec"), makeTool("mcp__bundle__read")],
+      config: {
+        channels: {
+          discord: {
+            groups: {
+              room1: {
+                tools: {
+                  deny: ["mcp__bundle__exec"],
+                },
+              },
+            },
+          },
+        },
+      },
+      sessionKey: "agent:alice:discord:group:room1",
+      messageProvider: "discord",
+      groupId: "room1",
+      warn: () => {},
+    });
+
+    expect(filtered.map((tool) => tool.name)).toEqual(["mcp__bundle__read"]);
+  });
+
+  it("preserves bundled tools for cron-triggered group policy lookups", () => {
+    const filtered = applyFinalEffectiveToolPolicy({
+      bundledTools: [makeTool("mcp__bundle__exec"), makeTool("mcp__bundle__read")],
+      config: {
+        channels: {
+          discord: {
+            groups: {
+              room1: {
+                tools: {
+                  deny: ["mcp__bundle__exec"],
+                },
+              },
+            },
+          },
+        },
+      },
+      trigger: "cron",
+      sessionKey: "agent:alice:discord:group:room1",
+      messageProvider: "discord",
+      groupId: "room1",
+      warn: () => {},
+    });
+
+    expect(filtered.map((tool) => tool.name)).toEqual(["mcp__bundle__exec", "mcp__bundle__read"]);
+  });
+
   it("returns the empty array unchanged when there are no bundled tools", () => {
     const filtered = applyFinalEffectiveToolPolicy({
       bundledTools: [],

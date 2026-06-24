@@ -1597,6 +1597,7 @@ export async function runEmbeddedAttempt(
       config: params.config,
       sandboxToolPolicy: sandbox?.tools,
       sessionKey: sandboxSessionKey,
+      trigger: params.trigger,
       agentId: sessionAgentId,
       modelProvider: params.provider,
       modelId: params.modelId,
