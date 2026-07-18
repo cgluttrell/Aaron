@@ -177,7 +177,7 @@ Optional variables accepted by `scripts/docker/setup.sh` (and, for the gateway c
 | `OTEL_SEMCONV_STABILITY_OPT_IN`                 | Opt in to latest experimental GenAI semantic attributes                                                           |
 | `OPENCLAW_OTEL_PRELOADED`                       | Skip starting a second OpenTelemetry SDK when one is preloaded                                                    |
 
-The official image ships no Homebrew. During onboarding, OpenClaw hides brew-only skill dependency installers in a Linux container without `brew`; provide those dependencies through a custom image or install manually. Use `OPENCLAW_IMAGE_APT_PACKAGES` for Debian-packaged dependencies and `OPENCLAW_IMAGE_PIP_PACKAGES` for Python dependencies (runs `python3 -m pip install --break-system-packages` at build time, so pin versions and use only indexes you trust).
+The official image ships `jq` for JSON-heavy operational scripts, but no Homebrew. During onboarding, OpenClaw hides brew-only skill dependency installers in a Linux container without `brew`; provide those dependencies through a custom image or install manually. Use `OPENCLAW_IMAGE_APT_PACKAGES` for extra Debian-packaged dependencies and `OPENCLAW_IMAGE_PIP_PACKAGES` for Python dependencies (runs `python3 -m pip install --break-system-packages` at build time, so pin versions and use only indexes you trust).
 
 If Docker reports `ResourceExhausted`, `cannot allocate memory`, or aborts during `tsdown`, increase the Docker builder memory limit or retry with smaller explicit heaps:
 
@@ -510,7 +510,7 @@ If you installed from the older `scripts/shell-helpers/clawdock-helpers.sh` path
     The default image is security-first and runs as non-root `node`. For a more full-featured container:
 
     1. **Persist `/home/node`**: `export OPENCLAW_HOME_VOLUME="openclaw_home"`
-    2. **Bake system deps**: `export OPENCLAW_IMAGE_APT_PACKAGES="git curl jq"`
+    2. **Bake system deps**: `export OPENCLAW_IMAGE_APT_PACKAGES="ffmpeg unzip"`
     3. **Bake Python deps**: `export OPENCLAW_IMAGE_PIP_PACKAGES="requests==2.32.5 humanize==4.14.0"`
     4. **Bake Playwright Chromium**: `export OPENCLAW_INSTALL_BROWSER=1`, or use the official `-browser` image tag
     5. **Or install Playwright browsers into a persisted volume**:
