@@ -230,6 +230,18 @@ const DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK: Partial<Record<PluginHookName, 
   // The runner is fail-open for this hook name, so a timed-out handler is
   // logged and the run proceeds without its modifications.
   before_agent_start: 15_000,
+  // Defensive default after a production hang: a memory-core dreaming pass
+  // triggered from this hook awaited an internal narrative-generation lock
+  // with no bound of its own, and this hook itself had no default timeout,
+  // so a wedged lock froze the entire interactive turn indefinitely (the
+  // turn never logged another line and the session never replied). The
+  // claiming-hook runner shares this modifying-hook timeout map (see
+  // getClaimingHookTimeoutMs), so seeding a default here bounds any future
+  // handler the same way. Budget is set above the internal narrative
+  // generation bound (NARRATIVE_TIMEOUT_MS = 60s in memory-core) so
+  // legitimate dreaming work is not cut off; the runner is fail-open, so a
+  // timed-out handler is logged and the turn proceeds without it.
+  before_agent_reply: 75_000,
   // Terminal finalization hooks sit on the runner's completion path. A hung
   // handler must not freeze final delivery or keep compaction retry recovery
   // unresolved; timeout fail-opens with the original final answer.
