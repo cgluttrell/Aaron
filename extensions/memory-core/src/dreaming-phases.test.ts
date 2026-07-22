@@ -1837,8 +1837,8 @@ describe("memory-core dreaming phases", () => {
     expect(corpus).not.toContain("Run the qmd sync");
   });
 
-  it("ignores chat scaffolding tags when building rem reflections", () => {
-    const preview = testing.previewRemDreaming({
+  it("ignores chat scaffolding tags when building rem reflections", async () => {
+    const preview = await testing.previewRemDreaming({
       entries: [
         {
           key: "memory:1",
@@ -3312,20 +3312,20 @@ describe("dedupeEntries — CJK-aware snippet similarity (#80613)", () => {
     };
   }
 
-  it("merges similar pure-CJK snippets at the same path (was missed by the ASCII-only tokenizer)", () => {
+  it("merges similar pure-CJK snippets at the same path (was missed by the ASCII-only tokenizer)", async () => {
     // Two close paraphrases of the same Chinese fact. The previous tokenizer
     // produced empty sets for both, falling back to exact-string match and
     // returning similarity 0, so both ended up as separate candidates.
     const a = makeRecall("cjk-a", "教训：配置中实验开关字段是叫做规则");
     const b = makeRecall("cjk-b", "教训：配置里实验开关的字段叫做规则");
 
-    const deduped = testing.dedupeEntries([a, b], 0.5);
+    const deduped = await testing.dedupeEntries([a, b], 0.5);
     expect(deduped).toHaveLength(1);
     // First entry survives; recall counts merge in.
     expect(deduped[0]?.key).toBe("cjk-a");
   });
 
-  it("keeps distinct CJK snippets that only share ASCII tokens (was wrongly merged by the ASCII-only tokenizer)", () => {
+  it("keeps distinct CJK snippets that only share ASCII tokens (was wrongly merged by the ASCII-only tokenizer)", async () => {
     // Both snippets have ASCII tokens {plan, exrule} but talk about wholly
     // different facts in the CJK content. The previous tokenizer only saw
     // those ASCII tokens, returned similarity 1.0, and silently dropped one
@@ -3333,28 +3333,116 @@ describe("dedupeEntries — CJK-aware snippet similarity (#80613)", () => {
     const a = makeRecall("mixed-a", "Plan 实验开关字段叫做 exRule");
     const b = makeRecall("mixed-b", "Plan 整个产品体系彻底重构 exRule");
 
-    const deduped = testing.dedupeEntries([a, b], 0.7);
+    const deduped = await testing.dedupeEntries([a, b], 0.7);
     expect(deduped).toHaveLength(2);
     expect(deduped.map((entry) => entry.key).toSorted()).toStrictEqual(["mixed-a", "mixed-b"]);
   });
 
-  it("preserves the existing ASCII paraphrase dedupe behavior", () => {
+  it("preserves the existing ASCII paraphrase dedupe behavior", async () => {
     // Sanity check: close English paraphrases at the same path still dedupe,
     // so the fix does not regress the Latin-script behavior the prior tests
     // relied on.
     const a = makeRecall("en-a", "Plan config experiment toggle field is named exRule");
     const b = makeRecall("en-b", "Plan configuration uses experiment toggle field named exRule");
 
-    const deduped = testing.dedupeEntries([a, b], 0.4);
+    const deduped = await testing.dedupeEntries([a, b], 0.4);
     expect(deduped).toHaveLength(1);
     expect(deduped[0]?.key).toBe("en-a");
   });
 
-  it("keeps unrelated short snippets separate (does not over-collapse)", () => {
+  it("keeps unrelated short snippets separate (does not over-collapse)", async () => {
     const a = makeRecall("short-a", "weather: sunny");
     const b = makeRecall("short-b", "deploy: blocked");
 
-    const deduped = testing.dedupeEntries([a, b], 0.5);
+    const deduped = await testing.dedupeEntries([a, b], 0.5);
     expect(deduped).toHaveLength(2);
+  });
+});
+
+// Regression coverage for a production incident: dedupeEntries and
+// prioritizeLightEntriesByDiaryCoverage re-tokenized every snippet on every
+// pairwise comparison with no yield point, blocking Node's event loop for
+// 13-70s+ at SHORT_TERM_RECALL_MAX_ENTRIES scale (observed via
+// eventLoopDelayMaxMs in production journald). That starved the Codex
+// session-binding lease heartbeat and the Discord gateway heartbeat ACK,
+// silently killing live interactive turns.
+describe("dedupeEntries / prioritizeLightEntriesByDiaryCoverage — event-loop stall regression", () => {
+  function makeStallRecall(key: string, snippet: string): ShortTermRecallEntry {
+    return {
+      key,
+      path: "memory/2026-07-22.md",
+      startLine: 1,
+      endLine: 5,
+      source: "memory",
+      snippet,
+      recallCount: 1,
+      dailyCount: 0,
+      groundedCount: 0,
+      totalScore: 1,
+      maxScore: 1,
+      firstRecalledAt: "2026-07-22T08:00:00.000Z",
+      lastRecalledAt: "2026-07-22T08:00:00.000Z",
+      queryHashes: [],
+      recallDays: ["2026-07-22"],
+      conceptTags: [],
+    };
+  }
+
+  function buildWorstCaseEntries(count: number): ShortTermRecallEntry[] {
+    const snippetChars = shortTermTesting.SHORT_TERM_RECALL_MAX_SNIPPET_CHARS;
+    const entries: ShortTermRecallEntry[] = [];
+    for (let i = 0; i < count; i++) {
+      // Even entries pair up as near-duplicates (forces deduped-array growth
+      // plus repeated comparisons); odd entries are long and mutually
+      // distinct so they all survive dedupe and keep the deduped array large
+      // for the rest of the pass.
+      const base = `entry-${Math.floor(i / 2)}-${"lorem ipsum dolor sit amet ".repeat(20)}`;
+      const snippet = (i % 2 === 0 ? base : `${base} trailing variant token`).slice(
+        0,
+        snippetChars,
+      );
+      entries.push(makeStallRecall(`entry-${i}`, snippet));
+    }
+    return entries;
+  }
+
+  it("dedupes SHORT_TERM_RECALL_MAX_ENTRIES worst-case entries well under the observed 70s stall", async () => {
+    const entries = buildWorstCaseEntries(shortTermTesting.SHORT_TERM_RECALL_MAX_ENTRIES);
+    const start = performance.now();
+    const deduped = await testing.dedupeEntries(entries, 0.85);
+    const elapsedMs = performance.now() - start;
+    expect(deduped.length).toBeGreaterThan(0);
+    expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  it("prioritizes diary coverage for a large entry set well under the observed 70s stall", async () => {
+    const entries = buildWorstCaseEntries(shortTermTesting.SHORT_TERM_RECALL_MAX_ENTRIES);
+    const recentDiaryEntries = Array.from(
+      { length: 4 },
+      (_, i) => `diary entry ${i}: ${"lorem ipsum dolor sit amet ".repeat(20)}`,
+    );
+    const start = performance.now();
+    const prioritized = await testing.prioritizeLightEntriesByDiaryCoverage(
+      entries,
+      recentDiaryEntries,
+    );
+    const elapsedMs = performance.now() - start;
+    expect(prioritized).toHaveLength(entries.length);
+    expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  it("yields control back to the event loop periodically during a large dedupe pass", async () => {
+    // All-distinct entries so every one survives into `deduped`, keeping the
+    // outer loop's yield checkpoints reachable for the full pass.
+    const entries = Array.from({ length: 512 }, (_, i) =>
+      makeStallRecall(`distinct-${i}`, `distinct snippet ${i} ${"unique token ".repeat(20)}`),
+    );
+    const setImmediateSpy = vi.spyOn(globalThis, "setImmediate");
+    try {
+      await testing.dedupeEntries(entries, 0.99);
+      expect(setImmediateSpy.mock.calls.length).toBeGreaterThanOrEqual(Math.floor(512 / 64) - 1);
+    } finally {
+      setImmediateSpy.mockRestore();
+    }
   });
 });

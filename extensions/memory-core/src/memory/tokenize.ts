@@ -99,3 +99,36 @@ export function textSimilarity(contentA: string, contentB: string): number {
   }
   return jaccardSimilarity(tokensA, tokensB);
 }
+
+/** Per-pass token cache for {@link textSimilarityCached}, keyed by raw snippet text. */
+export type TokenSimilarityCache = Map<string, Set<string>>;
+
+function getCachedTokens(text: string, cache: TokenSimilarityCache): Set<string> {
+  const cached = cache.get(text);
+  if (cached) {
+    return cached;
+  }
+  const tokens = tokenize(text);
+  cache.set(text, tokens);
+  return tokens;
+}
+
+/**
+ * Same as {@link textSimilarity}, but sources tokens from a shared cache so
+ * repeated comparisons against the same snippet (e.g. an O(n^2) dedupe pass)
+ * tokenize each unique string once instead of on every pairwise comparison.
+ */
+export function textSimilarityCached(
+  contentA: string,
+  contentB: string,
+  cache: TokenSimilarityCache,
+): number {
+  const tokensA = getCachedTokens(contentA, cache);
+  const tokensB = getCachedTokens(contentB, cache);
+  if (tokensA.size === 0 && tokensB.size === 0) {
+    return normalizeLowercaseStringOrEmpty(contentA) === normalizeLowercaseStringOrEmpty(contentB)
+      ? 1
+      : 0;
+  }
+  return jaccardSimilarity(tokensA, tokensB);
+}
