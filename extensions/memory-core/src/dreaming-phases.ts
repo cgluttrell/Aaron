@@ -37,7 +37,7 @@ import {
   readMemoryCoreWorkspaceEntries,
   writeMemoryCoreWorkspaceEntries,
 } from "./dreaming-state.js";
-import { textSimilarity as snippetSimilarity } from "./memory/tokenize.js";
+import { textSimilarityCached, type TokenSimilarityCache } from "./memory/tokenize.js";
 import {
   filterLiveShortTermRecallEntries,
   filterFreshLightDreamingEntries,
@@ -1441,16 +1441,47 @@ function entryAverageScore(entry: ShortTermRecallEntry): number {
   return signalCount > 0 ? Math.max(0, Math.min(1, entry.totalScore / signalCount)) : 0;
 }
 
+// Entries pass through both dedupeEntries and prioritizeLightEntriesByDiaryCoverage
+// per dreaming pass, each doing O(n^2)/O(n*m) pairwise similarity checks over up to
+// SHORT_TERM_RECALL_MAX_ENTRIES snippets. Yielding periodically keeps a single pass
+// from starving the event loop long enough to blow a Codex session-binding lease or
+// the Discord gateway heartbeat (observed as 13-70s+ stalls in production).
+const SIMILARITY_YIELD_EVERY_ENTRIES = 64;
+
+async function yieldIfNeeded(
+  index: number,
+  everyEntries = SIMILARITY_YIELD_EVERY_ENTRIES,
+): Promise<void> {
+  if (index > 0 && index % everyEntries === 0) {
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+  }
+}
+
 // Use the shared CJK-aware similarity helper so close-but-not-identical CJK
 // snippets do not slip past the dedupe threshold via the old ASCII-only path.
-function dedupeEntries(entries: ShortTermRecallEntry[], threshold: number): ShortTermRecallEntry[] {
+// Tokens are cached per unique snippet text (tokenCache) so an O(n^2) pass
+// tokenizes each snippet once instead of on every pairwise comparison.
+async function dedupeEntries(
+  entries: ShortTermRecallEntry[],
+  threshold: number,
+  tokenCache: TokenSimilarityCache = new Map(),
+): Promise<ShortTermRecallEntry[]> {
   const deduped: ShortTermRecallEntry[] = [];
-  for (const entry of entries) {
-    const duplicate = deduped.find(
-      (candidate) =>
+  for (let i = 0; i < entries.length; i++) {
+    await yieldIfNeeded(i);
+    const entry = entries[i];
+    let duplicate: ShortTermRecallEntry | undefined;
+    for (const candidate of deduped) {
+      if (
         candidate.path === entry.path &&
-        snippetSimilarity(candidate.snippet, entry.snippet) >= threshold,
-    );
+        textSimilarityCached(candidate.snippet, entry.snippet, tokenCache) >= threshold
+      ) {
+        duplicate = candidate;
+        break;
+      }
+    }
     if (duplicate) {
       if (entry.recallCount > duplicate.recallCount) {
         duplicate.recallCount = entry.recallCount;
@@ -1480,6 +1511,7 @@ function normalizeDiaryCoverageText(text: string): string {
 function isEntryCoveredByRecentDiary(
   entry: ShortTermRecallEntry,
   recentDiaryEntries: readonly string[],
+  tokenCache: TokenSimilarityCache,
 ): boolean {
   const snippet = normalizeDiaryCoverageText(entry.snippet);
   if (!snippet) {
@@ -1489,22 +1521,26 @@ function isEntryCoveredByRecentDiary(
     const diaryText = normalizeDiaryCoverageText(diaryEntry);
     return (
       diaryText.includes(snippet) ||
-      snippetSimilarity(entry.snippet, diaryEntry) >= LIGHT_DIARY_SNIPPET_SIMILARITY_THRESHOLD
+      textSimilarityCached(entry.snippet, diaryEntry, tokenCache) >=
+        LIGHT_DIARY_SNIPPET_SIMILARITY_THRESHOLD
     );
   });
 }
 
-function prioritizeLightEntriesByDiaryCoverage(
+async function prioritizeLightEntriesByDiaryCoverage(
   entries: ShortTermRecallEntry[],
   recentDiaryEntries: readonly string[],
-): ShortTermRecallEntry[] {
+  tokenCache: TokenSimilarityCache = new Map(),
+): Promise<ShortTermRecallEntry[]> {
   if (recentDiaryEntries.length === 0) {
     return entries;
   }
   const fresh: ShortTermRecallEntry[] = [];
   const covered: ShortTermRecallEntry[] = [];
-  for (const entry of entries) {
-    if (isEntryCoveredByRecentDiary(entry, recentDiaryEntries)) {
+  for (let i = 0; i < entries.length; i++) {
+    await yieldIfNeeded(i);
+    const entry = entries[i];
+    if (isEntryCoveredByRecentDiary(entry, recentDiaryEntries, tokenCache)) {
       covered.push(entry);
     } else {
       fresh.push(entry);
@@ -1560,17 +1596,18 @@ function calculateCandidateTruthConfidence(entry: ShortTermRecallEntry): number 
   );
 }
 
-function selectRemCandidateTruths(
+async function selectRemCandidateTruths(
   entries: ShortTermRecallEntry[],
   limit: number,
-): RemTruthSelection[] {
+): Promise<RemTruthSelection[]> {
   if (limit <= 0) {
     return [];
   }
-  return dedupeEntries(
+  const deduped = await dedupeEntries(
     entries.filter((entry) => !entry.promotedAt),
     0.88,
-  )
+  );
+  return deduped
     .map((entry) => ({
       key: entry.key,
       snippet: entry.snippet || "(no snippet captured)",
@@ -1626,13 +1663,13 @@ function buildRemReflections(
   return lines;
 }
 
-export function previewRemDreaming(params: {
+export async function previewRemDreaming(params: {
   entries: ShortTermRecallEntry[];
   limit: number;
   minPatternStrength: number;
-}): RemDreamingPreview {
+}): Promise<RemDreamingPreview> {
   const reflections = buildRemReflections(params.entries, params.limit, params.minPatternStrength);
-  const candidateSelections = selectRemCandidateTruths(
+  const candidateSelections = await selectRemCandidateTruths(
     params.entries,
     Math.max(1, Math.min(3, params.limit)),
   );
@@ -1701,7 +1738,10 @@ async function runLightDreaming(params: {
       }),
     }),
   });
-  const rankedEntries = dedupeEntries(
+  // Shared across both similarity passes below so tokens computed while
+  // deduping are reused during diary-coverage instead of re-tokenized.
+  const tokenCache: TokenSimilarityCache = new Map();
+  const rankedEntries = await dedupeEntries(
     recentEntries.toSorted((a, b) => {
       const byTime = Date.parse(b.lastRecalledAt) - Date.parse(a.lastRecalledAt);
       if (byTime !== 0) {
@@ -1710,12 +1750,17 @@ async function runLightDreaming(params: {
       return b.recallCount - a.recallCount;
     }),
     params.config.dedupeSimilarity,
+    tokenCache,
   );
   const recentDiaryEntries = await readRecentDreamDiaryEntries({
     workspaceDir: params.workspaceDir,
     limit: LIGHT_DIARY_HISTORY_LIMIT,
   });
-  const entries = prioritizeLightEntriesByDiaryCoverage(rankedEntries, recentDiaryEntries);
+  const entries = await prioritizeLightEntriesByDiaryCoverage(
+    rankedEntries,
+    recentDiaryEntries,
+    tokenCache,
+  );
   const capped = entries.slice(0, params.config.limit);
   const bodyLines = buildLightDreamingBody(capped);
   await writeDailyDreamingPhaseBlock({
@@ -1814,7 +1859,7 @@ async function runRemDreaming(params: {
   const stagedEntries =
     lightKeys.size > 0 ? allEntries.filter((entry) => lightKeys.has(entry.key)) : [];
   const entries = stagedEntries.length > 0 ? stagedEntries : allEntries;
-  const preview = previewRemDreaming({
+  const preview = await previewRemDreaming({
     entries,
     limit: params.config.limit,
     minPatternStrength: params.config.minPatternStrength,
@@ -2024,6 +2069,8 @@ export const testing = {
   readSessionIngestionState,
   // Exposed for the #80613 regression test that exercises CJK-aware dedupe.
   dedupeEntries,
+  // Exposed for the dreaming-pipeline event-loop-stall regression test.
+  prioritizeLightEntriesByDiaryCoverage,
   constants: {
     LIGHT_SLEEP_EVENT_TEXT,
     REM_SLEEP_EVENT_TEXT,

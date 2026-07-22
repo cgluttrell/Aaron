@@ -144,7 +144,7 @@ export async function previewRemHarness(
   const remSkipped = remConfig.limit <= 0 || remPreviewLimit <= 0;
   const rem = remSkipped
     ? createSkippedRemPreview()
-    : previewRemDreaming({
+    : await previewRemDreaming({
         entries: recallEntries,
         limit: remPreviewLimit,
         minPatternStrength: remConfig.minPatternStrength,
