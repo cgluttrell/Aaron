@@ -633,6 +633,7 @@ export function createCodexDynamicToolBridge(params: {
           normalizeRouteToken(
             typeof executedArgs.action === "string" ? executedArgs.action : undefined,
           ) === "reply" &&
+          executedArgs.final !== false &&
           !resultIsError &&
           !blocksSourceReplyTermination &&
           isDeliveredMessagingToolResult({

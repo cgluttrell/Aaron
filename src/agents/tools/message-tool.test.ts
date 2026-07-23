@@ -714,6 +714,9 @@ describe("message tool secret scoping", () => {
     );
     expect(scopedTool.description).toContain("target defaults to the current source conversation");
     expect(scopedTool.description).toContain("Normal final answers stay private");
+    expect(scopedTool.description).toContain(
+      "Sending ends the turn unless you pass final:false for an interim status update",
+    );
     expect(explicitTargetTool.description).toContain("Include target when sending");
     expect(explicitTargetTool.description).not.toContain(
       "target defaults to the current source conversation",
@@ -1435,6 +1438,13 @@ describe("message tool delivery mode schema", () => {
 
     expect(bestEffort?.type).toBe("boolean");
     expect(bestEffort?.description).toContain("required durable delivery");
+  });
+
+  it("exposes a final flag so a send can opt out of ending the turn (T1565)", () => {
+    const tool = createMessageTool();
+    const final = getToolProperties(tool).final as { type?: string } | undefined;
+
+    expect(final?.type).toBe("boolean");
   });
 });
 

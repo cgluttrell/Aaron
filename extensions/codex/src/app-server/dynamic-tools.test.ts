@@ -1262,6 +1262,24 @@ describe("createCodexDynamicToolBridge", () => {
     expect(Object.keys(result)).not.toContain("terminate");
   });
 
+  it("does not end the turn for an interim status update (final:false, T1565)", async () => {
+    const bridge = createBridgeWithToolResult(
+      "message",
+      textToolResult("Checking now...", { messageId: "imessage-6264" }),
+      { sourceReplyDeliveryMode: "message_tool_only" },
+    );
+
+    const result = await handleMessageToolCall(bridge, {
+      action: "send",
+      message: "Checking now...",
+      final: false,
+    });
+
+    expect(result).toEqual(expectInputText("Checking now..."));
+    expect(result.terminate).toBeUndefined();
+    expect(bridge.telemetry.didDeliverSourceReplyViaMessageTool).toBe(false);
+  });
+
   it("keeps message-tool-only source replies terminal when middleware redacts receipt details", async () => {
     const registry = createEmptyPluginRegistry();
     registry.agentToolResultMiddlewares.push({
@@ -1439,6 +1457,37 @@ describe("createCodexDynamicToolBridge", () => {
     expect(result.terminate).toBe(true);
     expect(bridge.telemetry.didDeliverSourceReplyViaMessageTool).toBe(true);
     expect(Object.keys(result)).not.toContain("terminate");
+  });
+
+  it("does not end the turn for a final:false reply, even when the receipt matches the current message id (T1565)", async () => {
+    const bridge = createBridgeWithToolResult(
+      "message",
+      textToolResult("Checking now...", {
+        ok: true,
+        messageId: "provider-message-1",
+        repliedTo: "provider-guid-857",
+      }),
+      {
+        sourceReplyDeliveryMode: "message_tool_only",
+        currentChannelProvider: "imessage",
+        currentChannelId: "imessage:any;-;+12069106512",
+        currentMessageId: "provider-guid-857",
+      },
+    );
+
+    const result = await handleMessageToolCall(bridge, {
+      action: "reply",
+      channel: "imessage",
+      target: "+12069106512",
+      messageId: "857",
+      message: "Checking now...",
+      buttons: [],
+      final: false,
+    });
+
+    expect(result).toEqual(expectInputText("Checking now..."));
+    expect(result.terminate).toBeUndefined();
+    expect(bridge.telemetry.didDeliverSourceReplyViaMessageTool).toBe(false);
   });
 
   it("keeps message-tool-only source replies terminal when a text receipt matches the current message id", async () => {
