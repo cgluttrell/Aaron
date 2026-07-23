@@ -375,4 +375,34 @@ describe("isDeliveredMessageToolOnlySourceReplyResult", () => {
       }),
     ).toBe(false);
   });
+
+  it("does not treat a final:false send as a terminal source reply (T1565: interim status update)", () => {
+    expect(
+      isDeliveredMessageToolOnlySourceReplyResult({
+        sourceReplyDeliveryMode: "message_tool_only",
+        toolName: "message",
+        args: { action: "send", message: "Checking now...", final: false },
+        result: { deliveryStatus: "sent" },
+      }),
+    ).toBe(false);
+  });
+
+  it("still treats an ordinary send as terminal when final is omitted or true", () => {
+    expect(
+      isDeliveredMessageToolOnlySourceReplyResult({
+        sourceReplyDeliveryMode: "message_tool_only",
+        toolName: "message",
+        args: { action: "send", message: "Done." },
+        result: { deliveryStatus: "sent" },
+      }),
+    ).toBe(true);
+    expect(
+      isDeliveredMessageToolOnlySourceReplyResult({
+        sourceReplyDeliveryMode: "message_tool_only",
+        toolName: "message",
+        args: { action: "send", message: "Done.", final: true },
+        result: { deliveryStatus: "sent" },
+      }),
+    ).toBe(true);
+  });
 });
