@@ -3446,3 +3446,87 @@ describe("dedupeEntries / prioritizeLightEntriesByDiaryCoverage — event-loop s
     }
   });
 });
+
+// Regression coverage for a second production incident found while verifying
+// the fix above: collectDailyIngestionBatches parses each daily memory file
+// synchronously (split/strip/chunk) with no yield point. Cached fs reads can
+// resolve on the same microtask turn, so a large batch of daily files stacked
+// into a real ~15s event-loop stall in production (journald
+// eventLoopDelayMaxMs=15510.5), cascading into Discord gateway heartbeat
+// failures — the same class of bug as above, in a sibling function.
+describe("collectDailyIngestionBatches — event-loop stall regression", () => {
+  function buildDailyFileContent(day: string, lineCount: number): string {
+    const lines: string[] = [`## ${day}`];
+    for (let i = 0; i < lineCount; i++) {
+      lines.push(`- entry ${i}: ${"lorem ipsum dolor sit amet ".repeat(10)}`);
+    }
+    return lines.join("\n");
+  }
+
+  it("parses a large batch of daily memory files well under the observed 15s stall", async () => {
+    const workspaceDir = await createTempWorkspace("openclaw-daily-ingestion-stall-");
+    const memoryDir = path.join(workspaceDir, "memory");
+    await fs.mkdir(memoryDir, { recursive: true });
+    const fileCount = 60;
+    const nowMs = Date.parse("2026-07-23T12:00:00.000Z");
+    for (let i = 0; i < fileCount; i++) {
+      const day = new Date(nowMs - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      await fs.writeFile(
+        path.join(memoryDir, `${day}.md`),
+        buildDailyFileContent(day, 500),
+        "utf-8",
+      );
+    }
+
+    const state = await testing.readDailyIngestionState(workspaceDir);
+    const start = performance.now();
+    const collected = await testing.collectDailyIngestionBatches({
+      workspaceDir,
+      lookbackDays: fileCount + 1,
+      limit: 20,
+      nowMs,
+      ingestionDreamingDay: "2026-07-23",
+      state,
+    });
+    const elapsedMs = performance.now() - start;
+    expect(collected.batches.length).toBeGreaterThan(0);
+    expect(elapsedMs).toBeLessThan(2000);
+  });
+
+  it("yields control back to the event loop periodically while parsing many daily files", async () => {
+    const workspaceDir = await createTempWorkspace("openclaw-daily-ingestion-yield-");
+    const memoryDir = path.join(workspaceDir, "memory");
+    await fs.mkdir(memoryDir, { recursive: true });
+    const fileCount = 40;
+    const nowMs = Date.parse("2026-07-23T12:00:00.000Z");
+    for (let i = 0; i < fileCount; i++) {
+      const day = new Date(nowMs - i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      await fs.writeFile(
+        path.join(memoryDir, `${day}.md`),
+        buildDailyFileContent(day, 500),
+        "utf-8",
+      );
+    }
+
+    const state = await testing.readDailyIngestionState(workspaceDir);
+    const setImmediateSpy = vi.spyOn(globalThis, "setImmediate");
+    try {
+      // A generous limit keeps totalCap/perFileCap from tripping the loop's
+      // own early-exit-on-cap so every file is actually visited, reaching
+      // every yield checkpoint below.
+      await testing.collectDailyIngestionBatches({
+        workspaceDir,
+        lookbackDays: fileCount + 1,
+        limit: 1000,
+        nowMs,
+        ingestionDreamingDay: "2026-07-23",
+        state,
+      });
+      expect(setImmediateSpy.mock.calls.length).toBeGreaterThanOrEqual(
+        Math.floor(fileCount / 8) - 1,
+      );
+    } finally {
+      setImmediateSpy.mockRestore();
+    }
+  });
+});
