@@ -1151,6 +1151,8 @@ type DailyIngestionCollectionResult = {
   changed: boolean;
 };
 
+const DAILY_INGESTION_YIELD_EVERY_FILES = 8;
+
 async function collectDailyIngestionBatches(params: {
   workspaceDir: string;
   lookbackDays: number;
@@ -1188,7 +1190,17 @@ async function collectDailyIngestionBatches(params: {
   const totalCap = Math.max(20, params.limit * 4);
   const perFileCap = Math.max(6, Math.ceil(totalCap / Math.max(1, Math.max(files.length, 1))));
   let total = 0;
-  for (const file of files) {
+  for (let fileIndex = 0; fileIndex < files.length; fileIndex += 1) {
+    const file = files[fileIndex];
+    // Cached fs reads can resolve on the same microtask turn, so a plain
+    // `await` between files does not reliably free the event loop. Yield
+    // periodically the same way the sibling session-transcript parser does
+    // (yieldSessionEntryParseIfNeeded, packages/memory-host-sdk/src/host/
+    // session-files.ts) so a large batch of daily memory files (each parsed
+    // synchronously via split/strip/chunk) cannot stack into a multi-second
+    // stall (observed live: eventLoopDelayMax up to 15.5s, cascading into
+    // Discord heartbeat/reconnect failures).
+    await yieldIfNeeded(fileIndex, DAILY_INGESTION_YIELD_EVERY_FILES);
     const relativePath = `memory/${file.fileName}`;
     const filePath = path.join(memoryDir, file.fileName);
     const stat = await fs.stat(filePath).catch((err: unknown) => {
@@ -2071,6 +2083,7 @@ export const testing = {
   dedupeEntries,
   // Exposed for the dreaming-pipeline event-loop-stall regression test.
   prioritizeLightEntriesByDiaryCoverage,
+  collectDailyIngestionBatches,
   constants: {
     LIGHT_SLEEP_EVENT_TEXT,
     REM_SLEEP_EVENT_TEXT,
