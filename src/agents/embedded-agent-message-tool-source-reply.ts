@@ -566,5 +566,14 @@ export function isDeliveredMessageToolOnlySourceReplyResult(params: {
   if (hasExplicitMessageRoute(args) && params.allowExplicitSourceRoute !== true) {
     return false;
   }
+  // The agent can send an interim status update via message(action=send,
+  // final=false) and keep working in the same turn. Without this escape
+  // hatch, message_tool_only mode treated every delivered send as the
+  // complete reply and force-ended the turn immediately after it, so an
+  // agent that said "checking now..." never got to actually do the check
+  // (issue: T1565).
+  if (args.final === false) {
+    return false;
+  }
   return isDeliveredMessagingToolResult(params);
 }
