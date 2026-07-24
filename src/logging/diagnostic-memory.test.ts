@@ -202,6 +202,97 @@ describe("diagnostic memory", () => {
     });
   });
 
+  it("emits pressure when service cgroup memory crosses a threshold", () => {
+    const events: DiagnosticEventPayload[] = [];
+    const stop = onDiagnosticEvent((event) => events.push(event));
+
+    emitDiagnosticMemorySample({
+      now: 1000,
+      uptimeMs: 0,
+      memoryUsage: memoryUsage({ rss: 500 }),
+      cgroupMemoryUsage: { currentBytes: 5000, maxBytes: 8000 },
+      thresholds: {
+        rssWarningBytes: 10_000,
+        heapUsedWarningBytes: 10_000,
+        cgroupMemoryWarningBytes: 4000,
+        cgroupMemoryCriticalBytes: 7000,
+        pressureRepeatMs: 60_000,
+      },
+    });
+    stop();
+
+    expect(events.at(-1)).toEqual({
+      seq: 2,
+      ts: 1_776_859_200_000,
+      trace: undefined,
+      type: "diagnostic.memory.pressure",
+      level: "warning",
+      reason: "cgroup_memory_threshold",
+      thresholdBytes: 4000,
+      cgroupMemoryBytes: 5000,
+      cgroupMemoryMaxBytes: 8000,
+      memory: {
+        arrayBuffersBytes: 5,
+        externalBytes: 10,
+        heapTotalBytes: 80,
+        heapUsedBytes: 40,
+        rssBytes: 500,
+      },
+    });
+  });
+
+  it("emits pressure when service cgroup memory grows quickly", () => {
+    const events: DiagnosticEventPayload[] = [];
+    const stop = onDiagnosticEvent((event) => events.push(event));
+
+    emitDiagnosticMemorySample({
+      now: 1000,
+      memoryUsage: memoryUsage({ rss: 500 }),
+      cgroupMemoryUsage: { currentBytes: 1000, maxBytes: "max" },
+      thresholds: {
+        rssWarningBytes: 10_000,
+        heapUsedWarningBytes: 10_000,
+        cgroupMemoryWarningBytes: 10_000,
+        cgroupMemoryGrowthWarningBytes: 700,
+        growthWindowMs: 10_000,
+      },
+    });
+    emitDiagnosticMemorySample({
+      now: 2000,
+      memoryUsage: memoryUsage({ rss: 600 }),
+      cgroupMemoryUsage: { currentBytes: 1900, maxBytes: "max" },
+      thresholds: {
+        rssWarningBytes: 10_000,
+        heapUsedWarningBytes: 10_000,
+        cgroupMemoryWarningBytes: 10_000,
+        cgroupMemoryGrowthWarningBytes: 700,
+        growthWindowMs: 10_000,
+      },
+    });
+    stop();
+
+    expect(events.at(-1)).toEqual({
+      seq: 3,
+      ts: 1_776_859_200_000,
+      trace: undefined,
+      type: "diagnostic.memory.pressure",
+      level: "warning",
+      reason: "cgroup_memory_growth",
+      thresholdBytes: 700,
+      cgroupMemoryBytes: 1900,
+      cgroupMemoryGrowthBytes: 900,
+      cgroupMemoryMaxBytes: "max",
+      windowMs: 1000,
+      memory: {
+        arrayBuffersBytes: 5,
+        externalBytes: 10,
+        heapTotalBytes: 80,
+        heapUsedBytes: 40,
+        rssBytes: 600,
+      },
+    });
+  });
+
   it("throttles repeated pressure events by reason and level", () => {
     const events: DiagnosticEventPayload[] = [];
     const stop = onDiagnosticEvent((event) => events.push(event));
