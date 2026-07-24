@@ -1,4 +1,6 @@
-// Diagnostic memory helpers capture process memory facts for support diagnostics.
+// Diagnostic memory helpers capture process and service-cgroup memory facts for support diagnostics.
+import fs from "node:fs";
+import path from "node:path";
 import {
   emitInternalDiagnosticEvent as emitDiagnosticEvent,
   type DiagnosticMemoryPressureEvent,
@@ -15,6 +17,10 @@ const DEFAULT_HEAP_WARNING_BYTES = 1024 * MB;
 const DEFAULT_HEAP_CRITICAL_BYTES = 2048 * MB;
 const DEFAULT_RSS_GROWTH_WARNING_BYTES = 512 * MB;
 const DEFAULT_RSS_GROWTH_CRITICAL_BYTES = 1024 * MB;
+const DEFAULT_CGROUP_MEMORY_WARNING_BYTES = 4096 * MB;
+const DEFAULT_CGROUP_MEMORY_CRITICAL_BYTES = 6144 * MB;
+const DEFAULT_CGROUP_MEMORY_GROWTH_WARNING_BYTES = 1024 * MB;
+const DEFAULT_CGROUP_MEMORY_GROWTH_CRITICAL_BYTES = 2048 * MB;
 const DEFAULT_GROWTH_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_PRESSURE_REPEAT_MS = 5 * 60 * 1000;
 const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
@@ -28,13 +34,23 @@ type DiagnosticMemoryThresholds = {
   heapUsedCriticalBytes?: number;
   rssGrowthWarningBytes?: number;
   rssGrowthCriticalBytes?: number;
+  cgroupMemoryWarningBytes?: number;
+  cgroupMemoryCriticalBytes?: number;
+  cgroupMemoryGrowthWarningBytes?: number;
+  cgroupMemoryGrowthCriticalBytes?: number;
   growthWindowMs?: number;
   pressureRepeatMs?: number;
+};
+
+type DiagnosticCgroupMemoryUsage = {
+  currentBytes: number;
+  maxBytes?: number | "max";
 };
 
 type DiagnosticMemorySample = {
   ts: number;
   memory: DiagnosticMemoryUsage;
+  cgroupMemory?: DiagnosticCgroupMemoryUsage;
 };
 
 type DiagnosticMemoryState = {
@@ -68,6 +84,14 @@ function resolveThresholds(
     heapUsedCriticalBytes: thresholds?.heapUsedCriticalBytes ?? DEFAULT_HEAP_CRITICAL_BYTES,
     rssGrowthWarningBytes: thresholds?.rssGrowthWarningBytes ?? DEFAULT_RSS_GROWTH_WARNING_BYTES,
     rssGrowthCriticalBytes: thresholds?.rssGrowthCriticalBytes ?? DEFAULT_RSS_GROWTH_CRITICAL_BYTES,
+    cgroupMemoryWarningBytes:
+      thresholds?.cgroupMemoryWarningBytes ?? DEFAULT_CGROUP_MEMORY_WARNING_BYTES,
+    cgroupMemoryCriticalBytes:
+      thresholds?.cgroupMemoryCriticalBytes ?? DEFAULT_CGROUP_MEMORY_CRITICAL_BYTES,
+    cgroupMemoryGrowthWarningBytes:
+      thresholds?.cgroupMemoryGrowthWarningBytes ?? DEFAULT_CGROUP_MEMORY_GROWTH_WARNING_BYTES,
+    cgroupMemoryGrowthCriticalBytes:
+      thresholds?.cgroupMemoryGrowthCriticalBytes ?? DEFAULT_CGROUP_MEMORY_GROWTH_CRITICAL_BYTES,
     growthWindowMs: thresholds?.growthWindowMs ?? DEFAULT_GROWTH_WINDOW_MS,
     pressureRepeatMs: thresholds?.pressureRepeatMs ?? DEFAULT_PRESSURE_REPEAT_MS,
   };
@@ -113,6 +137,38 @@ function pickThresholdPressure(params: {
   return null;
 }
 
+function pickCgroupThresholdPressure(params: {
+  memory: DiagnosticMemoryUsage;
+  cgroupMemory: DiagnosticCgroupMemoryUsage | undefined;
+  thresholds: Required<DiagnosticMemoryThresholds>;
+}): Omit<DiagnosticMemoryPressureEvent, "seq" | "ts" | "type"> | null {
+  const { memory, cgroupMemory, thresholds } = params;
+  if (!cgroupMemory) {
+    return null;
+  }
+  if (cgroupMemory.currentBytes >= thresholds.cgroupMemoryCriticalBytes) {
+    return {
+      level: "critical",
+      reason: "cgroup_memory_threshold",
+      memory,
+      thresholdBytes: thresholds.cgroupMemoryCriticalBytes,
+      cgroupMemoryBytes: cgroupMemory.currentBytes,
+      cgroupMemoryMaxBytes: cgroupMemory.maxBytes,
+    };
+  }
+  if (cgroupMemory.currentBytes >= thresholds.cgroupMemoryWarningBytes) {
+    return {
+      level: "warning",
+      reason: "cgroup_memory_threshold",
+      memory,
+      thresholdBytes: thresholds.cgroupMemoryWarningBytes,
+      cgroupMemoryBytes: cgroupMemory.currentBytes,
+      cgroupMemoryMaxBytes: cgroupMemory.maxBytes,
+    };
+  }
+  return null;
+}
+
 function pickGrowthPressure(params: {
   previous: DiagnosticMemorySample | null;
   current: DiagnosticMemorySample;
@@ -144,6 +200,48 @@ function pickGrowthPressure(params: {
       memory: current.memory,
       thresholdBytes: thresholds.rssGrowthWarningBytes,
       rssGrowthBytes,
+      windowMs,
+    };
+  }
+  return null;
+}
+
+function pickCgroupGrowthPressure(params: {
+  previous: DiagnosticMemorySample | null;
+  current: DiagnosticMemorySample;
+  thresholds: Required<DiagnosticMemoryThresholds>;
+}): Omit<DiagnosticMemoryPressureEvent, "seq" | "ts" | "type"> | null {
+  const { previous, current, thresholds } = params;
+  if (!previous?.cgroupMemory || !current.cgroupMemory) {
+    return null;
+  }
+  const windowMs = current.ts - previous.ts;
+  if (windowMs <= 0 || windowMs > thresholds.growthWindowMs) {
+    return null;
+  }
+  const cgroupMemoryGrowthBytes =
+    current.cgroupMemory.currentBytes - previous.cgroupMemory.currentBytes;
+  if (cgroupMemoryGrowthBytes >= thresholds.cgroupMemoryGrowthCriticalBytes) {
+    return {
+      level: "critical",
+      reason: "cgroup_memory_growth",
+      memory: current.memory,
+      thresholdBytes: thresholds.cgroupMemoryGrowthCriticalBytes,
+      cgroupMemoryBytes: current.cgroupMemory.currentBytes,
+      cgroupMemoryGrowthBytes,
+      cgroupMemoryMaxBytes: current.cgroupMemory.maxBytes,
+      windowMs,
+    };
+  }
+  if (cgroupMemoryGrowthBytes >= thresholds.cgroupMemoryGrowthWarningBytes) {
+    return {
+      level: "warning",
+      reason: "cgroup_memory_growth",
+      memory: current.memory,
+      thresholdBytes: thresholds.cgroupMemoryGrowthWarningBytes,
+      cgroupMemoryBytes: current.cgroupMemory.currentBytes,
+      cgroupMemoryGrowthBytes,
+      cgroupMemoryMaxBytes: current.cgroupMemory.maxBytes,
       windowMs,
     };
   }
@@ -197,12 +295,20 @@ function formatPressureRatio(params: {
   if (!Number.isFinite(thresholdBytes) || thresholdBytes <= 0) {
     return undefined;
   }
-  const value =
-    pressure.reason === "heap_threshold"
-      ? pressure.memory.heapUsedBytes
-      : pressure.reason === "rss_growth"
-        ? pressure.rssGrowthBytes
-        : pressure.memory.rssBytes;
+  const value = (() => {
+    switch (pressure.reason) {
+      case "heap_threshold":
+        return pressure.memory.heapUsedBytes;
+      case "rss_growth":
+        return pressure.rssGrowthBytes;
+      case "cgroup_memory_threshold":
+        return pressure.cgroupMemoryBytes;
+      case "cgroup_memory_growth":
+        return pressure.cgroupMemoryGrowthBytes;
+      case "rss_threshold":
+        return pressure.memory.rssBytes;
+    }
+  })();
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return undefined;
   }
@@ -216,6 +322,16 @@ function formatPressureSummary(
   const parts = [
     `rss=${formatReadableBytes(pressure.memory.rssBytes)}`,
     `heap=${formatReadableBytes(pressure.memory.heapUsedBytes)}`,
+    pressure.cgroupMemoryBytes !== undefined
+      ? `cgroup=${formatReadableBytes(pressure.cgroupMemoryBytes)}`
+      : "",
+    pressure.cgroupMemoryMaxBytes !== undefined
+      ? `cgroupMax=${
+          pressure.cgroupMemoryMaxBytes === "max"
+            ? "max"
+            : formatReadableBytes(pressure.cgroupMemoryMaxBytes)
+        }`
+      : "",
     pressure.thresholdBytes !== undefined
       ? `threshold=${formatReadableBytes(pressure.thresholdBytes)}`
       : "",
@@ -227,6 +343,9 @@ function formatPressureSummary(
       : "",
     pressure.rssGrowthBytes !== undefined
       ? `rssGrowth=${formatReadableBytes(pressure.rssGrowthBytes)}`
+      : "",
+    pressure.cgroupMemoryGrowthBytes !== undefined
+      ? `cgroupGrowth=${formatReadableBytes(pressure.cgroupMemoryGrowthBytes)}`
       : "",
   ];
   return parts.filter((part): part is string => Boolean(part)).join(" ");
@@ -252,6 +371,8 @@ function logMemoryPressure(params: {
     ` heapUsedBytes=${pressure.memory.heapUsedBytes}` +
     formatOptionalPressureMetric("thresholdBytes", pressure.thresholdBytes) +
     formatOptionalPressureMetric("rssGrowthBytes", pressure.rssGrowthBytes) +
+    formatOptionalPressureMetric("cgroupMemoryBytes", pressure.cgroupMemoryBytes) +
+    formatOptionalPressureMetric("cgroupMemoryGrowthBytes", pressure.cgroupMemoryGrowthBytes) +
     formatOptionalPressureMetric("windowMs", pressure.windowMs) +
     (pressure.level === "critical"
       ? ` memoryPressureSnapshot=${params.writeCriticalBundle ? "enabled" : "disabled"}`
@@ -260,9 +381,61 @@ function logMemoryPressure(params: {
   log.warn(message);
 }
 
+function parseStrictNonNegativeInteger(raw: string): number | undefined {
+  if (!/^(?:0|[1-9]\d*)$/u.test(raw.trim())) {
+    return undefined;
+  }
+  const value = Number(raw.trim());
+  return Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function readCgroupMemoryValue(file: string): number | "max" | undefined {
+  try {
+    const raw = fs.readFileSync(file, "utf8").trim();
+    return raw === "max" ? "max" : parseStrictNonNegativeInteger(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveCgroupV2MemoryDir(): string | undefined {
+  if (process.platform !== "linux") {
+    return undefined;
+  }
+  try {
+    const line = fs
+      .readFileSync("/proc/self/cgroup", "utf8")
+      .split(/\r?\n/u)
+      .find((entry) => entry.startsWith("0::"));
+    if (!line) {
+      return undefined;
+    }
+    return path.join("/sys/fs/cgroup", line.slice("0::".length).trim().replace(/^\/+/u, ""));
+  } catch {
+    return undefined;
+  }
+}
+
+function collectCgroupMemoryUsage(): DiagnosticCgroupMemoryUsage | undefined {
+  const dir = resolveCgroupV2MemoryDir();
+  if (!dir) {
+    return undefined;
+  }
+  const current = readCgroupMemoryValue(path.join(dir, "memory.current"));
+  if (typeof current !== "number") {
+    return undefined;
+  }
+  const max = readCgroupMemoryValue(path.join(dir, "memory.max"));
+  return {
+    currentBytes: current,
+    ...(max !== undefined ? { maxBytes: max } : {}),
+  };
+}
+
 export function emitDiagnosticMemorySample(options?: {
   now?: number;
   memoryUsage?: NodeJS.MemoryUsage;
+  cgroupMemoryUsage?: DiagnosticCgroupMemoryUsage;
   uptimeMs?: number;
   thresholds?: DiagnosticMemoryThresholds;
   emitSample?: boolean;
@@ -273,7 +446,9 @@ export function emitDiagnosticMemorySample(options?: {
 }): DiagnosticMemoryUsage {
   const now = options?.now ?? Date.now();
   const memory = normalizeMemoryUsage(options?.memoryUsage ?? process.memoryUsage());
-  const current = { ts: now, memory };
+  const cgroupMemory =
+    options?.cgroupMemoryUsage ?? (options?.memoryUsage ? undefined : collectCgroupMemoryUsage());
+  const current = { ts: now, memory, cgroupMemory };
   const thresholds = resolveThresholds(options?.thresholds);
   const shouldEmitSample = options?.emitSample !== false;
 
@@ -286,7 +461,9 @@ export function emitDiagnosticMemorySample(options?: {
   }
 
   const pressure =
+    pickCgroupThresholdPressure({ memory, cgroupMemory, thresholds }) ??
     pickThresholdPressure({ memory, thresholds }) ??
+    pickCgroupGrowthPressure({ previous: state.lastSample, current, thresholds }) ??
     pickGrowthPressure({ previous: state.lastSample, current, thresholds });
   state.lastSample = current;
   if (pressure && shouldEmitPressure(pressure, now, thresholds.pressureRepeatMs)) {

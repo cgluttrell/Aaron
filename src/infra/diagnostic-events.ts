@@ -687,10 +687,18 @@ export type DiagnosticMemorySampleEvent = DiagnosticBaseEvent & {
 export type DiagnosticMemoryPressureEvent = DiagnosticBaseEvent & {
   type: "diagnostic.memory.pressure";
   level: "warning" | "critical";
-  reason: "rss_threshold" | "heap_threshold" | "rss_growth";
+  reason:
+    | "rss_threshold"
+    | "heap_threshold"
+    | "rss_growth"
+    | "cgroup_memory_threshold"
+    | "cgroup_memory_growth";
   memory: DiagnosticMemoryUsage;
   thresholdBytes?: number;
   rssGrowthBytes?: number;
+  cgroupMemoryBytes?: number;
+  cgroupMemoryGrowthBytes?: number;
+  cgroupMemoryMaxBytes?: number | "max";
   windowMs?: number;
 };
 
