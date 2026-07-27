@@ -19,6 +19,13 @@ const INTERNAL_TRACE_LINE_RE =
   /^(?:>\s*)?(?:⚠️\s*)?(?:📊|🛠️|📖|📝|🔍|🔎|⚙️)\s*(?:Session Status|Exec|Read|Edit|Write|Patch|Search|Open|Click|Find|Screenshot|Update Plan|Tool Call|Tool Result|Function Call|Shell|Command)\s*:/i;
 const INTERNAL_COMPACT_FAILURE_TRACE_LINE_RE =
   /^(?:>\s*)?⚠️\s*🛠️\s+\S[\s\S]*\s+\(agent\)`{0,2}\s+failed(?:\s*:.*)?\s*$/i;
+// Sibling of the line above for the other emitted word order, where the tool
+// name and "failed:" lead and the "(agent)" suffix closes the line, e.g.
+// "⚠️ 🛠️ Bash failed: `run python3 inline script (heredoc)` (agent)". The
+// leading-"failed" shape is not matched by the trailing-"failed" pattern, so
+// these traces reached channels once visible replies became automatic.
+const INTERNAL_COMPACT_FAILURE_PREFIX_TRACE_LINE_RE =
+  /^(?:>\s*)?⚠️\s*🛠️\s+\S[^\n]*\bfailed\s*:[^\n]*\(agent\)`{0,2}\s*$/i;
 const INTERNAL_COMPACT_COMMAND_TRACE_LINE_RE =
   /^(?:>\s*)?🛠️\s*(?:(?:(?:elevated|pty)\b\s*(?:·|,)\s*)+)?(?:`{1,2}\s*\S|(?:run|check|fetch|pull|push|view|show|list|switch|create|merge|rebase|stage|restore|reset|stash|search|find|print|copy|move|remove|install|start|cd|git|pnpm|npm|yarn|bun|node|python|python3|bash|sh)\b)/i;
 const INTERNAL_CHANNEL_TRACE_LINE_RE =
@@ -932,6 +939,7 @@ export function stripAssistantInternalTraceLines(text: string): string {
       !isInsideCode(lineStart, codeRegions) &&
       (INTERNAL_TRACE_LINE_RE.test(trimmed) ||
         INTERNAL_COMPACT_FAILURE_TRACE_LINE_RE.test(trimmed) ||
+        INTERNAL_COMPACT_FAILURE_PREFIX_TRACE_LINE_RE.test(trimmed) ||
         INTERNAL_COMPACT_COMMAND_TRACE_LINE_RE.test(trimmed) ||
         INTERNAL_CHANNEL_TRACE_LINE_RE.test(trimmed));
     if (!shouldStrip) {
