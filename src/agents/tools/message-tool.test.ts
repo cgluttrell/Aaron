@@ -714,9 +714,10 @@ describe("message tool secret scoping", () => {
     );
     expect(scopedTool.description).toContain("target defaults to the current source conversation");
     expect(scopedTool.description).toContain("Normal final answers stay private");
-    expect(scopedTool.description).toContain(
-      "Sending ends the turn unless you pass final:false for an interim status update",
-    );
+    // The `final` flag stays unadvertised until the omitted-final safety net
+    // lands: an agent told to use it could send progress, keep working, and
+    // then finish without ever delivering a closing visible reply.
+    expect(scopedTool.description).not.toContain("final:false");
     expect(explicitTargetTool.description).toContain("Include target when sending");
     expect(explicitTargetTool.description).not.toContain(
       "target defaults to the current source conversation",
@@ -1440,11 +1441,18 @@ describe("message tool delivery mode schema", () => {
     expect(bestEffort?.description).toContain("required durable delivery");
   });
 
-  it("exposes a final flag so a send can opt out of ending the turn (T1565)", () => {
+  it("keeps the final flag available but unadvertised to the model (T1565)", () => {
+    // Runtime support stays so the omitted-final safety net can build on it,
+    // but the schema must not describe it: an agent that sent progress with
+    // final:false could complete its work and never deliver a closing reply,
+    // which is exactly the silent-closeout regression observed in production.
     const tool = createMessageTool();
-    const final = getToolProperties(tool).final as { type?: string } | undefined;
+    const final = getToolProperties(tool).final as
+      | { type?: string; description?: string }
+      | undefined;
 
     expect(final?.type).toBe("boolean");
+    expect(final?.description).toBeUndefined();
   });
 });
 

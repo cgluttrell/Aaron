@@ -500,12 +500,13 @@ function buildSendSchema(options: {
 }) {
   const props: Record<string, TSchema> = {
     message: Type.Optional(Type.String()),
-    final: Type.Optional(
-      Type.Boolean({
-        description:
-          "For action=send: set false to send an interim status update and keep working in the same turn (more tool calls, then a later send with the actual result). Omit or set true when this send is the complete answer.",
-      }),
-    ),
+    // Reserved, deliberately undocumented to the model. `final:false` suppresses
+    // source-reply turn termination, but nothing yet guarantees a closing visible
+    // send when the turn later completes, so an agent that used it could finish
+    // its work and deliver nothing (observed in production). Runtime support is
+    // kept so the omitted-final safety net can land before this is advertised
+    // again; until then no prompt or description invites its use.
+    final: Type.Optional(Type.Boolean()),
     effectId: Type.Optional(
       Type.String({
         description: "Effect id/name for sendWithEffect.",
@@ -1189,7 +1190,7 @@ function appendMessageToolVisibleReplyHint(
   const targetGuidance = requireExplicitTarget
     ? "Include target when sending."
     : "target defaults to the current source conversation; omit unless sending elsewhere.";
-  return `${description} This turn: use action="send" with message for visible replies to the current source conversation. ${targetGuidance} Normal final answers stay private. Sending ends the turn unless you pass final:false for an interim status update.`;
+  return `${description} This turn: use action="send" with message for visible replies to the current source conversation. ${targetGuidance} Normal final answers stay private.`;
 }
 
 function appendMessageToolReadHint(
