@@ -907,6 +907,45 @@ describe("sanitizeAssistantVisibleText", () => {
     expect(sanitizeAssistantVisibleText(input)).toBe("Visible intro.\nVisible outro.");
   });
 
+  it("strips leading-failed tool trace lines that close with the (agent) suffix", () => {
+    // Both lines are verbatim from a live Discord channel. This word order
+    // ("<tool> failed: ... (agent)") is not matched by the trailing-"failed"
+    // pattern, so these leaked once visibleReplies became automatic.
+    const input = [
+      "Visible intro.",
+      "⚠️ 🛠️ Bash failed: `run python3 inline script (heredoc)` (agent)",
+      "⚠️ 🛠️ Bash failed: fetch http://localhost:4000/api/tasks -> run jq (agent)",
+      "Visible outro.",
+    ].join("\n");
+
+    expect(sanitizeAssistantVisibleText(input)).toBe("Visible intro.\nVisible outro.");
+  });
+
+  it("keeps ordinary prose that merely mentions a failure or an agent", () => {
+    // Guards the leading-failed pattern against over-stripping: each line is
+    // missing at least one required marker (emoji pair, "failed:", or the
+    // trailing "(agent)" suffix), so all must survive.
+    const input = [
+      "The build failed: I will retry it now.",
+      "Bash failed: check the logs (agent) is not what I mean here",
+      "⚠️ Bash failed: no tool emoji so this is prose (agent)",
+      "I asked the (agent) to run jq and it failed.",
+    ].join("\n");
+
+    expect(sanitizeAssistantVisibleText(input)).toBe(input);
+  });
+
+  it("preserves leading-failed tool traces inside fenced code", () => {
+    const input = [
+      "Example of the noise:",
+      "```",
+      "⚠️ 🛠️ Bash failed: `run python3 inline script (heredoc)` (agent)",
+      "```",
+    ].join("\n");
+
+    expect(sanitizeAssistantVisibleText(input)).toBe(input);
+  });
+
   it("preserves internal tool trace examples inside fenced code", () => {
     const input = [
       "Example:",
