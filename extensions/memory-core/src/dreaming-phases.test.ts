@@ -3530,3 +3530,97 @@ describe("collectDailyIngestionBatches — event-loop stall regression", () => {
     }
   });
 });
+
+describe("session transcript ingestion event-loop stalls", () => {
+  it("yields while scanning transcript lines that never reach the ingest caps", async () => {
+    const workspaceDir = await createDreamingWorkspace();
+    setDreamingTestEnv(path.join(workspaceDir, ".state"));
+    try {
+      const sessionsDir = resolveSessionTranscriptsDirForAgent("main");
+      await fs.mkdir(sessionsDir, { recursive: true });
+
+      // Few JSONL records but many content lines. buildSessionEntry wraps text at
+      // 800 chars into separate content lines, and its own parse yield fires per
+      // JSONL record every 250 (session-files.ts) -- so staying well under 250
+      // records keeps the parser's setImmediate count at zero and leaves the scan
+      // loop as the only possible source of the yields asserted below.
+      const messageCount = 20;
+      const wrapsPerMessage = 100;
+      const messageChars = 800 * wrapsPerMessage;
+      const rows = [
+        JSON.stringify({
+          type: "session",
+          id: "yield-probe",
+          timestamp: "2026-01-02T11:00:00.000Z",
+        }),
+      ];
+      for (let i = 0; i < messageCount; i += 1) {
+        rows.push(
+          JSON.stringify({
+            type: "message",
+            message: {
+              role: "user",
+              // Dated far outside the lookback window, so every content line is
+              // dropped by the day filter without incrementing the per-file or
+              // per-sweep caps. That is the production shape: the caps bound
+              // accepted messages, not scanned lines, so a large transcript is
+              // walked end to end and used to run unyielded.
+              timestamp: "2026-01-02T11:30:00.000Z",
+              content: [{ type: "text", text: "y".repeat(messageChars) }],
+            },
+          }),
+        );
+      }
+      await fs.writeFile(
+        path.join(sessionsDir, "yield-probe.jsonl"),
+        `${rows.join("\n")}\n`,
+        "utf-8",
+      );
+
+      const cfg = {
+        agents: {
+          defaults: { workspace: workspaceDir },
+          list: [{ id: "main", workspace: workspaceDir }],
+        },
+        plugins: {
+          entries: {
+            "memory-core": {
+              config: {
+                dreaming: {
+                  enabled: true,
+                  timezone: "UTC",
+                  phases: { light: { enabled: true, limit: 20, lookbackDays: 2 } },
+                },
+              },
+            },
+          },
+        },
+      };
+
+      const state = await testing.readSessionIngestionState(workspaceDir);
+      const setImmediateSpy = vi.spyOn(globalThis, "setImmediate");
+      try {
+        const collected = await testing.collectSessionIngestionBatches({
+          workspaceDir,
+          cfg,
+          primaryWorkspaceDir: workspaceDir,
+          lookbackDays: 2,
+          nowMs: Date.parse("2026-07-23T12:00:00.000Z"),
+          timezone: "UTC",
+          state,
+        });
+        // Nothing ingested: proves the caps never fired and the loop really did
+        // scan the whole transcript, so the yield count below is meaningful.
+        expect(collected.batches).toHaveLength(0);
+        const contentLines = messageCount * wrapsPerMessage;
+        expect(setImmediateSpy.mock.calls.length).toBeGreaterThanOrEqual(
+          Math.floor(contentLines / 512) - 1,
+        );
+      } finally {
+        setImmediateSpy.mockRestore();
+      }
+    } finally {
+      restoreDreamingTestEnv();
+    }
+  });
+});
