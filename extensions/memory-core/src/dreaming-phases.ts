@@ -811,6 +811,16 @@ async function appendSessionCorpusLines(params: {
   });
 }
 
+// This sweep runs inline on the live turn whenever dreaming is heartbeat-triggered
+// (detachNarratives is true only for trigger === "cron", see dreaming.ts), so any
+// unyielded stretch here freezes Discord delivery and the Codex binding-lease
+// renewal. The per-file caps below bound *accepted* messages, not *scanned* lines:
+// a line that is too short, outside the lookback window, or already seen is skipped
+// without touching fileCap, so a large transcript can be walked end to end -- with a
+// normalize/format/hash per line -- without the cap ever firing.
+const SESSION_INGESTION_YIELD_EVERY_FILES = 8;
+const SESSION_INGESTION_YIELD_EVERY_LINES = 512;
+
 async function collectSessionIngestionBatches(params: {
   workspaceDir: string;
   cfg?: DreamingHostConfig;
@@ -885,10 +895,14 @@ async function collectSessionIngestionBatches(params: {
     ),
   );
 
-  for (const file of sortedFiles) {
+  for (let fileIndex = 0; fileIndex < sortedFiles.length; fileIndex += 1) {
     if (remaining <= 0) {
       break;
     }
+    // Cached fs reads can resolve on the same microtask turn, so the awaits below
+    // do not reliably free the event loop between files.
+    await yieldIfNeeded(fileIndex, SESSION_INGESTION_YIELD_EVERY_FILES);
+    const file = sortedFiles[fileIndex];
     const stateKey = buildSessionStateKey(file.agentId, file.absolutePath);
     const previous = params.state.files[stateKey];
     const stat = await fs.stat(file.absolutePath).catch((err: unknown) => {
@@ -982,6 +996,9 @@ async function collectSessionIngestionBatches(params: {
       if (fileCount >= fileCap || remaining <= 0) {
         break;
       }
+      // Skipped lines never reach the caps above, so this loop is the one stretch
+      // that scales with raw transcript size rather than with ingested messages.
+      await yieldIfNeeded(index, SESSION_INGESTION_YIELD_EVERY_LINES);
       lastScannedContentLine = index + 1;
       const rawSnippet = lines[index] ?? "";
       const snippet = normalizeSessionCorpusSnippet(rawSnippet);
@@ -2084,6 +2101,7 @@ export const testing = {
   // Exposed for the dreaming-pipeline event-loop-stall regression test.
   prioritizeLightEntriesByDiaryCoverage,
   collectDailyIngestionBatches,
+  collectSessionIngestionBatches,
   constants: {
     LIGHT_SLEEP_EVENT_TEXT,
     REM_SLEEP_EVENT_TEXT,
