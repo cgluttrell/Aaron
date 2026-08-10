@@ -592,6 +592,37 @@ describe("skill workshop proposals", () => {
     );
   });
 
+  it("refuses patch-instruction update proposals without overwriting the active skill", async () => {
+    const workspaceDir = await makeWorkspace();
+    const skillDir = path.join(workspaceDir, "skills", "youtube-transcript");
+    await writeSkill({
+      dir: skillDir,
+      name: "youtube-transcript",
+      description: "Extract transcripts from YouTube videos",
+      body: "# YouTube Transcript Skill\n\n## Script\n\n`scripts/yt-transcript.py` handles transcript operations.\n\n## Common Workflows\n\nRun the script.\n",
+    });
+    const skillFile = path.join(skillDir, "SKILL.md");
+    const previousContent = await fs.readFile(skillFile, "utf8");
+    const proposal = await proposeUpdateSkill({
+      workspaceDir,
+      skillName: "youtube-transcript",
+      description: "Fix stale transcript script path",
+      content:
+        "# YouTube Transcript Skill Update Proposal\n\n## Goal\n\nCorrect the script path documentation.\n\n## Proposed Changes\n\nReplace `scripts/yt-transcript.py` with `skills/youtube-transcript/scripts/yt-transcript.py`.\n\n## Evidence Plan\n\nSmoke test the script.\n\n## Scope Guard\n\nNo behavior refactor.\n",
+    });
+
+    await expect(
+      applySkillProposal({ workspaceDir, proposalId: proposal.record.id }),
+    ).rejects.toThrow("patch instructions instead of a full replacement SKILL.md body");
+    await expect(fs.readFile(skillFile, "utf8")).resolves.toBe(previousContent);
+    expect((await inspectSkillProposal(proposal.record.id))?.record.status).toBe("pending");
+    await expect(
+      fs.access(
+        path.join(stateDir, "skill-workshop", "proposals", proposal.record.id, "rollback.json"),
+      ),
+    ).rejects.toThrow();
+  });
+
   it("marks update proposals stale when target support files change before apply", async () => {
     const workspaceDir = await makeWorkspace();
     const skillDir = path.join(workspaceDir, "skills", "support-stale");
