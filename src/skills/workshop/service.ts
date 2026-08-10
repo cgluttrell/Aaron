@@ -577,6 +577,8 @@ export async function applySkillProposal(
       filePath: record.target.skillFile,
       symlinkPolicy,
     });
+    const skillContent = stripProposalFrontmatterForSkill(content);
+    assertUpdateProposalContainsFullSkillBody(record, skillContent);
     const targetState = await readApplyTargetState(record, supportFiles);
     const rollback = createSkillProposalRollback({
       proposalId: record.id,
@@ -594,7 +596,6 @@ export async function applySkillProposal(
       rollback,
     });
 
-    const skillContent = stripProposalFrontmatterForSkill(content);
     await writeWorkspaceSkill({
       workspaceDir: input.workspaceDir,
       skillDir: record.target.skillDir,
@@ -687,6 +688,30 @@ async function readApplyTargetState(
     }
   }
   return { previousContent, previousSupportFiles };
+}
+
+function assertUpdateProposalContainsFullSkillBody(
+  record: SkillProposalRecord,
+  skillContent: string,
+): void {
+  if (record.kind !== "update") {
+    return;
+  }
+
+  const normalized = skillContent.replace(/\r\n/g, "\n");
+  const firstHeading =
+    normalized
+      .match(/^#\s+(.+)$/m)?.[1]
+      ?.trim()
+      .toLowerCase() ?? "";
+  const hasPatchInstructionHeadings =
+    /^##\s+Proposed Changes\s*$/im.test(normalized) && /^##\s+Evidence Plan\s*$/im.test(normalized);
+  const hasScopeGuard = /^##\s+Scope Guard\s*$/im.test(normalized);
+  if (firstHeading.endsWith("update proposal") || (hasPatchInstructionHeadings && hasScopeGuard)) {
+    throw new Error(
+      "Update proposal appears to contain patch instructions instead of a full replacement SKILL.md body; revise the proposal with the complete desired skill content before applying.",
+    );
+  }
 }
 
 function scanProposalBundle(
