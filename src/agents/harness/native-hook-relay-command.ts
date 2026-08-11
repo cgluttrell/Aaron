@@ -112,26 +112,40 @@ function wrapNativeHookRelayCommandWithObservationalAdmissionGuard(params: {
   provider: NativeHookRelayProvider;
 }): string {
   const guardDir = path.join(tmpdir(), "openclaw-native-hook-relay-guards");
-  const lockPath = path.join(
-    guardDir,
-    `${params.provider}-${params.relayId}-${params.event}.lock`,
-  );
+  const lockPath = path.join(guardDir, `${params.provider}-${params.relayId}-${params.event}.lock`);
   const guardMessage = `OpenClaw native hook relay subprocess guard skipped observational hook: provider=${params.provider} relayId=${params.relayId} event=${params.event}`;
-  const pidPath = path.join(lockPath, "pid");
+  const legacyPidPath = path.join(lockPath, "pid");
   return [
     `${shellQuoteArgs(["mkdir", "-p", guardDir])} &&`,
     "while :; do",
-    `if ${shellQuoteArgs(["mkdir", lockPath])} 2>/dev/null; then`,
-    `printf '%s\\n' "$$" > ${shellQuoteArgs([pidPath])};`,
-    `exec ${params.command};`,
-    "fi;",
-    `openclaw_native_hook_relay_owner_pid="$(cat ${shellQuoteArgs([pidPath])} 2>/dev/null || true)";`,
+    `if [ -d ${shellQuoteArgs([lockPath])} ] && [ ! -L ${shellQuoteArgs([lockPath])} ]; then`,
+    `openclaw_native_hook_relay_owner_pid="$(cat ${shellQuoteArgs([legacyPidPath])} 2>/dev/null || true)";`,
     'if [ -n "$openclaw_native_hook_relay_owner_pid" ] && kill -0 "$openclaw_native_hook_relay_owner_pid" 2>/dev/null; then',
     `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
     "exit 0;",
     "fi;",
-    `${shellQuoteArgs(["rm", "-f", pidPath])} 2>/dev/null || true;`,
+    'if [ -z "$openclaw_native_hook_relay_owner_pid" ]; then',
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "fi;",
+    `${shellQuoteArgs(["rm", "-f", legacyPidPath])} 2>/dev/null || true;`,
     `if ${shellQuoteArgs(["rmdir", lockPath])} 2>/dev/null; then continue; fi;`,
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "fi;",
+    `if ln -s "$$" ${shellQuoteArgs([lockPath])} 2>/dev/null; then`,
+    `exec ${params.command};`,
+    "fi;",
+    `openclaw_native_hook_relay_owner_pid="$(readlink ${shellQuoteArgs([lockPath])} 2>/dev/null || cat ${shellQuoteArgs([legacyPidPath])} 2>/dev/null || true)";`,
+    'if [ -n "$openclaw_native_hook_relay_owner_pid" ] && kill -0 "$openclaw_native_hook_relay_owner_pid" 2>/dev/null; then',
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "fi;",
+    'if [ -n "$openclaw_native_hook_relay_owner_pid" ]; then',
+    `if ${shellQuoteArgs(["rm", "-f", lockPath])} 2>/dev/null; then continue; fi;`,
+    `${shellQuoteArgs(["rm", "-f", legacyPidPath])} 2>/dev/null || true;`,
+    `if ${shellQuoteArgs(["rmdir", lockPath])} 2>/dev/null; then continue; fi;`,
+    "fi;",
     `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
     "exit 0;",
     "done",
