@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
 import { exec as execCallback } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
@@ -72,9 +72,12 @@ function expectObservationalRelayCommand(command: string, relayCommand: string, 
     return;
   }
   expect(command).toContain("openclaw-native-hook-relay-guards");
-  expect(command).toContain("OpenClaw native hook relay subprocess guard skipped observational hook");
+  expect(command).toContain(
+    "OpenClaw native hook relay subprocess guard skipped observational hook",
+  );
   expect(command).toContain(`event=${event}`);
-  expect(command).toContain('printf \'%s\\n\' "$$"');
+  expect(command).toContain('ln -s "$$"');
+  expect(command).not.toContain("printf '%s\\n' \"$$\"");
   expect(command).toContain(`exec ${relayCommand}`);
 }
 
@@ -842,6 +845,66 @@ describe("native hook relay registry", () => {
         await fs.writeFile(releasePath, "");
         await expect(third).resolves.toMatchObject({ stdout: "", stderr: "" });
       } finally {
+        await fs.rm(tempDir, { force: true, recursive: true });
+      }
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "sheds observational relay contenders that see a legacy pre-publication empty lock",
+    async () => {
+      const relayId = `guard-${randomUUID()}`;
+      const tempDir = await fs.mkdtemp(path.join(tmpdir(), "native-hook-relay-empty-lock-"));
+      const scriptPath = path.join(tempDir, "relay-script.sh");
+      const startedPath = path.join(tempDir, "started.log");
+      const releasePath = path.join(tempDir, "release");
+      const legacyEmptyLockPath = path.join(
+        tmpdir(),
+        "openclaw-native-hook-relay-guards",
+        `codex-${relayId}-post_tool_use.lock`,
+      );
+      await fs.mkdir(legacyEmptyLockPath, { recursive: true });
+      await fs.writeFile(
+        scriptPath,
+        [
+          "#!/bin/sh",
+          'printf "%s\\n" started >> "$OPENCLAW_NATIVE_RELAY_STARTED"',
+          'while [ ! -f "$OPENCLAW_NATIVE_RELAY_RELEASE" ]; do sleep 0.05; done',
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      await fs.chmod(scriptPath, 0o755);
+      const command = buildNativeHookRelayCommand({
+        provider: "codex",
+        relayId,
+        generation: "generation-1",
+        event: "post_tool_use",
+        executable: scriptPath,
+        nodeExecutable: "/bin/sh",
+        timeoutMs: 2_000,
+      });
+      const env = {
+        ...process.env,
+        OPENCLAW_NATIVE_RELAY_STARTED: startedPath,
+        OPENCLAW_NATIVE_RELAY_RELEASE: releasePath,
+      };
+
+      try {
+        const results = await Promise.all([exec(command, { env }), exec(command, { env })]);
+        expect(results.map((result) => result.stdout)).toEqual(["", ""]);
+        expect(results.map((result) => result.stderr).join("")).toBe(
+          [
+            "OpenClaw native hook relay subprocess guard skipped observational hook: provider=codex relayId=",
+            relayId,
+            " event=post_tool_use\nOpenClaw native hook relay subprocess guard skipped observational hook: provider=codex relayId=",
+            relayId,
+            " event=post_tool_use\n",
+          ].join(""),
+        );
+        await expect(fs.readFile(startedPath, "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        await fs.rm(legacyEmptyLockPath, { force: true, recursive: true });
         await fs.rm(tempDir, { force: true, recursive: true });
       }
     },
