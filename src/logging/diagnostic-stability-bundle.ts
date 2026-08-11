@@ -31,11 +31,14 @@ const BUNDLE_SUFFIX = ".json";
 const REDACTED_HOSTNAME = "<redacted-hostname>";
 const MAX_SAFE_ERROR_MESSAGE_LENGTH = 500;
 const MAX_ACTIVE_RESOURCE_TYPES = 25;
+const MAX_PROCESS_CONTRIBUTORS = 20;
+const MAX_PROCESS_SUMMARY_LENGTH = 160;
 const MAX_SESSION_FILE_RESULTS = 20;
 const MAX_SESSION_SCAN_AGENTS = 100;
 const MAX_SESSION_SCAN_FILES = 5000;
 const CGROUP_V2_MEMORY_FILES = ["current", "max", "high", "peak", "swap.current", "swap.max"];
 const CGROUP_V2_MEMORY_EVENTS = ["events", "events.local"];
+const CGROUP_V2_PID_FILES = ["current", "max", "peak"];
 
 type DiagnosticHeapSpaceSummary = {
   spaceName: string;
@@ -59,12 +62,52 @@ type DiagnosticHeapStatisticsSummary = {
 type DiagnosticActiveResourceSummary = {
   total: number;
   byType: Record<string, number>;
+  watcherLikeTotal?: number;
 };
 
 type DiagnosticCgroupMemorySummary = {
   version: "v2";
   values: Record<string, number | "max">;
   events: Record<string, number>;
+  memoryStat?: Record<string, number>;
+  memoryStatSplit?: {
+    anonBytes: number;
+    fileBytes: number;
+    kernelBytes: number;
+    slabBytes: number;
+    sockBytes: number;
+    shmemBytes: number;
+    otherBytes: number;
+  };
+  processCounts?: {
+    cgroupProcs: number;
+    cgroupThreads?: number;
+    pids?: Record<string, number | "max">;
+  };
+};
+
+type DiagnosticProcessMemorySummary = {
+  pid: number;
+  ppid?: number;
+  rssBytes?: number;
+  pssBytes?: number;
+  command: string;
+  kind: "gateway" | "openclaw-hooks" | "codex-app-server" | "node" | "other";
+};
+
+type DiagnosticProcessContributorSummary = {
+  cgroupProcessCount: number;
+  descendantProcessCount: number;
+  topByRss: DiagnosticProcessMemorySummary[];
+  topByPss?: DiagnosticProcessMemorySummary[];
+  commandCounts: Record<string, number>;
+  openclawHooks: {
+    processCount: number;
+  };
+  codexAppServer: {
+    processCount: number;
+    clientLikeProcessCount: number;
+  };
 };
 
 type DiagnosticSessionFileSummary = {
@@ -83,6 +126,7 @@ type DiagnosticMemoryPressureBundleEvidence = {
   heapStatistics?: DiagnosticHeapStatisticsSummary;
   heapSpaces?: DiagnosticHeapSpaceSummary[];
   cgroup?: DiagnosticCgroupMemorySummary;
+  processes?: DiagnosticProcessContributorSummary;
   activeResources?: DiagnosticActiveResourceSummary;
   topSessionFiles?: DiagnosticSessionFileSummary[];
 };
@@ -495,10 +539,100 @@ function readCgroupMemorySummary(value: unknown): DiagnosticCgroupMemorySummary 
         readOptionalPositiveInteger(raw, `evidence.memoryPressure.cgroup.values.${key}`) ?? 0;
     }
   }
+  const memoryStat =
+    source.memoryStat === undefined
+      ? undefined
+      : readNumberMap(source.memoryStat, "evidence.memoryPressure.cgroup.memoryStat");
+  const memoryStatSplitSource =
+    source.memoryStatSplit === undefined
+      ? undefined
+      : readObject(source.memoryStatSplit, "evidence.memoryPressure.cgroup.memoryStatSplit");
+  const memoryStatSplit = memoryStatSplitSource
+    ? {
+        anonBytes:
+          readOptionalPositiveInteger(
+            memoryStatSplitSource.anonBytes,
+            "evidence.memoryPressure.cgroup.memoryStatSplit.anonBytes",
+          ) ?? 0,
+        fileBytes:
+          readOptionalPositiveInteger(
+            memoryStatSplitSource.fileBytes,
+            "evidence.memoryPressure.cgroup.memoryStatSplit.fileBytes",
+          ) ?? 0,
+        kernelBytes:
+          readOptionalPositiveInteger(
+            memoryStatSplitSource.kernelBytes,
+            "evidence.memoryPressure.cgroup.memoryStatSplit.kernelBytes",
+          ) ?? 0,
+        slabBytes:
+          readOptionalPositiveInteger(
+            memoryStatSplitSource.slabBytes,
+            "evidence.memoryPressure.cgroup.memoryStatSplit.slabBytes",
+          ) ?? 0,
+        sockBytes:
+          readOptionalPositiveInteger(
+            memoryStatSplitSource.sockBytes,
+            "evidence.memoryPressure.cgroup.memoryStatSplit.sockBytes",
+          ) ?? 0,
+        shmemBytes:
+          readOptionalPositiveInteger(
+            memoryStatSplitSource.shmemBytes,
+            "evidence.memoryPressure.cgroup.memoryStatSplit.shmemBytes",
+          ) ?? 0,
+        otherBytes:
+          readOptionalPositiveInteger(
+            memoryStatSplitSource.otherBytes,
+            "evidence.memoryPressure.cgroup.memoryStatSplit.otherBytes",
+          ) ?? 0,
+      }
+    : undefined;
+  const processCountsSource =
+    source.processCounts === undefined
+      ? undefined
+      : readObject(source.processCounts, "evidence.memoryPressure.cgroup.processCounts");
+  const pidsSource =
+    processCountsSource?.pids === undefined
+      ? undefined
+      : readObject(processCountsSource.pids, "evidence.memoryPressure.cgroup.processCounts.pids");
+  const pids: Record<string, number | "max"> = {};
+  for (const [key, raw] of Object.entries(pidsSource ?? {})) {
+    if (!SAFE_REASON_CODE.test(key)) {
+      continue;
+    }
+    pids[key] =
+      raw === "max"
+        ? "max"
+        : (readOptionalPositiveInteger(
+            raw,
+            `evidence.memoryPressure.cgroup.processCounts.pids.${key}`,
+          ) ?? 0);
+  }
+  const processCounts = processCountsSource
+    ? {
+        cgroupProcs:
+          readOptionalPositiveInteger(
+            processCountsSource.cgroupProcs,
+            "evidence.memoryPressure.cgroup.processCounts.cgroupProcs",
+          ) ?? 0,
+        ...(processCountsSource.cgroupThreads !== undefined
+          ? {
+              cgroupThreads:
+                readOptionalPositiveInteger(
+                  processCountsSource.cgroupThreads,
+                  "evidence.memoryPressure.cgroup.processCounts.cgroupThreads",
+                ) ?? 0,
+            }
+          : {}),
+        ...(Object.keys(pids).length > 0 ? { pids } : {}),
+      }
+    : undefined;
   return {
     version,
     values,
     events: readNumberMap(source.events, "evidence.memoryPressure.cgroup.events"),
+    ...(memoryStat && Object.keys(memoryStat).length > 0 ? { memoryStat } : {}),
+    ...(memoryStatSplit ? { memoryStatSplit } : {}),
+    ...(processCounts ? { processCounts } : {}),
   };
 }
 
@@ -512,6 +646,126 @@ function readActiveResources(value: unknown): DiagnosticActiveResourceSummary | 
       readOptionalPositiveInteger(source.total, "evidence.memoryPressure.activeResources.total") ??
       0,
     byType: readNumberMap(source.byType, "evidence.memoryPressure.activeResources.byType"),
+    ...(source.watcherLikeTotal !== undefined
+      ? {
+          watcherLikeTotal:
+            readOptionalPositiveInteger(
+              source.watcherLikeTotal,
+              "evidence.memoryPressure.activeResources.watcherLikeTotal",
+            ) ?? 0,
+        }
+      : {}),
+  };
+}
+
+function readProcessMemorySummaries(
+  value: unknown,
+  label: string,
+): DiagnosticProcessMemorySummary[] | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid stability bundle: ${label} must be an array`);
+  }
+  const summaries: DiagnosticProcessMemorySummary[] = [];
+  for (const [index, entry] of value.entries()) {
+    const source = readObject(entry, `${label}[${index}]`);
+    const pid = readOptionalPositiveInteger(source.pid, `${label}[${index}].pid`);
+    const rawCommand = typeof source.command === "string" ? source.command : "<unknown>";
+    const command = sanitizeProcessCommand(rawCommand);
+    const kind = readOptionalCodeString(source.kind, `${label}[${index}].kind`);
+    if (!pid) {
+      continue;
+    }
+    summaries.push({
+      pid,
+      ...(source.ppid !== undefined
+        ? { ppid: readOptionalPositiveInteger(source.ppid, `${label}[${index}].ppid`) ?? 0 }
+        : {}),
+      ...(source.rssBytes !== undefined
+        ? {
+            rssBytes:
+              readOptionalPositiveInteger(source.rssBytes, `${label}[${index}].rssBytes`) ?? 0,
+          }
+        : {}),
+      ...(source.pssBytes !== undefined
+        ? {
+            pssBytes:
+              readOptionalPositiveInteger(source.pssBytes, `${label}[${index}].pssBytes`) ?? 0,
+          }
+        : {}),
+      command,
+      kind:
+        kind === "gateway" ||
+        kind === "openclaw-hooks" ||
+        kind === "codex-app-server" ||
+        kind === "node" ||
+        kind === "other"
+          ? kind
+          : classifyProcessCommand(command),
+    });
+  }
+  return summaries.length > 0 ? summaries : undefined;
+}
+
+function readProcessContributors(value: unknown): DiagnosticProcessContributorSummary | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  const source = readObject(value, "evidence.memoryPressure.processes");
+  const openclawHooks = readObject(
+    source.openclawHooks,
+    "evidence.memoryPressure.processes.openclawHooks",
+  );
+  const codexAppServer = readObject(
+    source.codexAppServer,
+    "evidence.memoryPressure.processes.codexAppServer",
+  );
+  const topByRss = readProcessMemorySummaries(
+    source.topByRss,
+    "evidence.memoryPressure.processes.topByRss",
+  );
+  const topByPss =
+    source.topByPss === undefined
+      ? undefined
+      : readProcessMemorySummaries(source.topByPss, "evidence.memoryPressure.processes.topByPss");
+  return {
+    cgroupProcessCount:
+      readOptionalPositiveInteger(
+        source.cgroupProcessCount,
+        "evidence.memoryPressure.processes.cgroupProcessCount",
+      ) ?? 0,
+    descendantProcessCount:
+      readOptionalPositiveInteger(
+        source.descendantProcessCount,
+        "evidence.memoryPressure.processes.descendantProcessCount",
+      ) ?? 0,
+    topByRss: topByRss ?? [],
+    ...(topByPss ? { topByPss } : {}),
+    commandCounts: readNumberMap(
+      source.commandCounts,
+      "evidence.memoryPressure.processes.commandCounts",
+    ),
+    openclawHooks: {
+      processCount:
+        readOptionalPositiveInteger(
+          openclawHooks.processCount,
+          "evidence.memoryPressure.processes.openclawHooks.processCount",
+        ) ?? 0,
+    },
+    codexAppServer: {
+      processCount:
+        readOptionalPositiveInteger(
+          codexAppServer.processCount,
+          "evidence.memoryPressure.processes.codexAppServer.processCount",
+        ) ?? 0,
+      clientLikeProcessCount:
+        readOptionalPositiveInteger(
+          codexAppServer.clientLikeProcessCount,
+          "evidence.memoryPressure.processes.codexAppServer.clientLikeProcessCount",
+        ) ?? 0,
+    },
   };
 }
 
@@ -577,6 +831,7 @@ function readMemoryPressureEvidence(
   const heapStatistics = readHeapStatistics(pressure.heapStatistics);
   const heapSpaces = readHeapSpaces(pressure.heapSpaces);
   const cgroup = readCgroupMemorySummary(pressure.cgroup);
+  const processes = readProcessContributors(pressure.processes);
   const activeResources = readActiveResources(pressure.activeResources);
   const topSessionFiles = readSessionFiles(pressure.topSessionFiles);
   return {
@@ -605,6 +860,7 @@ function readMemoryPressureEvidence(
     ...(heapStatistics ? { heapStatistics } : {}),
     ...(heapSpaces ? { heapSpaces } : {}),
     ...(cgroup ? { cgroup } : {}),
+    ...(processes ? { processes } : {}),
     ...(activeResources ? { activeResources } : {}),
     ...(topSessionFiles ? { topSessionFiles } : {}),
   };
@@ -926,6 +1182,55 @@ function readCgroupEventFile(file: string): Record<string, number> {
   }
 }
 
+function readNumberFileMap(
+  dir: string,
+  prefix: string,
+  names: readonly string[],
+): Record<string, number | "max"> {
+  const values: Record<string, number | "max"> = {};
+  for (const name of names) {
+    const value = readPositiveMemoryFile(path.join(dir, `${prefix}.${name}`));
+    if (value !== undefined) {
+      values[name] = value;
+    }
+  }
+  return values;
+}
+
+function readKeyedNumberFile(file: string): Record<string, number> {
+  try {
+    const values: Record<string, number> = {};
+    for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/u)) {
+      const [key, raw] = line.trim().split(/\s+/u);
+      if (!key || !SAFE_REASON_CODE.test(key)) {
+        continue;
+      }
+      const value = parseStrictNonNegativeInteger(raw ?? "");
+      if (value !== undefined) {
+        values[key] = value;
+      }
+    }
+    return values;
+  } catch {
+    return {};
+  }
+}
+
+function readPidListFile(file: string): number[] {
+  try {
+    const pids: number[] = [];
+    for (const raw of fs.readFileSync(file, "utf8").split(/\s+/u)) {
+      const pid = parseStrictNonNegativeInteger(raw);
+      if (pid !== undefined && pid > 0) {
+        pids.push(pid);
+      }
+    }
+    return pids;
+  } catch {
+    return [];
+  }
+}
+
 function resolveCgroupV2MemoryDir(): string | undefined {
   if (process.platform !== "linux") {
     return undefined;
@@ -946,18 +1251,46 @@ function resolveCgroupV2MemoryDir(): string | undefined {
   }
 }
 
+function summarizeMemoryStatSplit(
+  memoryStat: Record<string, number>,
+): DiagnosticCgroupMemorySummary["memoryStatSplit"] | undefined {
+  if (Object.keys(memoryStat).length === 0) {
+    return undefined;
+  }
+  const anonBytes = memoryStat.anon ?? 0;
+  const fileBytes = memoryStat.file ?? 0;
+  const kernelBytes =
+    memoryStat.kernel ??
+    (memoryStat.kernel_stack ?? 0) +
+      (memoryStat.pagetables ?? 0) +
+      (memoryStat.percpu ?? 0) +
+      (memoryStat.vmalloc ?? 0);
+  const slabBytes =
+    memoryStat.slab ?? (memoryStat.slab_reclaimable ?? 0) + (memoryStat.slab_unreclaimable ?? 0);
+  const sockBytes = memoryStat.sock ?? 0;
+  const shmemBytes = memoryStat.shmem ?? 0;
+  const accounted = anonBytes + fileBytes + kernelBytes + slabBytes + sockBytes + shmemBytes;
+  const total =
+    memoryStat.current ??
+    memoryStat.usage ??
+    Object.values(memoryStat).reduce((sum, value) => sum + value, 0);
+  return {
+    anonBytes,
+    fileBytes,
+    kernelBytes,
+    slabBytes,
+    sockBytes,
+    shmemBytes,
+    otherBytes: Math.max(0, total - accounted),
+  };
+}
+
 function collectCgroupMemorySummary(): DiagnosticCgroupMemorySummary | undefined {
   const dir = resolveCgroupV2MemoryDir();
   if (!dir) {
     return undefined;
   }
-  const values: Record<string, number | "max"> = {};
-  for (const name of CGROUP_V2_MEMORY_FILES) {
-    const value = readPositiveMemoryFile(path.join(dir, `memory.${name}`));
-    if (value !== undefined) {
-      values[name] = value;
-    }
-  }
+  const values = readNumberFileMap(dir, "memory", CGROUP_V2_MEMORY_FILES);
   const events: Record<string, number> = {};
   for (const name of CGROUP_V2_MEMORY_EVENTS) {
     const parsed = readCgroupEventFile(path.join(dir, `memory.${name}`));
@@ -965,8 +1298,34 @@ function collectCgroupMemorySummary(): DiagnosticCgroupMemorySummary | undefined
       events[name === "events" ? key : `${name}.${key}`] = value;
     }
   }
-  return Object.keys(values).length > 0 || Object.keys(events).length > 0
-    ? { version: "v2", values, events }
+  const memoryStat = readKeyedNumberFile(path.join(dir, "memory.stat"));
+  const memoryStatSplit = summarizeMemoryStatSplit({
+    ...memoryStat,
+    ...(typeof values.current === "number" ? { current: values.current } : {}),
+  });
+  const cgroupProcs = readPidListFile(path.join(dir, "cgroup.procs"));
+  const cgroupThreads = readPidListFile(path.join(dir, "cgroup.threads"));
+  const pids = readNumberFileMap(dir, "pids", CGROUP_V2_PID_FILES);
+  const processCounts =
+    cgroupProcs.length > 0 || cgroupThreads.length > 0 || Object.keys(pids).length > 0
+      ? {
+          cgroupProcs: cgroupProcs.length,
+          ...(cgroupThreads.length > 0 ? { cgroupThreads: cgroupThreads.length } : {}),
+          ...(Object.keys(pids).length > 0 ? { pids } : {}),
+        }
+      : undefined;
+  return Object.keys(values).length > 0 ||
+    Object.keys(events).length > 0 ||
+    Object.keys(memoryStat).length > 0 ||
+    processCounts
+    ? {
+        version: "v2",
+        values,
+        events,
+        ...(Object.keys(memoryStat).length > 0 ? { memoryStat } : {}),
+        ...(memoryStatSplit ? { memoryStatSplit } : {}),
+        ...(processCounts ? { processCounts } : {}),
+      }
     : undefined;
 }
 
@@ -1019,10 +1378,206 @@ function collectActiveResources(): DiagnosticActiveResourceSummary | undefined {
     const sorted = Object.entries(byType)
       .toSorted((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .slice(0, MAX_ACTIVE_RESOURCE_TYPES);
-    return { total: names.length, byType: Object.fromEntries(sorted) };
+    const watcherLikeTotal = names.filter((name) =>
+      /watch|fs.?event|fs.?watch/iu.test(name),
+    ).length;
+    return {
+      total: names.length,
+      byType: Object.fromEntries(sorted),
+      ...(watcherLikeTotal > 0 ? { watcherLikeTotal } : {}),
+    };
   } catch {
     return undefined;
   }
+}
+
+function readProcessStatusNumbers(pid: number): { ppid?: number; rssBytes?: number } {
+  try {
+    let ppid: number | undefined;
+    let rssBytes: number | undefined;
+    for (const line of fs.readFileSync(`/proc/${pid}/status`, "utf8").split(/\r?\n/u)) {
+      if (line.startsWith("PPid:")) {
+        ppid = parseStrictNonNegativeInteger(line.split(/\s+/u)[1] ?? "");
+      } else if (line.startsWith("VmRSS:")) {
+        const rssKb = parseStrictNonNegativeInteger(line.split(/\s+/u)[1] ?? "");
+        rssBytes = rssKb === undefined ? undefined : rssKb * 1024;
+      }
+    }
+    return {
+      ...(ppid !== undefined ? { ppid } : {}),
+      ...(rssBytes !== undefined ? { rssBytes } : {}),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function readProcessPssBytes(pid: number): number | undefined {
+  try {
+    for (const line of fs.readFileSync(`/proc/${pid}/smaps_rollup`, "utf8").split(/\r?\n/u)) {
+      if (!line.startsWith("Pss:")) {
+        continue;
+      }
+      const pssKb = parseStrictNonNegativeInteger(line.split(/\s+/u)[1] ?? "");
+      return pssKb === undefined ? undefined : pssKb * 1024;
+    }
+  } catch {
+    // PSS needs smaps_rollup permissions and is best-effort only.
+  }
+  return undefined;
+}
+
+function readProcessCommand(pid: number): string {
+  try {
+    const raw = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8").replace(/\0/gu, " ").trim();
+    if (raw) {
+      return sanitizeProcessCommand(raw);
+    }
+  } catch {
+    // Fall through to comm.
+  }
+  try {
+    return sanitizeProcessCommand(fs.readFileSync(`/proc/${pid}/comm`, "utf8").trim());
+  } catch {
+    return "<unknown>";
+  }
+}
+
+function sanitizeProcessCommand(command: string): string {
+  const sanitized = redactSensitiveText(command, { mode: "tools" })
+    .replace(/\s+/gu, " ")
+    .trim()
+    .split(/\s+/u)
+    .slice(0, 12)
+    .map(summarizeCommandToken)
+    .join(" ");
+  return sanitized.length > MAX_PROCESS_SUMMARY_LENGTH
+    ? `${truncateUtf16Safe(sanitized, MAX_PROCESS_SUMMARY_LENGTH)}...`
+    : sanitized || "<unknown>";
+}
+
+function summarizeCommandToken(token: string): string {
+  const assignment = token.match(/^([^=\s]{1,80})=(.+)$/u);
+  if (assignment) {
+    const key = assignment[1] ?? "";
+    const value = assignment[2] ?? "";
+    return value.includes("/") ? `${key}=<path:${path.basename(value) || "unknown"}>` : token;
+  }
+  if (!token.includes("/")) {
+    return token;
+  }
+  return path.basename(token) || "<path>";
+}
+
+function classifyProcessCommand(command: string): DiagnosticProcessMemorySummary["kind"] {
+  const normalized = command.toLowerCase();
+  if (normalized.includes("openclaw-hooks")) {
+    return "openclaw-hooks";
+  }
+  if (normalized.includes("codex") && normalized.includes("app-server")) {
+    return "codex-app-server";
+  }
+  if (normalized.includes("openclaw") && !normalized.includes("openclaw-hooks")) {
+    return "gateway";
+  }
+  if (/(^|\s)node(?:\s|$)/u.test(normalized) || normalized.includes("/node ")) {
+    return "node";
+  }
+  return "other";
+}
+
+function commandCountKey(summary: DiagnosticProcessMemorySummary): string {
+  if (summary.kind !== "other") {
+    return summary.kind;
+  }
+  const first = summary.command.split(/\s+/u)[0] ?? "<unknown>";
+  return first.length > 60 ? `${truncateUtf16Safe(first, 60)}...` : first;
+}
+
+function isDescendantProcess(
+  pid: number,
+  rootPid: number,
+  parentByPid: Map<number, number | undefined>,
+): boolean {
+  const seen = new Set<number>();
+  let current = pid;
+  while (!seen.has(current)) {
+    seen.add(current);
+    const parent = parentByPid.get(current);
+    if (parent === rootPid) {
+      return true;
+    }
+    if (!parent || parent === current) {
+      return false;
+    }
+    current = parent;
+  }
+  return false;
+}
+
+function collectProcessContributors(): DiagnosticProcessContributorSummary | undefined {
+  if (process.platform !== "linux") {
+    return undefined;
+  }
+  const cgroupDir = resolveCgroupV2MemoryDir();
+  if (!cgroupDir) {
+    return undefined;
+  }
+  const cgroupPids = readPidListFile(path.join(cgroupDir, "cgroup.procs"));
+  if (cgroupPids.length === 0) {
+    return undefined;
+  }
+  const parentByPid = new Map<number, number | undefined>();
+  for (const pid of cgroupPids) {
+    parentByPid.set(pid, readProcessStatusNumbers(pid).ppid);
+  }
+  const descendantPids = cgroupPids
+    .filter((pid) => pid !== process.pid && isDescendantProcess(pid, process.pid, parentByPid))
+    .slice(0, MAX_SESSION_SCAN_FILES);
+  const summaries = descendantPids.map((pid) => {
+    const status = readProcessStatusNumbers(pid);
+    const command = readProcessCommand(pid);
+    const pssBytes = readProcessPssBytes(pid);
+    return {
+      pid,
+      ...(status.ppid !== undefined ? { ppid: status.ppid } : {}),
+      ...(status.rssBytes !== undefined ? { rssBytes: status.rssBytes } : {}),
+      ...(pssBytes !== undefined ? { pssBytes } : {}),
+      command,
+      kind: classifyProcessCommand(command),
+    };
+  });
+  const topByRss = summaries
+    .filter((entry) => entry.rssBytes !== undefined)
+    .toSorted((a, b) => (b.rssBytes ?? 0) - (a.rssBytes ?? 0) || a.pid - b.pid)
+    .slice(0, MAX_PROCESS_CONTRIBUTORS);
+  const topByPss = summaries
+    .filter((entry) => entry.pssBytes !== undefined)
+    .toSorted((a, b) => (b.pssBytes ?? 0) - (a.pssBytes ?? 0) || a.pid - b.pid)
+    .slice(0, MAX_PROCESS_CONTRIBUTORS);
+  const commandCounts: Record<string, number> = {};
+  for (const summary of summaries) {
+    const key = commandCountKey(summary);
+    const safeKey = SAFE_REASON_CODE.test(key) ? key : "other";
+    commandCounts[safeKey] = (commandCounts[safeKey] ?? 0) + 1;
+  }
+  const codexAppServerProcesses = summaries.filter((entry) => entry.kind === "codex-app-server");
+  return {
+    cgroupProcessCount: cgroupPids.length,
+    descendantProcessCount: summaries.length,
+    topByRss,
+    ...(topByPss.length > 0 ? { topByPss } : {}),
+    commandCounts,
+    openclawHooks: {
+      processCount: summaries.filter((entry) => entry.kind === "openclaw-hooks").length,
+    },
+    codexAppServer: {
+      processCount: codexAppServerProcesses.length,
+      clientLikeProcessCount: codexAppServerProcesses.filter((entry) =>
+        /client|session|thread|stream/iu.test(entry.command),
+      ).length,
+    },
+  };
 }
 
 function sanitizeSessionEvidencePath(relativePath: string): string {
@@ -1190,6 +1745,7 @@ function buildMemoryPressureEvidence(
   const heapStatistics = collectHeapStatistics();
   const heapSpaces = collectHeapSpaces();
   const cgroup = collectCgroupMemorySummary();
+  const processes = collectProcessContributors();
   const activeResources = collectActiveResources();
   const topSessionFiles = collectTopSessionFiles(stateDir, options.sessionStorePaths);
   return {
@@ -1207,6 +1763,7 @@ function buildMemoryPressureEvidence(
       ...(heapStatistics ? { heapStatistics } : {}),
       ...(heapSpaces ? { heapSpaces } : {}),
       ...(cgroup ? { cgroup } : {}),
+      ...(processes ? { processes } : {}),
       ...(activeResources ? { activeResources } : {}),
       ...(topSessionFiles ? { topSessionFiles } : {}),
     },

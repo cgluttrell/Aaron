@@ -453,6 +453,41 @@ function renderStabilityBundleSummary(params: {
         )} available=${formatBytes(memoryPressure.heapStatistics.totalAvailableSizeBytes)}`,
       );
     }
+    if (memoryPressure.cgroup) {
+      const split = memoryPressure.cgroup.memoryStatSplit;
+      const processCounts = memoryPressure.cgroup.processCounts;
+      const pidsCurrent = processCounts?.pids?.current;
+      lines.push(
+        `${colorize(rich, theme.muted, "Cgroup:")} current=${formatBytes(
+          memoryPressure.cgroup.values.current,
+        )} anon=${formatBytes(split?.anonBytes)} file=${formatBytes(
+          split?.fileBytes,
+        )} kernel=${formatBytes(split?.kernelBytes)} procs=${
+          processCounts?.cgroupProcs ?? "n/a"
+        } pids=${pidsCurrent ?? "n/a"}`,
+      );
+    }
+    if (memoryPressure.processes) {
+      const topChildren = memoryPressure.processes.topByRss
+        .slice(0, 5)
+        .map((entry) => {
+          const pss = entry.pssBytes === undefined ? "" : ` pss=${formatBytes(entry.pssBytes)}`;
+          return `${entry.pid}:${entry.kind} rss=${formatBytes(entry.rssBytes)}${pss}`;
+        })
+        .join(", ");
+      const commands = Object.entries(memoryPressure.processes.commandCounts)
+        .map(([command, count]) => `${command}=${count}`)
+        .join(", ");
+      lines.push(
+        `${colorize(rich, theme.muted, "Child processes:")} descendants=${
+          memoryPressure.processes.descendantProcessCount
+        } hooks=${memoryPressure.processes.openclawHooks.processCount} codexAppServer=${
+          memoryPressure.processes.codexAppServer.processCount
+        } codexClients=${memoryPressure.processes.codexAppServer.clientLikeProcessCount}${
+          topChildren ? ` · top=${topChildren}` : ""
+        }${commands ? ` · commands=${commands}` : ""}`,
+      );
+    }
     if (memoryPressure.activeResources) {
       const resources = Object.entries(memoryPressure.activeResources.byType)
         .map(([type, count]) => `${type}=${count}`)
@@ -460,6 +495,10 @@ function renderStabilityBundleSummary(params: {
       lines.push(
         `${colorize(rich, theme.muted, "Active resources:")} total=${
           memoryPressure.activeResources.total
+        }${
+          memoryPressure.activeResources.watcherLikeTotal !== undefined
+            ? ` watchers=${memoryPressure.activeResources.watcherLikeTotal}`
+            : ""
         }${resources ? ` · ${resources}` : ""}`,
       );
     }
