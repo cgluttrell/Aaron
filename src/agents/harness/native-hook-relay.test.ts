@@ -74,7 +74,8 @@ function expectObservationalRelayCommand(command: string, relayCommand: string, 
   expect(command).toContain("openclaw-native-hook-relay-guards");
   expect(command).toContain("OpenClaw native hook relay subprocess guard skipped observational hook");
   expect(command).toContain(`event=${event}`);
-  expect(command).toContain(`${relayCommand} & openclaw_native_hook_relay_pid=$!`);
+  expect(command).toContain('printf \'%s\\n\' "$$"');
+  expect(command).toContain(`exec ${relayCommand}`);
 }
 
 function getMockCallArg(
@@ -832,6 +833,14 @@ describe("native hook relay registry", () => {
 
         await fs.writeFile(releasePath, "");
         await expect(first).resolves.toMatchObject({ stdout: "", stderr: "" });
+
+        await fs.rm(releasePath, { force: true });
+        const third = exec(command, { env });
+        await vi.waitFor(async () => {
+          await expect(fs.readFile(startedPath, "utf8")).resolves.toBe("started\nstarted\n");
+        });
+        await fs.writeFile(releasePath, "");
+        await expect(third).resolves.toMatchObject({ stdout: "", stderr: "" });
       } finally {
         await fs.rm(tempDir, { force: true, recursive: true });
       }
