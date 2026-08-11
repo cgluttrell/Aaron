@@ -261,6 +261,83 @@ describe("diagnostic stability bundles", () => {
             externalBytes: 128,
             arrayBuffersBytes: 64,
           },
+          cgroup: {
+            version: "v2",
+            values: {
+              current: 8192,
+              max: "max",
+            },
+            events: {
+              oom: 1,
+            },
+            memoryStat: {
+              anon: 4096,
+              file: 2048,
+              kernel: 1024,
+              slab: 512,
+              sock: 128,
+              shmem: 64,
+            },
+            memoryStatSplit: {
+              anonBytes: 4096,
+              fileBytes: 2048,
+              kernelBytes: 1024,
+              slabBytes: 512,
+              sockBytes: 128,
+              shmemBytes: 64,
+              otherBytes: 320,
+            },
+            processCounts: {
+              cgroupProcs: 4,
+              cgroupThreads: 6,
+              pids: {
+                current: 4,
+                max: "max",
+              },
+            },
+          },
+          processes: {
+            cgroupProcessCount: 4,
+            descendantProcessCount: 3,
+            topByRss: [
+              {
+                pid: 1234,
+                ppid: 1000,
+                rssBytes: 10_240,
+                pssBytes: 8192,
+                command: "/private/worktree/node codex app-server --api-key sk-1234567890abcdef",
+                kind: "codex-app-server",
+              },
+            ],
+            topByPss: [
+              {
+                pid: 2345,
+                rssBytes: 4096,
+                pssBytes: 3072,
+                command: "openclaw-hooks run",
+                kind: "openclaw-hooks",
+              },
+            ],
+            commandCounts: {
+              "codex-app-server": 1,
+              "openclaw-hooks": 2,
+            },
+            openclawHooks: {
+              processCount: 2,
+            },
+            codexAppServer: {
+              processCount: 1,
+              clientLikeProcessCount: 1,
+            },
+          },
+          activeResources: {
+            total: 3,
+            byType: {
+              FSWatcher: 2,
+              Timeout: 1,
+            },
+            watcherLikeTotal: 2,
+          },
           topSessionFiles: [
             {
               relativePath: "agents/main/sessions/raw-secret-session.jsonl",
@@ -331,6 +408,50 @@ describe("diagnostic stability bundles", () => {
     expect(result.bundle.evidence?.memoryPressure?.topSessionFiles?.[0]?.relativePath).toBe(
       "agents/<agent>/sessions/<session>.jsonl",
     );
+    expect(result.bundle.evidence?.memoryPressure?.cgroup).toMatchObject({
+      version: "v2",
+      memoryStat: {
+        anon: 4096,
+        file: 2048,
+      },
+      memoryStatSplit: {
+        anonBytes: 4096,
+        fileBytes: 2048,
+      },
+      processCounts: {
+        cgroupProcs: 4,
+        cgroupThreads: 6,
+        pids: {
+          current: 4,
+          max: "max",
+        },
+      },
+    });
+    expect(result.bundle.evidence?.memoryPressure?.processes).toMatchObject({
+      cgroupProcessCount: 4,
+      descendantProcessCount: 3,
+      commandCounts: {
+        "codex-app-server": 1,
+        "openclaw-hooks": 2,
+      },
+      openclawHooks: {
+        processCount: 2,
+      },
+      codexAppServer: {
+        processCount: 1,
+        clientLikeProcessCount: 1,
+      },
+    });
+    expect(result.bundle.evidence?.memoryPressure?.processes?.topByRss[0]).toMatchObject({
+      pid: 1234,
+      rssBytes: 10240,
+      pssBytes: 8192,
+      kind: "codex-app-server",
+    });
+    expect(result.bundle.evidence?.memoryPressure?.activeResources).toMatchObject({
+      total: 3,
+      watcherLikeTotal: 2,
+    });
     expect(result.bundle.snapshot.events[0]).toEqual({
       seq: 1,
       ts: 1,
@@ -358,6 +479,7 @@ describe("diagnostic stability bundles", () => {
       "process-command-secret",
       "private-hostname",
       "host-extra-secret",
+      "/private/worktree",
       "snapshot-secret",
       "private event reason",
       "raw-secret-session",

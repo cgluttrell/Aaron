@@ -596,7 +596,9 @@ Look for:
 - `Memory pressure:` with `critical/rss_threshold`, `critical/heap_threshold`, or `critical/rss_growth`.
 - `V8 heap:` values near the heap limit.
 - `Largest session files:` entries such as `agents/<agent>/sessions/<session>.jsonl` or `sessions/<session>.jsonl`.
-- Linux cgroup memory counters when the gateway runs inside a container or memory-limited service.
+- Linux cgroup `memory.stat` split and `cgroup.procs`/`pids.*` counts when the gateway runs inside a container or memory-limited service.
+- `Top child processes:` RSS/PSS entries, command counts, `openclaw-hooks` concurrency, and Codex app-server process/client-like counts.
+- `Active resources:` watcher-like totals or unexpected resource growth.
 
 Common signatures:
 
@@ -604,6 +606,10 @@ Common signatures:
 - `memory pressure: level=critical ... memoryPressureSnapshot=disabled` appears in gateway logs → OpenClaw detected critical memory pressure, but the pre-OOM stability snapshot is off.
 - `Largest session files:` points at a very large redacted transcript path → reduce retained session history, inspect session growth, or move old transcripts out of the active store before restarting.
 - `V8 heap:` used bytes are close to the heap limit → lower prompt/session pressure, reduce concurrent work, or raise the Node heap limit only after confirming the workload is expected.
+- `memory.stat` file/cache bytes dominate while child RSS is low → suspect cgroup file/cache accounting before chasing Node heap growth.
+- `openclaw-hooks` process count is high → inspect hook concurrency or a hook subprocess leak.
+- Codex app-server counts climb with low Gateway heap growth → inspect Codex app-server sessions/clients and stale child processes.
+- Watcher-like active resources grow across bundles → inspect plugins or runtime paths that register file watchers.
 - `Memory pressure: critical/rss_growth` → memory grew quickly inside one sampling window. Check the latest logs for a large import, runaway tool output, repeated retries, or a batch of queued agent work.
 - Critical memory pressure appears in logs but no bundle exists → this is the default. Set `diagnostics.memoryPressureSnapshot: true` to capture the pre-OOM stability bundle on future critical memory pressure events.
 

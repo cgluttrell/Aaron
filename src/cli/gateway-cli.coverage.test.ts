@@ -496,9 +496,53 @@ describe("gateway-cli coverage", () => {
               mallocedMemoryBytes: 32,
               externalMemoryBytes: 128,
             },
+            cgroup: {
+              version: "v2",
+              values: { current: 8192 },
+              events: {},
+              memoryStat: { anon: 4096, file: 2048 },
+              memoryStatSplit: {
+                anonBytes: 4096,
+                fileBytes: 2048,
+                kernelBytes: 512,
+                slabBytes: 256,
+                sockBytes: 0,
+                shmemBytes: 0,
+                otherBytes: 1280,
+              },
+              processCounts: {
+                cgroupProcs: 3,
+                pids: { current: 3, max: "max" },
+              },
+            },
+            processes: {
+              cgroupProcessCount: 3,
+              descendantProcessCount: 2,
+              topByRss: [
+                {
+                  pid: 456,
+                  rssBytes: 4096,
+                  pssBytes: 2048,
+                  command: "node codex app-server",
+                  kind: "codex-app-server",
+                },
+              ],
+              commandCounts: {
+                "codex-app-server": 1,
+                "openclaw-hooks": 1,
+              },
+              openclawHooks: {
+                processCount: 1,
+              },
+              codexAppServer: {
+                processCount: 1,
+                clientLikeProcessCount: 1,
+              },
+            },
             activeResources: {
               total: 2,
               byType: { Timeout: 2 },
+              watcherLikeTotal: 1,
             },
             topSessionFiles: [
               {
@@ -552,6 +596,12 @@ describe("gateway-cli coverage", () => {
       expect(output).toContain("gateway.restart_startup_failed");
       expect(output).toContain("Memory pressure");
       expect(output).toContain("rss_threshold");
+      expect(output).toContain("Cgroup");
+      expect(output).toContain("procs=3");
+      expect(output).toContain("Child processes");
+      expect(output).toContain("hooks=1");
+      expect(output).toContain("codexAppServer=1");
+      expect(output).toContain("watchers=1");
       expect(output).toContain("Largest session files");
       expect(output).toContain("agents/<agent>/sessions/<session>.jsonl");
       expect(output).toContain("payload.large");

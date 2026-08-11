@@ -466,6 +466,27 @@ describe("diagnostic memory", () => {
       expect(latest.bundle.evidence?.memoryPressure?.activeResources?.total).toEqual(
         expect.any(Number),
       );
+      if (process.platform === "linux") {
+        expect(latest.bundle.evidence?.memoryPressure?.cgroup).toMatchObject({
+          version: "v2",
+          memoryStat: expect.any(Object),
+          processCounts: expect.objectContaining({
+            cgroupProcs: expect.any(Number),
+          }),
+        });
+        expect(latest.bundle.evidence?.memoryPressure?.processes).toMatchObject({
+          cgroupProcessCount: expect.any(Number),
+          descendantProcessCount: expect.any(Number),
+          commandCounts: expect.any(Object),
+          openclawHooks: {
+            processCount: expect.any(Number),
+          },
+          codexAppServer: {
+            processCount: expect.any(Number),
+            clientLikeProcessCount: expect.any(Number),
+          },
+        });
+      }
       expect(latest.bundle.evidence?.memoryPressure?.topSessionFiles?.[0]).toMatchObject({
         relativePath: "sessions/<session>.jsonl",
         sizeBytes: 8192,

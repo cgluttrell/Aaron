@@ -186,10 +186,23 @@ pre-OOM stability snapshot in addition to normal diagnostics events:
 }
 ```
 
-Use this only on hosts that can tolerate the extra file-system scan and
-snapshot write during critical memory pressure. Normal memory pressure events
-still record RSS, heap, threshold, and growth facts (`rss_threshold`,
-`heap_threshold`, `rss_growth`) when the snapshot is off.
+Use this only on hosts that can tolerate the extra bounded process, cgroup, and
+file-system scan plus the snapshot write during critical memory pressure. Normal
+memory pressure events still record RSS, heap, threshold, and growth facts
+(`rss_threshold`, `heap_threshold`, `rss_growth`) when the snapshot is off.
+
+When enabled, the memory-pressure bundle adds:
+
+- V8 heap statistics and heap-space usage.
+- Linux cgroup `memory.*`, `memory.events*`, `memory.stat`, derived
+  memory-stat split, `cgroup.procs`/thread counts, and `pids.*` counters when
+  available.
+- Top descendant process RSS/PSS, redacted command summaries, command counts,
+  `openclaw-hooks` process concurrency, and Codex app-server process/client-like
+  counts.
+- Active resource counts, including watcher-like resources when Node reports
+  them.
+- Largest session/transcript files by redacted relative path.
 
 ## Related
 
