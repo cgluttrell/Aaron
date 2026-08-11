@@ -1249,19 +1249,16 @@ describe("Codex app-server approval bridge", () => {
     findApprovalEvent(params, { status: "denied" });
   });
 
-  it("passes the exact native command cwd to the host policy capability", async () => {
+  it("passes the exact native command cwd to the hook policy context", async () => {
     const params = createParams();
     params.cwd = "/attempt/worktree";
-    const runBeforeToolCall: AgentHarnessHostCapabilities["runBeforeToolCall"] = vi.fn(
-      async ({ params: toolParams }) => ({
-        blocked: true as const,
-        kind: "veto" as const,
-        deniedReason: "plugin-before-tool-call" as const,
-        reason: "blocked by policy",
-        params: toolParams,
-      }),
-    );
-    params.hostCapabilities = { ...params.hostCapabilities, runBeforeToolCall };
+    mockRunBeforeToolCallHook.mockResolvedValueOnce({
+      blocked: true,
+      kind: "veto",
+      deniedReason: "plugin-before-tool-call",
+      reason: "blocked by policy",
+      params: {},
+    });
 
     const result = await handleCodexAppServerApprovalRequest({
       method: "item/commandExecution/requestApproval",
@@ -1276,8 +1273,10 @@ describe("Codex app-server approval bridge", () => {
     });
 
     expect(result).toEqual({ decision: "decline" });
-    expect(runBeforeToolCall).toHaveBeenCalledWith(
-      expect.objectContaining({ nativeOperation: { cwd: "/native/action/worktree" } }),
+    expect(mockRunBeforeToolCallHook).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ctx: expect.objectContaining({ cwd: "/native/action/worktree" }),
+      }),
     );
     expect(mockCallGatewayTool).not.toHaveBeenCalled();
   });

@@ -4,6 +4,7 @@
  */
 import {
   type AgentApprovalEventData,
+  buildAgentHookContextChannelFields,
   type BeforeToolCallFailureDisposition,
   formatApprovalDisplayPath,
   hasNativeHookRelayInvocation,
@@ -12,11 +13,13 @@ import {
   type EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams,
   type NativeHookRelayProcessResponse,
   type NativeHookRelayRegistrationHandle,
+  runBeforeToolCallHook,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { normalizeTrimmedStringList } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { sliceUtf16Safe } from "openclaw/plugin-sdk/text-utility-runtime";
 import { formatCodexDisplayText } from "../command-formatters.js";
 import { resolveCodexToolAbortTerminalReason } from "./dynamic-tool-execution.js";
+import { buildCodexHookRequester } from "./hook-requester.js";
 import {
   approvalRequestExplicitlyUnavailable,
   mapExecDecisionToOutcome,
@@ -438,12 +441,40 @@ async function runOpenClawToolPolicyForApprovalRequest(params: {
   if (nativeRelayOutcome?.handled) {
     return { outcome: "allowed" };
   }
-  const outcome = await params.paramsForRun.hostCapabilities.runBeforeToolCall({
+  const hookChannelId = buildAgentHookContextChannelFields({
+    sessionKey: params.paramsForRun.sessionKey,
+    messageChannel: params.paramsForRun.messageChannel,
+    messageProvider: params.paramsForRun.messageProvider,
+    currentChannelId: params.paramsForRun.currentChannelId,
+    messageTo: params.paramsForRun.messageTo,
+  }).channelId;
+  const requester = buildCodexHookRequester(params.paramsForRun);
+  const outcome = await runBeforeToolCallHook({
     toolName: policyRequest.toolName,
     params: policyRequest.params,
-    ...(cwd ? { nativeOperation: { cwd } } : {}),
     ...(params.context.approvalId ? { toolCallId: params.context.approvalId } : {}),
+    approvalMode: "request",
     signal: params.signal,
+    ctx: {
+      ...(params.paramsForRun.agentId ? { agentId: params.paramsForRun.agentId } : {}),
+      ...(params.paramsForRun.config ? { config: params.paramsForRun.config } : {}),
+      ...(cwd ? { cwd } : {}),
+      workspaceDir: params.paramsForRun.workspaceDir,
+      ...(params.paramsForRun.sessionKey ? { sessionKey: params.paramsForRun.sessionKey } : {}),
+      ...(params.paramsForRun.sessionId ? { sessionId: params.paramsForRun.sessionId } : {}),
+      ...(params.paramsForRun.runId ? { runId: params.paramsForRun.runId } : {}),
+      ...(hookChannelId ? { channelId: hookChannelId } : {}),
+      // This is the same concrete call already seen by native PreToolUse. Preserve
+      // its host-proven actor so sender-aware policy cannot authorize two identities.
+      ...(requester ? { requester } : {}),
+      trigger: params.paramsForRun.trigger,
+      approvalReviewerDeviceId: params.paramsForRun.approvalReviewerDeviceId,
+      turnSourceChannel: params.paramsForRun.messageChannel ?? params.paramsForRun.messageProvider,
+      turnSourceTo:
+        params.paramsForRun.currentMessagingTarget ?? params.paramsForRun.currentChannelId,
+      turnSourceAccountId: params.paramsForRun.agentAccountId,
+      turnSourceThreadId: params.paramsForRun.currentThreadTs,
+    },
   });
   if (outcome.blocked) {
     return {

@@ -3,9 +3,11 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   abortAndDrainAgentHarnessRun,
+  buildAgentHookContextChannelFields,
   nativeHookRelayTesting,
   queueAgentHarnessMessage,
   resetAgentEventsForTest,
+  runBeforeToolCallHook,
   type EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams,
 } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { clearRuntimeAuthProfileStoreSnapshots } from "openclaw/plugin-sdk/agent-runtime";
@@ -26,6 +28,7 @@ import {
 import * as codexRequirements from "./config-requirements.js";
 import { dynamicToolBuildState } from "./dynamic-tool-build-state.js";
 import { createCodexDynamicToolBridge } from "./dynamic-tools.js";
+import { buildCodexHookRequester } from "./hook-requester.js";
 import { nativeHookRelayUnregisterQueue } from "./native-hook-relay-state.js";
 import { defaultCodexPluginMetadataCache } from "./plugin-metadata-cache.js";
 import type { CodexServerNotification } from "./protocol.js";
@@ -50,13 +53,45 @@ const execApprovalsRuntimeMocks = vi.hoisted(() => ({
   loadExecApprovals: vi.fn<() => ExecApprovalsFile>(() => ({ version: 1, agents: {} })),
 }));
 
-function createHarnessHostCapabilities(): EmbeddedRunAttemptParams["hostCapabilities"] {
+function createHarnessHostCapabilities(
+  params: EmbeddedRunAttemptParams,
+): EmbeddedRunAttemptParams["hostCapabilities"] {
   return Object.freeze({
     kind: "agent-harness-host-capability",
     version: 1,
     assertActive: () => {},
     bindToolSurface: (tools) => tools,
-    runBeforeToolCall: async (request) => ({ blocked: false, params: request.params }),
+    runBeforeToolCall: async ({ nativeOperation, approvalMode, ...request }) => {
+      const hookChannelId = buildAgentHookContextChannelFields({
+        sessionKey: params.sessionKey,
+        messageChannel: params.messageChannel,
+        messageProvider: params.messageProvider,
+        currentChannelId: params.currentChannelId,
+        messageTo: params.messageTo,
+      }).channelId;
+      const cwd = nativeOperation?.cwd ?? params.workspaceDir;
+      const requester = buildCodexHookRequester(params);
+      return await runBeforeToolCallHook({
+        ...request,
+        approvalMode: approvalMode === "defer" ? "defer" : "request",
+        ctx: {
+          ...(params.agentId ? { agentId: params.agentId } : {}),
+          ...(params.config ? { config: params.config } : {}),
+          ...(cwd ? { cwd, workspaceDir: params.workspaceDir ?? cwd } : {}),
+          ...(params.sessionKey ? { sessionKey: params.sessionKey } : {}),
+          ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+          ...(params.runId ? { runId: params.runId } : {}),
+          ...(hookChannelId ? { channelId: hookChannelId } : {}),
+          ...(requester ? { requester } : {}),
+          trigger: params.trigger,
+          approvalReviewerDeviceId: params.approvalReviewerDeviceId,
+          turnSourceChannel: params.messageChannel ?? params.messageProvider,
+          turnSourceTo: params.currentMessagingTarget ?? params.currentChannelId,
+          turnSourceAccountId: params.agentAccountId,
+          turnSourceThreadId: params.currentThreadTs,
+        },
+      });
+    },
     requestApproval: async () => undefined,
     waitForApproval: async () => undefined,
   });
@@ -235,8 +270,7 @@ export function createParams(
   const sessionKey = identity.sessionKey ?? "agent:main:session-1";
   const provider = identity.provider ?? "codex";
   const model = createCodexTestModel(provider);
-  return {
-    hostCapabilities: createHarnessHostCapabilities(),
+  const params = {
     prompt: identity.prompt ?? "hello",
     sessionId,
     sessionKey,
@@ -264,6 +298,8 @@ export function createParams(
     modelRegistry: {} as never,
     observeToolTerminal: createCodexTestToolTerminalObserver(),
   } as EmbeddedRunAttemptParams;
+  params.hostCapabilities = createHarnessHostCapabilities(params);
+  return params;
 }
 
 export function createTestParams(): EmbeddedRunAttemptParams {
