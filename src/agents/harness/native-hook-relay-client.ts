@@ -44,6 +44,9 @@ export async function invokeNativeHookRelayBridge(
       if (Date.now() > record.expiresAtMs) {
         throw new Error("native hook relay bridge expired");
       }
+      if (isNativeHookRelayBridgePidDead(record.pid)) {
+        throw new Error(NATIVE_HOOK_RELAY_BRIDGE_STALE_REGISTRATION_ERROR);
+      }
       return await postNativeHookRelayBridgeRecord({
         record,
         timeoutMs: Math.max(1, timeoutMs - (Date.now() - startedAt)),
@@ -72,6 +75,15 @@ export async function invokeNativeHookRelayBridge(
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function isNativeHookRelayBridgePidDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH";
+  }
 }
 
 function postNativeHookRelayBridgeRecord(params: {

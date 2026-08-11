@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
+import { exec as execCallback } from "node:child_process";
 import fs from "node:fs/promises";
 import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 // Covers native hook relay registration, bridge invocation, and approval state.
 import { createRequireRecord } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +36,7 @@ import {
 } from "./native-hook-relay.js";
 
 const NATIVE_HOOK_RELAY_EXEC_PREFIX = process.platform === "win32" ? "" : "exec ";
+const exec = promisify(execCallback);
 
 afterEach(() => {
   vi.useRealTimers();
@@ -61,6 +64,17 @@ function expectRecordFields(record: Record<string, unknown>, fields: Record<stri
   for (const [key, value] of Object.entries(fields)) {
     expect(record[key]).toEqual(value);
   }
+}
+
+function expectObservationalRelayCommand(command: string, relayCommand: string, event: string) {
+  if (process.platform === "win32") {
+    expect(command).toBe(relayCommand);
+    return;
+  }
+  expect(command).toContain("openclaw-native-hook-relay-guards");
+  expect(command).toContain("OpenClaw native hook relay subprocess guard skipped observational hook");
+  expect(command).toContain(`event=${event}`);
+  expect(command).toContain(`${relayCommand} & openclaw_native_hook_relay_pid=$!`);
 }
 
 function getMockCallArg(
@@ -688,9 +702,11 @@ describe("native hook relay registry", () => {
     expect(relay.shouldRelayEvent("post_tool_use")).toBe(true);
     expect(relay.toolMatcherForEvent("post_tool_use")).toEqual(["apply_patch"]);
     expect(relay.shouldRelayEvent("before_agent_finalize")).toBe(false);
-    expect(relay.commandForEvent("post_tool_use")).toBe(
-      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
+    expectObservationalRelayCommand(
+      relay.commandForEvent("post_tool_use"),
+      `/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} ${nativeHookRelayStateDbArgForTests()} --generation ${relay.generation} --event post_tool_use --timeout 1234`,
+      "post_tool_use",
     );
   });
 
@@ -710,11 +726,67 @@ describe("native hook relay registry", () => {
     });
 
     expect(relay.shouldRelayEvent("before_agent_finalize")).toBe(true);
-    expect(relay.commandForEvent("before_agent_finalize")).toBe(
-      `${NATIVE_HOOK_RELAY_EXEC_PREFIX}/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
+    expectObservationalRelayCommand(
+      relay.commandForEvent("before_agent_finalize"),
+      `/usr/local/bin/node '/opt/Open Claw/openclaw.mjs' hooks relay --provider codex --relay-id ` +
         `${relay.relayId} ${nativeHookRelayStateDbArgForTests()} --generation ${relay.generation} --event before_agent_finalize --timeout 1234`,
+      "before_agent_finalize",
     );
   });
+
+  it.runIf(process.platform !== "win32")(
+    "sheds concurrent observational relay commands before starting the relay subprocess",
+    async () => {
+      const tempDir = await fs.mkdtemp(path.join(tmpdir(), "native-hook-relay-guard-"));
+      const scriptPath = path.join(tempDir, "relay-script.sh");
+      const startedPath = path.join(tempDir, "started.log");
+      const releasePath = path.join(tempDir, "release");
+      await fs.writeFile(
+        scriptPath,
+        [
+          "#!/bin/sh",
+          'printf "%s\\n" started >> "$OPENCLAW_NATIVE_RELAY_STARTED"',
+          'while [ ! -f "$OPENCLAW_NATIVE_RELAY_RELEASE" ]; do sleep 0.05; done',
+          "exit 0",
+          "",
+        ].join("\n"),
+      );
+      await fs.chmod(scriptPath, 0o755);
+      const command = buildNativeHookRelayCommand({
+        provider: "codex",
+        relayId: `guard-${randomUUID()}`,
+        generation: "generation-1",
+        event: "post_tool_use",
+        executable: scriptPath,
+        nodeExecutable: "/bin/sh",
+        timeoutMs: 2_000,
+      });
+      const env = {
+        ...process.env,
+        OPENCLAW_NATIVE_RELAY_STARTED: startedPath,
+        OPENCLAW_NATIVE_RELAY_RELEASE: releasePath,
+      };
+
+      try {
+        const first = exec(command, { env });
+        await vi.waitFor(async () => {
+          await expect(fs.readFile(startedPath, "utf8")).resolves.toBe("started\n");
+        });
+
+        const second = await exec(command, { env });
+        expect(second.stdout).toBe("");
+        expect(second.stderr).toContain(
+          "OpenClaw native hook relay subprocess guard skipped observational hook",
+        );
+        await expect(fs.readFile(startedPath, "utf8")).resolves.toBe("started\n");
+
+        await fs.writeFile(releasePath, "");
+        await expect(first).resolves.toMatchObject({ stdout: "", stderr: "" });
+      } finally {
+        await fs.rm(tempDir, { force: true, recursive: true });
+      }
+    },
+  );
 
   it("allows callers to replace a relay at a stable id", async () => {
     const first = registerNativeHookRelay({
@@ -1111,6 +1183,37 @@ describe("native hook relay registry", () => {
 
     expect(kill).toHaveBeenCalledWith(9_999_991, 0);
     expect(testing.getNativeHookRelayBridgeRecordForTests(staleRelayId)).toBeUndefined();
+  });
+
+  it("rejects dead direct bridge registry owners during client invocation", async () => {
+    const relayId = await writeForeignNativeHookRelayBridgeRecordForTests(
+      uniqueNativeHookRelayIdForTests("codex-dead-bridge-invoke"),
+      {
+        pid: 9_999_995,
+        expiresAtMs: Date.now() + 60_000,
+      },
+    );
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+      if (pid === 9_999_995) {
+        throw Object.assign(new Error("missing process"), { code: "ESRCH" });
+      }
+      return true;
+    });
+
+    await expect(
+      invokeNativeHookRelayBridge({
+        provider: "codex",
+        relayId,
+        event: "pre_tool_use",
+        timeoutMs: 75,
+        rawPayload: {
+          hook_event_name: "PreToolUse",
+          tool_name: "Bash",
+          tool_input: { command: "pwd" },
+        },
+      }),
+    ).rejects.toThrow("native hook relay bridge stale registration");
+    expect(kill).toHaveBeenCalledWith(9_999_995, 0);
   });
 
   it("prunes expired foreign direct bridge records even when their pid is alive", async () => {
@@ -3697,7 +3800,7 @@ describe("native hook relay command builder", () => {
     );
   });
 
-  it("execs niced relays so the Codex timeout owns the relay process", () => {
+  it("guards niced observational relays before starting the relay process", () => {
     const command = buildNativeHookRelayCommand({
       provider: "codex",
       relayId: "relay-1",
@@ -3706,10 +3809,10 @@ describe("native hook relay command builder", () => {
       nice: 10,
     });
 
-    expect(command).toBe(
-      process.platform === "win32"
-        ? "openclaw hooks relay --provider codex --relay-id relay-1 --event post_tool_use --timeout 5000"
-        : "exec nice -n 10 openclaw hooks relay --provider codex --relay-id relay-1 --event post_tool_use --timeout 5000",
+    expectObservationalRelayCommand(
+      command,
+      "nice -n 10 openclaw hooks relay --provider codex --relay-id relay-1 --event post_tool_use --timeout 5000",
+      "post_tool_use",
     );
   });
 

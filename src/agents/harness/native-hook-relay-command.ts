@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveOpenClawPackageRootSync } from "../../infra/openclaw-root.js";
 import { DEFAULT_RELAY_TIMEOUT_MS } from "./native-hook-relay-constants.js";
@@ -18,6 +19,10 @@ function resolveNativeHookRelayNicePrefix(value: number | false | undefined): st
     return [];
   }
   return ["nice", "-n", String(nice)];
+}
+
+function isNativeHookRelayObservationalEvent(event: NativeHookRelayEvent): boolean {
+  return event === "post_tool_use" || event === "before_agent_finalize";
 }
 
 export function resolveNativeHookRelayCommandTimeoutMs(
@@ -87,9 +92,47 @@ export function buildNativeHookRelayCommandWithStateDatabase(params: {
     "--timeout",
     String(timeoutMs),
   ]);
+  if (process.platform !== "win32" && isNativeHookRelayObservationalEvent(params.event)) {
+    return wrapNativeHookRelayCommandWithObservationalAdmissionGuard({
+      command,
+      event: params.event,
+      relayId: params.relayId,
+      provider: params.provider,
+    });
+  }
   // Codex kills the shell process when a hook times out. Replace that shell so
   // the timeout targets this relay instead of leaving its Node child behind.
   return process.platform === "win32" ? command : `exec ${command}`;
+}
+
+function wrapNativeHookRelayCommandWithObservationalAdmissionGuard(params: {
+  command: string;
+  event: NativeHookRelayEvent;
+  relayId: string;
+  provider: NativeHookRelayProvider;
+}): string {
+  const guardDir = path.join(tmpdir(), "openclaw-native-hook-relay-guards");
+  const lockPath = path.join(
+    guardDir,
+    `${params.provider}-${params.relayId}-${params.event}.lock`,
+  );
+  const guardMessage = `OpenClaw native hook relay subprocess guard skipped observational hook: provider=${params.provider} relayId=${params.relayId} event=${params.event}`;
+  const childPid = "openclaw_native_hook_relay_pid";
+  const releaseLock = `${shellQuoteArgs(["rmdir", lockPath])} 2>/dev/null`;
+  const cleanup = `if [ -n "$${childPid}" ]; then kill "$${childPid}" 2>/dev/null; fi; ${releaseLock}`;
+  return [
+    `${shellQuoteArgs(["mkdir", "-p", guardDir])} &&`,
+    `if ${shellQuoteArgs(["mkdir", lockPath])} 2>/dev/null; then`,
+    `trap ${shellQuoteArgs([cleanup])} EXIT INT TERM;`,
+    `${params.command} & ${childPid}=$!;`,
+    `wait "$${childPid}";`,
+    "openclaw_native_hook_relay_status=$?;",
+    "exit \"$openclaw_native_hook_relay_status\";",
+    "else",
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "fi",
+  ].join(" ");
 }
 
 function resolveOpenClawCliExecutable(): string {
