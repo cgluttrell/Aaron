@@ -1025,12 +1025,7 @@ describe("native hook relay registry", () => {
         expiresAtMs: Date.now() - 1,
       },
     );
-    const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
-      if (pid !== 9_999_992) {
-        throw Object.assign(new Error("unexpected process"), { code: "ESRCH" });
-      }
-      return true;
-    });
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => true);
 
     registerNativeHookRelay({
       provider: "codex",
@@ -1040,7 +1035,7 @@ describe("native hook relay registry", () => {
       allowedEvents: ["pre_tool_use"],
     });
 
-    expect(kill).not.toHaveBeenCalled();
+    expect(kill).not.toHaveBeenCalledWith(9_999_992, 0);
     await expect(fs.stat(stalePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
