@@ -547,6 +547,10 @@ function resolveNativeHookRelayNicePrefix(value: number | false | undefined): st
   return ["nice", "-n", String(nice)];
 }
 
+function isNativeHookRelayObservationalEvent(event: NativeHookRelayEvent): boolean {
+  return event === "post_tool_use" || event === "before_agent_finalize";
+}
+
 function resolveNativeHookRelayCommandTimeoutMs(
   configuredTimeoutMs: number | undefined,
   overrideTimeoutMs: number | undefined,
@@ -580,7 +584,7 @@ export function buildNativeHookRelayCommand(params: {
       ? ["openclaw"]
       : [params.nodeExecutable ?? process.execPath, executable];
   const nicePrefix = resolveNativeHookRelayNicePrefix(params.nice);
-  return shellQuoteArgs([
+  const command = shellQuoteArgs([
     ...nicePrefix,
     ...argv,
     "hooks",
@@ -598,6 +602,62 @@ export function buildNativeHookRelayCommand(params: {
     "--timeout",
     String(timeoutMs),
   ]);
+  if (process.platform !== "win32" && isNativeHookRelayObservationalEvent(params.event)) {
+    return wrapNativeHookRelayCommandWithObservationalAdmissionGuard({
+      command,
+      event: params.event,
+      relayId: params.relayId,
+      provider: params.provider,
+    });
+  }
+  return command;
+}
+
+function wrapNativeHookRelayCommandWithObservationalAdmissionGuard(params: {
+  command: string;
+  event: NativeHookRelayEvent;
+  relayId: string;
+  provider: NativeHookRelayProvider;
+}): string {
+  const guardDir = path.join(tmpdir(), "openclaw-native-hook-relay-guards");
+  const lockPath = path.join(guardDir, `${params.provider}-${params.relayId}-${params.event}.lock`);
+  const legacyPidPath = path.join(lockPath, "pid");
+  const guardMessage = `OpenClaw native hook relay subprocess guard skipped observational hook: provider=${params.provider} relayId=${params.relayId} event=${params.event}`;
+  return [
+    `${shellQuoteArgs(["mkdir", "-p", guardDir])} &&`,
+    "while :; do",
+    `if [ -d ${shellQuoteArgs([lockPath])} ] && [ ! -L ${shellQuoteArgs([lockPath])} ]; then`,
+    `openclaw_native_hook_relay_owner_pid="$(cat ${shellQuoteArgs([legacyPidPath])} 2>/dev/null || true)";`,
+    'if [ -n "$openclaw_native_hook_relay_owner_pid" ] && kill -0 "$openclaw_native_hook_relay_owner_pid" 2>/dev/null; then',
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "fi;",
+    'if [ -z "$openclaw_native_hook_relay_owner_pid" ]; then',
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "fi;",
+    `${shellQuoteArgs(["rm", "-f", legacyPidPath])} 2>/dev/null || true;`,
+    `if ${shellQuoteArgs(["rmdir", lockPath])} 2>/dev/null; then continue; fi;`,
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "fi;",
+    `if ln -s "$$" ${shellQuoteArgs([lockPath])} 2>/dev/null; then`,
+    `exec ${params.command};`,
+    "fi;",
+    `openclaw_native_hook_relay_owner_pid="$(readlink ${shellQuoteArgs([lockPath])} 2>/dev/null || cat ${shellQuoteArgs([legacyPidPath])} 2>/dev/null || true)";`,
+    'if [ -n "$openclaw_native_hook_relay_owner_pid" ] && kill -0 "$openclaw_native_hook_relay_owner_pid" 2>/dev/null; then',
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "fi;",
+    'if [ -n "$openclaw_native_hook_relay_owner_pid" ]; then',
+    `if ${shellQuoteArgs(["rm", "-f", lockPath])} 2>/dev/null; then continue; fi;`,
+    `${shellQuoteArgs(["rm", "-f", legacyPidPath])} 2>/dev/null || true;`,
+    `if ${shellQuoteArgs(["rmdir", lockPath])} 2>/dev/null; then continue; fi;`,
+    "fi;",
+    `${shellQuoteArgs(["printf", "%s\\n", guardMessage])} >&2;`,
+    "exit 0;",
+    "done",
+  ].join(" ");
 }
 
 function nativePreToolUseMayRunLoopDetection(registration: NativeHookRelayRegistration): boolean {
@@ -834,6 +894,9 @@ export async function invokeNativeHookRelayBridge(
       const record = readNativeHookRelayBridgeRecord(relayId);
       if (Date.now() > record.expiresAtMs) {
         throw new Error("native hook relay bridge expired");
+      }
+      if (isNativeHookRelayBridgePidDead(record.pid)) {
+        throw new Error(NATIVE_HOOK_RELAY_BRIDGE_STALE_REGISTRATION_ERROR);
       }
       return await invokeNativeHookRelayBridgeRecord({
         record,
