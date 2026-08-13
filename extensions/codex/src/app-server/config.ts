@@ -2119,7 +2119,7 @@ function normalizeStringList(value: unknown): string[] {
   return normalizeTrimmedStringList(value);
 }
 
-function readBooleanEnv(value: string | undefined): boolean | undefined {
+export function readBooleanEnv(value: string | undefined): boolean | undefined {
   if (value === undefined) {
     return undefined;
   }

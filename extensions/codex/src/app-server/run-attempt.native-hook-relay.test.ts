@@ -90,6 +90,48 @@ describe("runCodexAppServerAttempt native hook relay", () => {
     expect(nativeHookRelayTesting.getNativeHookRelayRegistrationForTests(relayId)).toBeUndefined();
   });
 
+  it("skips relay registration and clears hooks when the operator env kill-switch is set", async () => {
+    // Guards the OPENCLAW_CODEX_NATIVE_HOOK_RELAY escape hatch for
+    // openclaw/openclaw#91009: an explicit enabled:true must still yield the
+    // disabled config, otherwise the fan-out keeps spawning hook processes.
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const harness = createStartedThreadHarness();
+    const previous = process.env.OPENCLAW_CODEX_NATIVE_HOOK_RELAY;
+    process.env.OPENCLAW_CODEX_NATIVE_HOOK_RELAY = "0";
+
+    try {
+      const run = runCodexAppServerAttempt(createParams(sessionFile, workspaceDir), {
+        nativeHookRelay: {
+          enabled: true,
+          events: ["pre_tool_use"],
+          gatewayTimeoutMs: 4321,
+          hookTimeoutSec: 9,
+        },
+      });
+      await harness.waitForMethod("turn/start");
+      await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+      await run;
+
+      const startRequest = harness.requests.find((request) => request.method === "thread/start");
+      const startConfig = (startRequest?.params as { config?: Record<string, unknown> } | undefined)
+        ?.config;
+      expect(startConfig?.["features.hooks"]).toBe(false);
+      expect(startConfig?.["hooks.PreToolUse"]).toEqual([]);
+      expect(startConfig?.["hooks.PostToolUse"]).toEqual([]);
+      expect(startConfig?.["hooks.PermissionRequest"]).toEqual([]);
+      expect(startConfig?.["hooks.Stop"]).toEqual([]);
+      // No relay command anywhere in the patch: nothing for Codex to spawn.
+      expect(JSON.stringify(startConfig ?? {})).not.toContain("hooks relay");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.OPENCLAW_CODEX_NATIVE_HOOK_RELAY;
+      } else {
+        process.env.OPENCLAW_CODEX_NATIVE_HOOK_RELAY = previous;
+      }
+    }
+  });
+
   it("forwards command approval requests through the active native hook relay", async () => {
     const approvalSpy = vi
       .spyOn(approvalBridge, "handleCodexAppServerApprovalRequest")
