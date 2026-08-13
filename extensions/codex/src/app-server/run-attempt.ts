@@ -198,6 +198,7 @@ import {
   createCodexNativeHookRelay,
   emitCodexNativePreToolUseFailureDiagnostic,
   flushPendingCodexNativeHookRelayUnregistersForTests,
+  isCodexNativeHookRelayDisabledByEnv,
   resolveCodexNativeHookRelayEvents,
   resolveCodexNativeHookRelayTtlMs,
   resolveCodexNativeHookRelayUnregisterGraceMs,
@@ -1586,7 +1587,10 @@ export async function runCodexAppServerAttempt(
             events: nativeHookRelayEvents,
             hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
           })
-        : options.nativeHookRelay?.enabled === false
+        : // The env kill-switch suppresses registration above, so it must also
+          // emit the clearing config; otherwise Codex keeps its previous hook
+          // config and the relay commands stay installed.
+          options.nativeHookRelay?.enabled === false || isCodexNativeHookRelayDisabledByEnv()
           ? buildCodexNativeHookRelayDisabledConfig()
           : undefined,
       nativeHookRelayGeneration: nativeHookRelay?.generation,

@@ -59,6 +59,7 @@ import {
   buildCodexNativeHookRelayDisabledConfig,
   CODEX_NATIVE_HOOK_RELAY_EVENTS,
   emitCodexNativePreToolUseFailureDiagnostic,
+  isCodexNativeHookRelayDisabledByEnv,
   type CodexNativePreToolUseFailure,
 } from "./native-hook-relay.js";
 import {
@@ -688,7 +689,10 @@ function registerCodexSideNativeHookRelay(params: {
   signal: AbortSignal;
   onPreToolUseFailure: (failure: CodexNativePreToolUseFailure) => void;
 }): NativeHookRelayRegistrationHandle | undefined {
-  if (params.options.enabled === false) {
+  // Side questions register their own relay, so the kill-switch has to be
+  // checked here too; gating only the run-attempt path would leave this one
+  // spawning hook processes.
+  if (params.options.enabled === false || isCodexNativeHookRelayDisabledByEnv()) {
     return undefined;
   }
   return registerNativeHookRelay({

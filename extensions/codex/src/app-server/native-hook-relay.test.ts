@@ -11,6 +11,7 @@ import {
   buildCodexNativeHookRelayConfig,
   buildCodexNativeHookRelayDisabledConfig,
   emitCodexNativePreToolUseFailureDiagnostic,
+  isCodexNativeHookRelayDisabledByEnv,
   resolveCodexNativeHookRelayCommandTimeoutMs,
   resolveCodexNativeHookRelayUnregisterGraceMs,
 } from "./native-hook-relay.js";
@@ -390,3 +391,28 @@ function createRelay(options?: {
     unregister: () => undefined,
   };
 }
+
+describe("isCodexNativeHookRelayDisabledByEnv", () => {
+  it("leaves the relay enabled when the operator has not opted out", () => {
+    expect(isCodexNativeHookRelayDisabledByEnv({})).toBe(false);
+    expect(isCodexNativeHookRelayDisabledByEnv({ OPENCLAW_CODEX_NATIVE_HOOK_RELAY: "" })).toBe(
+      false,
+    );
+  });
+
+  it("disables the relay for each supported falsey spelling", () => {
+    for (const value of ["0", "false", "no", "off", "OFF", " False "]) {
+      expect(isCodexNativeHookRelayDisabledByEnv({ OPENCLAW_CODEX_NATIVE_HOOK_RELAY: value })).toBe(
+        true,
+      );
+    }
+  });
+
+  it("keeps the relay enabled for truthy and unparseable values", () => {
+    for (const value of ["1", "true", "yes", "on", "maybe"]) {
+      expect(isCodexNativeHookRelayDisabledByEnv({ OPENCLAW_CODEX_NATIVE_HOOK_RELAY: value })).toBe(
+        false,
+      );
+    }
+  });
+});

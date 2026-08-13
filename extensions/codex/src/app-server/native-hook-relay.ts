@@ -15,6 +15,7 @@ import {
   addTimerTimeoutGraceMs,
   finiteSecondsToTimerSafeMilliseconds,
 } from "openclaw/plugin-sdk/number-runtime";
+import { readBooleanEnv } from "./config.js";
 import type { CodexAppServerRuntimeOptions } from "./config.js";
 import { resolveCodexToolAbortTerminalReason } from "./dynamic-tool-execution.js";
 import type { JsonObject, JsonValue } from "./protocol.js";
@@ -146,6 +147,22 @@ export function emitCodexNativePreToolUseFailureDiagnostic(params: {
   });
 }
 
+/**
+ * Operator kill-switch for the Codex native hook relay.
+ *
+ * Each relayed event spawns a full `openclaw` CLI plus an `openclaw-hooks` child
+ * (~330 MB apiece), so an install with no tool-event hook consumers pays a large
+ * per-tool-call cost for nothing (upstream openclaw/openclaw#91009). Unset keeps
+ * the relay on, so this is inert until an operator opts out. Explicit
+ * `options.enabled === false` still wins at the call sites; this only forces the
+ * disabled path when nothing else asked for it.
+ *
+ * Remove once openclaw/openclaw#121668 lands real plugin config for this.
+ */
+export function isCodexNativeHookRelayDisabledByEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return readBooleanEnv(env.OPENCLAW_CODEX_NATIVE_HOOK_RELAY) === false;
+}
+
 /** Registers an OpenClaw native hook relay for a Codex app-server turn. */
 export function createCodexNativeHookRelay(params: {
   options:
@@ -170,7 +187,7 @@ export function createCodexNativeHookRelay(params: {
   signal: AbortSignal;
   onPreToolUseFailure: (failure: CodexNativePreToolUseFailure) => void | Promise<void>;
 }): NativeHookRelayRegistrationHandle | undefined {
-  if (params.options?.enabled === false) {
+  if (params.options?.enabled === false || isCodexNativeHookRelayDisabledByEnv()) {
     return undefined;
   }
   return registerNativeHookRelay({
