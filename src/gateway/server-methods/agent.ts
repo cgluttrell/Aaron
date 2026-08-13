@@ -115,6 +115,7 @@ import {
   parseAgentSessionKey,
 } from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
+import { decideDispatchPressure } from "../../process/dispatch-pressure-guard.js";
 import {
   annotateInterSessionPromptText,
   normalizeInputProvenance,
@@ -1168,6 +1169,7 @@ export const agentHandlers: GatewayRequestHandlers = {
       idempotencyKey: string;
       sourceReplyDeliveryMode?: "automatic" | "message_tool_only";
       disableMessageTool?: boolean;
+      dispatchPressureOverride?: { approvedBy: "Chris"; reason: string };
       timeout?: number;
       bestEffortDeliver?: boolean;
       cleanupBundleMcpOnRunEnd?: boolean;
@@ -1215,6 +1217,21 @@ export const agentHandlers: GatewayRequestHandlers = {
         errorShape(
           ErrorCodes.INVALID_REQUEST,
           "internal session-effect controls are reserved for backend callers.",
+        ),
+      );
+      return;
+    }
+    if (
+      request.dispatchPressureOverride &&
+      !clientHasAdminScope(client) &&
+      !canUseInternalRuntimeHandoff
+    ) {
+      respond(
+        false,
+        undefined,
+        errorShape(
+          ErrorCodes.INVALID_REQUEST,
+          "dispatch pressure override is reserved for admin or backend callers.",
         ),
       );
       return;
@@ -3018,6 +3035,63 @@ export const agentHandlers: GatewayRequestHandlers = {
         })
       ) {
         return;
+      }
+
+      const pressureGuardApplies =
+        suppressVisibleSessionEffects ||
+        client?.internal?.agentRunTracking === "plugin_subagent" ||
+        request.acpTurnSource === "manual_spawn" ||
+        Boolean(request.cwd);
+      if (pressureGuardApplies) {
+        const pressureDecision = decideDispatchPressure({
+          workKind: "gateway_agent",
+          workId: runId,
+          override: request.dispatchPressureOverride,
+        });
+        if (pressureDecision.status === "defer") {
+          context.logGateway.warn("gateway dispatch pressure guard deferred agent run", {
+            runId,
+            reason: pressureDecision.reason,
+            currentBytes: pressureDecision.sample.currentBytes,
+            inactiveFileBytes: pressureDecision.sample.inactiveFileBytes,
+            workingSetBytes: pressureDecision.sample.workingSetBytes,
+            maxBytes: pressureDecision.sample.maxBytes,
+            usageRatio: pressureDecision.sample.usageRatio,
+            growthBytes: pressureDecision.sample.growthBytes,
+            windowMs: pressureDecision.sample.windowMs,
+            threshold: pressureDecision.threshold,
+          });
+          respond(
+            false,
+            {
+              runId,
+              status: "deferred" as const,
+              summary: "gateway memory pressure guard deferred isolated agent dispatch",
+              reason: pressureDecision.reason,
+            },
+            errorShape(
+              ErrorCodes.UNAVAILABLE,
+              "gateway memory pressure guard deferred isolated agent dispatch",
+            ),
+            { runId, reason: pressureDecision.reason },
+          );
+          return;
+        }
+        if (pressureDecision.status === "override") {
+          context.logGateway.warn("gateway dispatch pressure guard override allowed agent run", {
+            runId,
+            approvedBy: pressureDecision.override.approvedBy,
+            reason: pressureDecision.override.reason,
+            pressureReason: pressureDecision.reason,
+            currentBytes: pressureDecision.sample?.currentBytes,
+            inactiveFileBytes: pressureDecision.sample?.inactiveFileBytes,
+            workingSetBytes: pressureDecision.sample?.workingSetBytes,
+            maxBytes: pressureDecision.sample?.maxBytes,
+            usageRatio: pressureDecision.sample?.usageRatio,
+            growthBytes: pressureDecision.sample?.growthBytes,
+            windowMs: pressureDecision.sample?.windowMs,
+          });
+        }
       }
 
       // Register before the accepted ack so an immediate chat.abort/sessions.abort

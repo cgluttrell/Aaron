@@ -39,6 +39,8 @@ import { formatErrorMessage } from "../../infra/errors.js";
 import { resolveTargetPrefixedChannel } from "../../infra/outbound/channel-target-prefix.js";
 import { isSubagentSessionKey, normalizeAgentId } from "../../routing/session-key.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
+import { ADMIN_SCOPE } from "../method-scopes.js";
+import { getGatewayProcessInstanceId } from "../process-instance.js";
 import {
   applyCronCreateCallerScopeDefault,
   cronCreateMatchesCallerScope,
@@ -49,7 +51,7 @@ import {
   type CronCallerScope,
 } from "./cron-caller-scope.js";
 import { isCronInvalidRequestError } from "./cron-error-classification.js";
-import type { GatewayRequestHandlers, RespondFn } from "./types.js";
+import type { GatewayRequestHandlerOptions, GatewayRequestHandlers, RespondFn } from "./types.js";
 
 type CronJobIdParams = { id?: string; jobId?: string };
 
@@ -72,6 +74,11 @@ type CronListCallerScopeContext = {
     listPage(opts?: CronListPageOptions): Promise<CronListPageResult>;
   };
 };
+
+function clientHasAdminScope(client: GatewayRequestHandlerOptions["client"]): boolean {
+  const scopes = Array.isArray(client?.connect?.scopes) ? client.connect.scopes : [];
+  return scopes.includes(ADMIN_SCOPE);
+}
 
 function cronJobReadView(job: CronJob) {
   return {
@@ -774,7 +781,11 @@ export const cronHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const p = params as CronJobIdParams & { mode?: "due" | "force" };
+    const p = params as CronJobIdParams & {
+      mode?: "due" | "force";
+      expectedProcessInstanceId?: string;
+      dispatchPressureOverride?: { approvedBy: "Chris"; reason: string };
+    };
     const callerScope = readCronCallerScope(client);
     const jobId = resolveCronJobId(p);
     if (!jobId) {
@@ -793,9 +804,28 @@ export const cronHandlers: GatewayRequestHandlers = {
       respondInvalidCronParams(respond, "cron.run", "id not found");
       return;
     }
+    if (
+      p.expectedProcessInstanceId &&
+      p.expectedProcessInstanceId !== getGatewayProcessInstanceId()
+    ) {
+      respondInvalidCronParams(respond, "cron.run", "Gateway process changed after preflight");
+      return;
+    }
+    if (p.dispatchPressureOverride && !clientHasAdminScope(client)) {
+      respondInvalidCronParams(
+        respond,
+        "cron.run",
+        "dispatch pressure override is reserved for admin callers",
+      );
+      return;
+    }
     let result: Awaited<ReturnType<typeof context.cron.enqueueRun>>;
     try {
-      result = await context.cron.enqueueRun(jobId, p.mode ?? "force");
+      result = p.dispatchPressureOverride
+        ? await context.cron.enqueueRun(jobId, p.mode ?? "force", {
+            dispatchPressureOverride: p.dispatchPressureOverride,
+          })
+        : await context.cron.enqueueRun(jobId, p.mode ?? "force");
     } catch (error) {
       if (isInvalidCronSessionTargetIdError(error)) {
         respond(true, { ok: true, ran: false, reason: "invalid-spec" }, undefined);

@@ -250,6 +250,14 @@ function callerClient(agentId: string): GatewayClient {
   };
 }
 
+function adminClient(): GatewayClient {
+  return {
+    connect: {
+      scopes: ["operator.admin"],
+    } as GatewayClient["connect"],
+  };
+}
+
 function telegramDeliveryWithSlackFailure(overrides: Partial<CronDelivery> = {}): CronDelivery {
   return {
     mode: "announce",
@@ -1717,6 +1725,64 @@ describe("cron method validation", () => {
       { ok: true, enqueued: true, runId: "run-1" },
       undefined,
     );
+  });
+
+  it("rejects cron.run pressure overrides from non-admin callers", async () => {
+    const context = createCronContext(createCronJob({ id: "cron-1", agentId: "ops" }));
+
+    const { respond } = await invokeCron(
+      "cron.run",
+      {
+        id: "cron-1",
+        dispatchPressureOverride: { approvedBy: "Chris", reason: "urgent repair" },
+      },
+      { context, client: callerClient("ops") },
+    );
+
+    expect(context.cron.enqueueRun).not.toHaveBeenCalled();
+    expectResponseError(respond, {
+      code: "INVALID_REQUEST",
+      messageIncludes: "dispatch pressure override is reserved for admin callers",
+    });
+  });
+
+  it("passes admin cron.run pressure overrides to enqueue", async () => {
+    const context = createCronContext(createCronJob({ id: "cron-1", agentId: "ops" }));
+    const dispatchPressureOverride = { approvedBy: "Chris" as const, reason: "urgent repair" };
+
+    const { respond } = await invokeCron(
+      "cron.run",
+      {
+        id: "cron-1",
+        dispatchPressureOverride,
+      },
+      { context, client: adminClient() },
+    );
+
+    expect(context.cron.enqueueRun).toHaveBeenCalledWith("cron-1", "force", {
+      dispatchPressureOverride,
+    });
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      { ok: true, enqueued: true, runId: "run-1" },
+      undefined,
+    );
+  });
+
+  it("rejects cron.run before enqueue when the Gateway process changed after preflight", async () => {
+    const context = createCronContext(createCronJob({ id: "cron-1", agentId: "ops" }));
+
+    const { respond } = await invokeCron(
+      "cron.run",
+      { id: "cron-1", expectedProcessInstanceId: "stale-process" },
+      { context, client: callerClient("ops") },
+    );
+
+    expect(context.cron.enqueueRun).not.toHaveBeenCalled();
+    expectResponseError(respond, {
+      code: "INVALID_REQUEST",
+      messageIncludes: "Gateway process changed after preflight",
+    });
   });
 
   it("hides caller-scoped cron.run for a foreign agent", async () => {

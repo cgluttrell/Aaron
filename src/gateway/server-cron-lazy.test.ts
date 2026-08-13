@@ -69,6 +69,20 @@ describe("createLazyGatewayCronState", () => {
     expect(cron["run"]).toHaveBeenCalledWith("demo", "force", { payload });
   });
 
+  it("forwards enqueue run pressure overrides to the loaded cron service", async () => {
+    const cron = createCronService();
+    hoisted.setState(createCronState(cron));
+
+    const lazy = createLazyGatewayCronState(createParams());
+    const dispatchPressureOverride = { approvedBy: "Chris" as const, reason: "urgent repair" };
+    await lazy.cron.enqueueRun("demo", "force", { dispatchPressureOverride });
+
+    expect(hoisted.buildGatewayCronService).toHaveBeenCalledTimes(1);
+    expect(cron["enqueueRun"]).toHaveBeenCalledWith("demo", "force", {
+      dispatchPressureOverride,
+    });
+  });
+
   it("starts the loaded cron service once", async () => {
     const cron = createCronService();
     hoisted.setState(createCronState(cron));

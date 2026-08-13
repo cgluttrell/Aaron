@@ -124,6 +124,84 @@ describe("cron service timer seam coverage", () => {
     });
   });
 
+  it("defers isolated agent jobs when the dispatch pressure guard reports unsafe cgroup memory", async () => {
+    const { storePath } = await makeStorePath();
+    const now = Date.parse("2026-03-23T12:00:00.000Z");
+    const runIsolatedAgentJob = vi.fn(async () => ({ status: "ok" as const }));
+    const dispatchPressureGuard = vi.fn(() => ({
+      status: "defer" as const,
+      reason: "cgroup_memory_threshold" as const,
+      sample: {
+        cgroupDir: "/sys/fs/cgroup/openclaw",
+        currentBytes: 900,
+        inactiveFileBytes: 0,
+        workingSetBytes: 900,
+        maxBytes: 1000,
+        usageRatio: 0.9,
+      },
+      threshold: { workingSetBytes: 850, usageRatio: 0.85 },
+    }));
+    const state = createCronServiceState({
+      storePath,
+      cronEnabled: true,
+      log: logger,
+      nowMs: () => now,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeat: vi.fn(),
+      runIsolatedAgentJob,
+      dispatchPressureGuard,
+    });
+
+    const result = await executeJobCore(state, createDueIsolatedAgentJob({ now }));
+
+    expect(result.status).toBe("skipped");
+    expect(result.error).toBe(
+      "gateway memory pressure guard deferred isolated cron agent dispatch",
+    );
+    expect(result.diagnostics?.summary).toBe(
+      "gateway memory pressure guard deferred isolated cron agent dispatch",
+    );
+    expect(runIsolatedAgentJob).not.toHaveBeenCalled();
+    expect(dispatchPressureGuard).toHaveBeenCalledWith({
+      workKind: "cron_isolated_agent",
+      workId: "isolated-agent-job",
+      override: undefined,
+    });
+  });
+
+  it("runs isolated agent jobs when the dispatch pressure guard override is Chris-approved", async () => {
+    const { storePath } = await makeStorePath();
+    const now = Date.parse("2026-03-23T12:00:00.000Z");
+    const runIsolatedAgentJob = vi.fn(async () => ({ status: "ok" as const, summary: "done" }));
+    const dispatchPressureGuard = vi.fn(() => ({
+      status: "override" as const,
+      reason: "chris_approved_urgent" as const,
+      override: { approvedBy: "Chris" as const, reason: "urgent operator recovery" },
+    }));
+    const state = createCronServiceState({
+      storePath,
+      cronEnabled: true,
+      log: logger,
+      nowMs: () => now,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeat: vi.fn(),
+      runIsolatedAgentJob,
+      dispatchPressureGuard,
+    });
+
+    const result = await executeJobCore(state, createDueIsolatedAgentJob({ now }), undefined, {
+      dispatchPressureOverride: { approvedBy: "Chris", reason: "urgent operator recovery" },
+    });
+
+    expect(result).toMatchObject({ status: "ok", summary: "done" });
+    expect(runIsolatedAgentJob).toHaveBeenCalledTimes(1);
+    expect(dispatchPressureGuard).toHaveBeenCalledWith({
+      workKind: "cron_isolated_agent",
+      workId: "isolated-agent-job",
+      override: { approvedBy: "Chris", reason: "urgent operator recovery" },
+    });
+  });
+
   it("persists the next schedule and hands off next-heartbeat main jobs", async () => {
     const { storePath } = await makeStorePath();
     const now = Date.parse("2026-03-23T12:00:00.000Z");
