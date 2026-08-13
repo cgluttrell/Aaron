@@ -3290,6 +3290,7 @@ Do not edit it by hand; run `pnpm docs:map:gen`.
   - H2: Stability recorder
   - H2: Useful options
   - H2: Disable diagnostics
+  - H2: Dispatch pressure guard
   - H2: Related
 
 ## gateway/discovery.md
