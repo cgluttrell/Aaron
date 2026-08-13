@@ -23,6 +23,7 @@ import {
   type ExpectedExistingSessionConstraint,
 } from "./agent-expected-session.js";
 import {
+  clientHasAdminScope,
   resolveAllowModelOverrideFromClient,
   resolveCanUseCronRunContinuation,
   resolveCanUseInternalRuntimeHandoff,
@@ -138,6 +139,21 @@ export function prepareAgentRequestPreflight(
       errorShape(
         ErrorCodes.INVALID_REQUEST,
         "internal session-effect controls are reserved for backend callers.",
+      ),
+    );
+    return undefined;
+  }
+  if (
+    request.dispatchPressureOverride &&
+    !clientHasAdminScope(params.client) &&
+    !canUseInternalRuntimeHandoff
+  ) {
+    params.respond(
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "dispatch pressure override is reserved for admin or backend callers.",
       ),
     );
     return undefined;

@@ -1,3 +1,4 @@
+import type { DispatchPressureOverride } from "../process/dispatch-pressure-guard.js";
 /** Public cron service interface shared by callers and implementations. */
 import type { CronListPageOptions, CronListPageResult } from "./service/list-page-types.js";
 import type {
@@ -22,6 +23,7 @@ type CronWakeResult = { ok: true } | { ok: false; reason?: "unwakeable-session-k
 export type CronServiceRunResult = CronRunResult;
 export type CronServiceRunOptions = {
   payload?: CronPayload;
+  dispatchPressureOverride?: DispatchPressureOverride;
 };
 
 /** Public cron service facade used by gateway, plugin SDK, and tests. */
@@ -40,7 +42,11 @@ export interface CronServiceContract {
   ): Promise<CronUpdateResult>;
   remove(id: string): Promise<CronRemoveResult>;
   run(id: string, mode?: CronRunMode, opts?: CronServiceRunOptions): Promise<CronServiceRunResult>;
-  enqueueRun(id: string, mode?: CronRunMode): Promise<CronServiceRunResult>;
+  enqueueRun(
+    id: string,
+    mode?: CronRunMode,
+    opts?: CronServiceRunOptions,
+  ): Promise<CronServiceRunResult>;
   getJob(id: string): CronJob | undefined;
   readJob(id: string): Promise<CronJob | undefined>;
   getDefaultAgentId(): string | undefined;

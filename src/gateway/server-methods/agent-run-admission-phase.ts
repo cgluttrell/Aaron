@@ -10,6 +10,7 @@ import { resolveAgentTimeoutMs } from "../../agents/timeout.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { claimAgentRunContext } from "../../infra/agent-events.js";
+import { decideDispatchPressure } from "../../process/dispatch-pressure-guard.js";
 import type { InputProvenance } from "../../sessions/input-provenance.js";
 import type { SessionWorkAdmissionLease } from "../../sessions/session-lifecycle-admission.js";
 import { normalizeDeliveryContext } from "../../utils/delivery-context.shared.js";
@@ -121,6 +122,58 @@ export async function prepareAgentRunDispatch(params: {
       errorShape(ErrorCodes.UNAVAILABLE, "cron run continuation could not be restored"),
     );
     return undefined;
+  }
+  const pressureGuardApplies =
+    params.suppressVisibleSessionEffects ||
+    params.client?.internal?.agentRunTracking === "plugin_subagent" ||
+    params.request.acpTurnSource === "manual_spawn" ||
+    Boolean(params.request.cwd);
+  if (pressureGuardApplies) {
+    const pressureDecision = decideDispatchPressure({
+      workKind: "gateway_agent",
+      workId: params.runId,
+      override: params.request.dispatchPressureOverride,
+    });
+    if (pressureDecision.status === "defer") {
+      params.context.logGateway.warn("gateway dispatch pressure guard deferred agent run", {
+        runId: params.runId,
+        reason: pressureDecision.reason,
+        currentBytes: pressureDecision.sample.currentBytes,
+        maxBytes: pressureDecision.sample.maxBytes,
+        usageRatio: pressureDecision.sample.usageRatio,
+        growthBytes: pressureDecision.sample.growthBytes,
+        windowMs: pressureDecision.sample.windowMs,
+        threshold: pressureDecision.threshold,
+      });
+      params.respond(
+        false,
+        {
+          runId: params.runId,
+          status: "deferred" as const,
+          summary: "gateway memory pressure guard deferred isolated agent dispatch",
+          reason: pressureDecision.reason,
+        },
+        errorShape(
+          ErrorCodes.UNAVAILABLE,
+          "gateway memory pressure guard deferred isolated agent dispatch",
+        ),
+        { runId: params.runId, reason: pressureDecision.reason },
+      );
+      return undefined;
+    }
+    if (pressureDecision.status === "override") {
+      params.context.logGateway.warn("gateway dispatch pressure guard override allowed agent run", {
+        runId: params.runId,
+        approvedBy: pressureDecision.override.approvedBy,
+        reason: pressureDecision.override.reason,
+        pressureReason: pressureDecision.reason,
+        currentBytes: pressureDecision.sample?.currentBytes,
+        maxBytes: pressureDecision.sample?.maxBytes,
+        usageRatio: pressureDecision.sample?.usageRatio,
+        growthBytes: pressureDecision.sample?.growthBytes,
+        windowMs: pressureDecision.sample?.windowMs,
+      });
+    }
   }
 
   const now = Date.now();

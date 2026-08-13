@@ -5,6 +5,7 @@ import {
   normalizeOptionalString,
 } from "@openclaw/normalization-core/string-coerce";
 import { enqueueCommandInLane } from "../../process/command-queue.js";
+import type { DispatchPressureOverride } from "../../process/dispatch-pressure-guard.js";
 import { runWithGatewayIndependentRootWorkContinuation } from "../../process/gateway-work-admission.js";
 import { CommandLane } from "../../process/lanes.js";
 import { DEFAULT_AGENT_ID } from "../../routing/session-key.js";
@@ -718,12 +719,14 @@ type PreparedManualRun =
       activeJobMarker?: CronActiveJobMarker;
       startedAt: number;
       executionJob: CronJob;
+      dispatchPressureOverride?: DispatchPressureOverride;
     }
   | { ok: false };
 
 type ManualRunOptions = {
   runId?: string;
   payload?: CronPayload;
+  dispatchPressureOverride?: DispatchPressureOverride;
   terminalTracker?: ManualRunTerminalTracker;
 };
 
@@ -948,6 +951,7 @@ async function prepareManualRun(
       activeJobMarker,
       startedAt: preflight.now,
       executionJob,
+      dispatchPressureOverride: opts?.dispatchPressureOverride,
     } as const;
   });
 }
@@ -969,6 +973,7 @@ async function finishPreparedManualRun(
       coreResult = await executeJobCoreWithTimeout(state, executionJob, {
         runId: taskRunId,
         activeJobMarker: prepared.activeJobMarker,
+        dispatchPressureOverride: prepared.dispatchPressureOverride,
       });
     } catch (err) {
       coreResult = { status: "error", error: normalizeCronRunErrorText(err) };
@@ -1181,7 +1186,12 @@ export async function run(
 }
 
 /** Queues a manual cron run behind the cron command lane and returns an immediate run id. */
-export async function enqueueRun(state: CronServiceState, id: string, mode?: "due" | "force") {
+export async function enqueueRun(
+  state: CronServiceState,
+  id: string,
+  mode?: "due" | "force",
+  opts?: ManualRunOptions,
+) {
   const disposition = await inspectManualRunDisposition(state, id, mode);
   if (!disposition.ok || !("runnable" in disposition && disposition.runnable)) {
     return disposition;
@@ -1193,7 +1203,11 @@ export async function enqueueRun(state: CronServiceState, id: string, mode?: "du
     enqueueCommandInLane(
       CommandLane.Cron,
       async () => {
-        const result = await run(state, id, mode, { runId, terminalTracker });
+        const result = await run(state, id, mode, {
+          ...opts,
+          runId,
+          terminalTracker,
+        });
         if (result.ok && "ran" in result && !result.ran) {
           if (result.reason !== "invalid-spec") {
             const finishedAt = state.deps.nowMs();

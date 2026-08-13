@@ -281,9 +281,12 @@ async function renderCostUsageSummaryAsync(
   return lines;
 }
 
-function formatBytes(value: number | undefined): string {
+function formatBytes(value: number | "max" | undefined): string {
   if (value === undefined) {
     return "n/a";
+  }
+  if (value === "max") {
+    return "max";
   }
   return formatByteSize(value, {
     style: "iec",

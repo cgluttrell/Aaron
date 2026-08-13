@@ -47,6 +47,7 @@ import {
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import { getGatewayProcessInstanceId } from "../process-instance.js";
 import { loadSessionEntry } from "../session-utils.js";
+import { clientHasAdminScope } from "./agent-handler-helpers.js";
 import {
   applyCronCreateCallerScopeDefault,
   cronCreateMatchesCallerScope,
@@ -811,6 +812,7 @@ export const cronHandlers: GatewayRequestHandlers = {
     const p = params as CronJobIdParams & {
       mode?: "due" | "force";
       expectedProcessInstanceId?: string;
+      dispatchPressureOverride?: { approvedBy: "Chris"; reason: string };
     };
     const callerScope = readCronCallerScope(client);
     const jobId = resolveCronJobId(p);
@@ -837,9 +839,21 @@ export const cronHandlers: GatewayRequestHandlers = {
       respondInvalidCronParams(respond, "cron.run", "Gateway process changed after preflight");
       return;
     }
+    if (p.dispatchPressureOverride && !clientHasAdminScope(client)) {
+      respondInvalidCronParams(
+        respond,
+        "cron.run",
+        "dispatch pressure override is reserved for admin callers",
+      );
+      return;
+    }
     let result: Awaited<ReturnType<typeof context.cron.enqueueRun>>;
     try {
-      result = await context.cron.enqueueRun(jobId, p.mode ?? "force");
+      result = p.dispatchPressureOverride
+        ? await context.cron.enqueueRun(jobId, p.mode ?? "force", {
+            dispatchPressureOverride: p.dispatchPressureOverride,
+          })
+        : await context.cron.enqueueRun(jobId, p.mode ?? "force");
     } catch (error) {
       if (isInvalidCronSessionTargetIdError(error)) {
         respond(true, { ok: true, ran: false, reason: "invalid-spec" }, undefined);

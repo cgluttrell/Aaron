@@ -12,6 +12,10 @@ import {
   isRetryableHeartbeatBusySkipReason,
 } from "../../infra/heartbeat-wake.js";
 import {
+  decideDispatchPressure,
+  type DispatchPressureOverride,
+} from "../../process/dispatch-pressure-guard.js";
+import {
   beginGatewayRootWorkAdmissionWhenOpen,
   GatewayDrainingError,
 } from "../../process/gateway-work-admission.js";
@@ -175,6 +179,7 @@ type ExecuteJobCoreOptions = {
   onExecutionStarted?: (info?: CronAgentExecutionStarted) => void;
   onExecutionPhase?: (info: CronAgentExecutionPhaseUpdate) => void;
   onLaneWait?: (info?: { waiting?: boolean }) => void;
+  dispatchPressureOverride?: DispatchPressureOverride;
 };
 
 /**
@@ -206,7 +211,11 @@ function cronRunAttributionFromExecution(execution?: CronAgentExecutionStarted):
 export async function executeJobCoreWithTimeout(
   state: CronServiceState,
   job: CronJob,
-  opts?: { runId?: string; activeJobMarker?: CronActiveJobMarker },
+  opts?: {
+    runId?: string;
+    activeJobMarker?: CronActiveJobMarker;
+    dispatchPressureOverride?: DispatchPressureOverride;
+  },
 ): Promise<CronCoreRunOutcome> {
   const runAbortController = new AbortController();
   const operatorCancellationMarker = Symbol("cron-operator-cancelled");
@@ -253,6 +262,7 @@ export async function executeJobCoreWithTimeout(
       const corePromise = executeJobCore(state, job, runAbortController.signal, {
         onExecutionStarted: accumulateExecution,
         onExecutionPhase: accumulateExecution,
+        dispatchPressureOverride: opts?.dispatchPressureOverride,
       });
       trackActiveCronTaskRunSettlement(corePromise);
       void corePromise.catch((err: unknown) => {
@@ -307,6 +317,7 @@ export async function executeJobCoreWithTimeout(
       onExecutionStarted: deferTimeoutUntilExecutionStart ? watchdog.noteRunnerStarted : undefined,
       onExecutionPhase: deferTimeoutUntilExecutionStart ? watchdog.notePhase : undefined,
       onLaneWait: deferTimeoutUntilExecutionStart ? noteLaneState : undefined,
+      dispatchPressureOverride: opts?.dispatchPressureOverride,
     });
     trackActiveCronTaskRunSettlement(corePromise);
     watchdog.start();
@@ -2369,6 +2380,51 @@ async function executeDetachedCronJob(
         nowMs: state.deps.nowMs,
       }),
     };
+  }
+  const pressureDecision = (state.deps.dispatchPressureGuard ?? decideDispatchPressure)({
+    workKind: "cron_isolated_agent",
+    workId: job.id,
+    override: options?.dispatchPressureOverride,
+  });
+  if (pressureDecision.status === "defer") {
+    const error = "gateway memory pressure guard deferred isolated cron agent dispatch";
+    state.deps.log.warn(
+      {
+        jobId: job.id,
+        reason: pressureDecision.reason,
+        currentBytes: pressureDecision.sample.currentBytes,
+        maxBytes: pressureDecision.sample.maxBytes,
+        usageRatio: pressureDecision.sample.usageRatio,
+        growthBytes: pressureDecision.sample.growthBytes,
+        windowMs: pressureDecision.sample.windowMs,
+        threshold: pressureDecision.threshold,
+      },
+      "cron: isolated agent dispatch deferred by gateway pressure guard",
+    );
+    return {
+      status: "skipped",
+      error,
+      diagnostics: createCronRunDiagnosticsFromError("cron-preflight", error, {
+        severity: "warn",
+        nowMs: state.deps.nowMs,
+      }),
+    };
+  }
+  if (pressureDecision.status === "override") {
+    state.deps.log.warn(
+      {
+        jobId: job.id,
+        approvedBy: pressureDecision.override.approvedBy,
+        reason: pressureDecision.override.reason,
+        pressureReason: pressureDecision.reason,
+        currentBytes: pressureDecision.sample?.currentBytes,
+        maxBytes: pressureDecision.sample?.maxBytes,
+        usageRatio: pressureDecision.sample?.usageRatio,
+        growthBytes: pressureDecision.sample?.growthBytes,
+        windowMs: pressureDecision.sample?.windowMs,
+      },
+      "cron: gateway pressure guard override allowed isolated agent dispatch",
+    );
   }
 
   const res = await state.deps.runIsolatedAgentJob({

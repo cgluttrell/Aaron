@@ -45,6 +45,10 @@ export type AgentRunRequest = {
   sourceReplyDeliveryMode?: "automatic" | "message_tool_only";
   disableMessageTool?: boolean;
   forceRestartSafeTools?: boolean;
+  dispatchPressureOverride?: {
+    approvedBy: "Chris";
+    reason: string;
+  };
   timeout?: number;
   bestEffortDeliver?: boolean;
   cleanupBundleMcpOnRunEnd?: boolean;
