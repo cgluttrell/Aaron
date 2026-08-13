@@ -73,8 +73,12 @@ export class CronService implements CronServiceContract {
     return await ops.run(this.state, id, mode, opts);
   }
 
-  async enqueueRun(id: string, mode?: "due" | "force"): Promise<CronServiceRunResult> {
-    const result = await ops.enqueueRun(this.state, id, mode);
+  async enqueueRun(
+    id: string,
+    mode?: "due" | "force",
+    opts?: CronServiceRunOptions,
+  ): Promise<CronServiceRunResult> {
+    const result = await ops.enqueueRun(this.state, id, mode, opts);
     if (result.ok && "runnable" in result) {
       // ops.enqueueRun resolves runnable dispositions before crossing the
       // public facade; leaking one would expose an internal scheduler detail.

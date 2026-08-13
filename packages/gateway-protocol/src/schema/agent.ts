@@ -233,6 +233,15 @@ export const AgentParamsSchema = Type.Object(
       Type.Union([Type.Literal("automatic"), Type.Literal("message_tool_only")]),
     ),
     disableMessageTool: Type.Optional(Type.Boolean()),
+    dispatchPressureOverride: Type.Optional(
+      Type.Object(
+        {
+          approvedBy: Type.Literal("Chris"),
+          reason: NonEmptyString,
+        },
+        { additionalProperties: false },
+      ),
+    ),
     voiceWakeTrigger: Type.Optional(Type.String()),
     idempotencyKey: NonEmptyString,
     label: Type.Optional(SessionLabelString),

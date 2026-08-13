@@ -5,6 +5,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DispatchPressureDecision } from "../../process/dispatch-pressure-guard.js";
 import { clearActiveSessionsForShutdownTracker } from "../active-sessions-shutdown-tracker.js";
 
 const configMocks = vi.hoisted(() => ({
@@ -28,6 +29,13 @@ const agentIngressMocks = vi.hoisted(() => ({
   agentCommandFromIngress: vi.fn(async () => ({ ok: true })),
 }));
 
+const dispatchPressureMocks = vi.hoisted(() => ({
+  decideDispatchPressure: vi.fn<() => DispatchPressureDecision>(() => ({
+    status: "allow",
+    reason: "cgroup_unavailable",
+  })),
+}));
+
 vi.mock("../../config/config.js", () => ({
   getRuntimeConfig: configMocks.getRuntimeConfig,
 }));
@@ -44,10 +52,21 @@ vi.mock("../../tasks/detached-task-runtime.js", () => ({
   createRunningTaskRun: vi.fn(),
 }));
 
+vi.mock("../../process/dispatch-pressure-guard.js", () => ({
+  decideDispatchPressure: dispatchPressureMocks.decideDispatchPressure,
+}));
+
 import { agentHandlers } from "./agent.js";
 
 function firstMockCall<T extends readonly unknown[]>(mock: { mock: { calls: readonly T[] } }) {
   return mock.mock.calls[0];
+}
+
+function expectDefined<T>(value: T | undefined, message: string): T {
+  if (value === undefined) {
+    throw new Error(message);
+  }
+  return value;
 }
 
 describe("agent handler session create events", () => {
@@ -62,6 +81,11 @@ describe("agent handler session create events", () => {
     configMocks.getRuntimeConfig.mockClear();
     agentIngressMocks.agentCommandFromIngress.mockClear();
     agentIngressMocks.agentCommandFromIngress.mockResolvedValue({ ok: true });
+    dispatchPressureMocks.decideDispatchPressure.mockClear();
+    dispatchPressureMocks.decideDispatchPressure.mockReturnValue({
+      status: "allow",
+      reason: "cgroup_unavailable",
+    });
     await fs.writeFile(storePath, "{}\n", "utf8");
   });
 
@@ -123,6 +147,79 @@ describe("agent handler session create events", () => {
         expect(call?.[3]).toEqual({ dropIfSlow: true });
       },
       { timeout: 2_000, interval: 5 },
+    );
+  });
+
+  it("defers internal isolated agent dispatch when gateway cgroup pressure is unsafe", async () => {
+    const respond = vi.fn();
+    const logWarn = vi.fn();
+    dispatchPressureMocks.decideDispatchPressure.mockReturnValueOnce({
+      status: "defer",
+      reason: "cgroup_memory_threshold",
+      sample: {
+        cgroupDir: "/sys/fs/cgroup/openclaw",
+        currentBytes: 900,
+        inactiveFileBytes: 0,
+        workingSetBytes: 900,
+        maxBytes: 1000,
+        usageRatio: 0.9,
+      },
+      threshold: { workingSetBytes: 850, usageRatio: 0.85 },
+    });
+
+    await expectDefined(agentHandlers.agent, "agentHandlers.agent test invariant").call(
+      agentHandlers,
+      {
+        params: {
+          message: "run isolated worker",
+          sessionKey: "agent:main:subagent:pressure-test",
+          sessionEffects: "internal",
+          idempotencyKey: "idem-agent-pressure-defer",
+        },
+        respond,
+        context: {
+          dedupe: new Map(),
+          deps: {} as never,
+          logGateway: { error: vi.fn(), warn: logWarn, info: vi.fn(), debug: vi.fn() } as never,
+          chatAbortControllers: new Map(),
+          addChatRun: vi.fn(),
+          registerToolEventRecipient: vi.fn(),
+          getRuntimeConfig: configMocks.getRuntimeConfig,
+          getSessionEventSubscriberConnIds: () => new Set(),
+          broadcastToConnIds: vi.fn(),
+        } as never,
+        client: { connect: { client: { mode: "backend" } } } as never,
+        isWebchatConnect: () => false,
+        req: { id: "req-agent-pressure-defer" } as never,
+      },
+    );
+
+    expect(agentIngressMocks.agentCommandFromIngress).not.toHaveBeenCalled();
+    expect(dispatchPressureMocks.decideDispatchPressure).toHaveBeenCalledWith({
+      workKind: "gateway_agent",
+      workId: "idem-agent-pressure-defer",
+      override: undefined,
+    });
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      {
+        runId: "idem-agent-pressure-defer",
+        status: "deferred",
+        summary: "gateway memory pressure guard deferred isolated agent dispatch",
+        reason: "cgroup_memory_threshold",
+      },
+      {
+        code: "UNAVAILABLE",
+        message: "gateway memory pressure guard deferred isolated agent dispatch",
+      },
+      { runId: "idem-agent-pressure-defer", reason: "cgroup_memory_threshold" },
+    );
+    expect(logWarn).toHaveBeenCalledWith(
+      "gateway dispatch pressure guard deferred agent run",
+      expect.objectContaining({
+        runId: "idem-agent-pressure-defer",
+        reason: "cgroup_memory_threshold",
+      }),
     );
   });
 });
