@@ -120,12 +120,13 @@ function loadMessageActionGatewayRuntime() {
   return messageActionGatewayRuntimeLoader.load();
 }
 
-export const __testing = {
+export const testing = {
   resetMessageActionGatewayRuntimeForTests() {
     messageActionGatewayRuntimeLoader.clear();
   },
   loadMessageActionGatewayRuntimeForTests: loadMessageActionGatewayRuntime,
 };
+export { testing as __testing };
 
 export type RunMessageActionParams = {
   cfg: OpenClawConfig;
