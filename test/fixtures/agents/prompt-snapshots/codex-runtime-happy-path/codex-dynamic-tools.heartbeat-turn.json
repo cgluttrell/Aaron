@@ -66,6 +66,9 @@
         "filename": {
           "type": "string"
         },
+        "final": {
+          "type": "boolean"
+        },
         "forceDocument": {
           "description": "Send image/GIF/video as document; avoids compression.",
           "type": "boolean"
