@@ -308,6 +308,9 @@ function formatPressureRatio(params: {
       case "rss_threshold":
         return pressure.memory.rssBytes;
     }
+    // Unreached for current reason codes; keeps the IIFE explicitly total so a
+    // future reason cannot silently fall through as undefined.
+    return undefined;
   })();
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return undefined;

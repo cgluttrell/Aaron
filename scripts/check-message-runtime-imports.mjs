@@ -73,7 +73,12 @@ async function main() {
       return;
     }
 
-    const loader = runner?.__testing?.loadMessageActionGatewayRuntimeForTests;
+    // Modules export the same object as both `testing` and `__testing`; prefer
+    // `testing` so this script needs no dangling-underscore lint exception. The
+    // `__testing` fallback covers a dist built before that alias existed, since
+    // this script reads dist and can run against a stale bundle.
+    const loader = (runner?.testing ?? runner?.["__testing"])
+      ?.loadMessageActionGatewayRuntimeForTests;
     if (typeof loader !== "function") {
       continue;
     }

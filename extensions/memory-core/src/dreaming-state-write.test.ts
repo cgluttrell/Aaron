@@ -371,8 +371,8 @@ describe("writeMemoryCoreWorkspaceEntries", () => {
         workspaceDir,
       });
       expect(stored).toHaveLength(capacity);
-      expect(stored.map((row) => row.key).sort()).toEqual(
-        ["incoming.txt", "mid.txt", "newest.txt"].sort(),
+      expect(stored.map((row) => row.key).toSorted()).toEqual(
+        ["incoming.txt", "mid.txt", "newest.txt"].toSorted(),
       );
       expect(stored.some((row) => row.key === "oldest.txt")).toBe(false);
     } finally {
