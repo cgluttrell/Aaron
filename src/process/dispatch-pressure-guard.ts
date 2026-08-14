@@ -36,7 +36,10 @@ export type DispatchPressureDecision =
     }
   | {
       status: "defer";
-      reason: "cgroup_memory_threshold" | "cgroup_memory_absolute_threshold" | "cgroup_memory_growth";
+      reason:
+        | "cgroup_memory_threshold"
+        | "cgroup_memory_absolute_threshold"
+        | "cgroup_memory_growth";
       sample: DispatchPressureSample;
       threshold: DispatchPressureThreshold;
     };
@@ -138,7 +141,10 @@ function readCgroupMemorySample(
     if (typeof current !== "number") {
       return undefined;
     }
-    const inactiveFileBytes = parseMemoryStatValue(read(path.join(cgroupDir, "memory.stat")), "inactive_file");
+    const inactiveFileBytes = parseMemoryStatValue(
+      read(path.join(cgroupDir, "memory.stat")),
+      "inactive_file",
+    );
     const workingSetBytes = Math.max(0, current - inactiveFileBytes);
     if (max === "max" || typeof max !== "number" || max <= 0) {
       return {
@@ -232,18 +238,18 @@ export function decideDispatchPressure(
               workingSetBytes: unboundedWorkingSetBytesLimit,
             },
           }
-      : sample.growthBytes !== undefined && sample.growthBytes >= growthBytesLimit
-        ? {
-            status: "defer" as const,
-            reason: "cgroup_memory_growth" as const,
-            sample,
-            threshold: {
-              growthBytes: growthBytesLimit,
-              growthRatio: growthRatioLimit,
-              windowMs: growthWindowMs,
-            },
-          }
-        : undefined;
+        : sample.growthBytes !== undefined && sample.growthBytes >= growthBytesLimit
+          ? {
+              status: "defer" as const,
+              reason: "cgroup_memory_growth" as const,
+              sample,
+              threshold: {
+                growthBytes: growthBytesLimit,
+                growthRatio: growthRatioLimit,
+                windowMs: growthWindowMs,
+              },
+            }
+          : undefined;
 
   if (input.override) {
     return {

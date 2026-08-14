@@ -93,6 +93,7 @@
     "sessions_yield",
     "nodes",
     "cron",
+    "heartbeat_respond",
     "tts",
     "gateway",
     "sessions_list",
@@ -225,20 +226,20 @@ This is the deterministic model-bound layer stack OpenClaw can snapshot for the 
     "roughTokens": 0
   },
   "dynamicToolsJson": {
-    "chars": 53471,
-    "roughTokens": 13368
+    "chars": 54819,
+    "roughTokens": 13705
   },
   "openClawDeveloperInstructions": {
-    "chars": 3245,
-    "roughTokens": 812
+    "chars": 3264,
+    "roughTokens": 816
   },
   "totalTextOnly": {
-    "chars": 27770,
-    "roughTokens": 6943
+    "chars": 27789,
+    "roughTokens": 6948
   },
   "totalWithDynamicToolsJson": {
-    "chars": 81243,
-    "roughTokens": 20311
+    "chars": 82610,
+    "roughTokens": 20653
   },
   "userInputText": {
     "chars": 1442,
@@ -425,7 +426,7 @@ Approval policy is currently never. Do not provide the `sandbox_permissions` for
 ````text
 You are a personal agent running inside OpenClaw. OpenClaw has dynamic tools for OpenClaw-owned messaging, cron, sessions, media, gateway, and nodes.
 
-Deferred searchable OpenClaw dynamic tools available: cron, gateway, nodes, session_status, sessions_history, sessions_list, sessions_send, subagents, tts, web_fetch, web_search. Use `tool_search` to load exact callable specs before use.
+Deferred searchable OpenClaw dynamic tools available: cron, gateway, heartbeat_respond, nodes, session_status, sessions_history, sessions_list, sessions_send, subagents, tts, web_fetch, web_search. Use `tool_search` to load exact callable specs before use.
 
 Use Codex native `spawn_agent` for Codex subagents. `spawn_agent` and the other native collaboration tools may be deferred: when `spawn_agent` is not directly listed, load it with `tool_search` before spawning. Use OpenClaw `sessions_spawn` only for OpenClaw or ACP delegation, never as a substitute for `spawn_agent`.
 
@@ -553,6 +554,7 @@ Full JSON: `codex-dynamic-tools.discord-group.json`
   "sessions_yield",
   "nodes",
   "cron",
+  "heartbeat_respond",
   "tts",
   "gateway",
   "sessions_list",
@@ -636,6 +638,9 @@ Full JSON: `codex-dynamic-tools.discord-group.json`
         "filename": {
           "type": "string"
         },
+        "final": {
+          "type": "boolean"
+        },
         "forceDocument": {
           "description": "Send image/GIF/video as document; avoids compression.",
           "type": "boolean"
@@ -692,6 +697,42 @@ Full JSON: `codex-dynamic-tools.discord-group.json`
       "type": "object"
     },
     "name": "message",
+    "type": "function"
+  },
+  {
+    "deferLoading": true,
+    "description": "Record heartbeat result. `notify=false` no visible send. `notify=true` needs concise notificationText.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "nextCheck": {
+          "type": "string"
+        },
+        "notificationText": {
+          "type": "string"
+        },
+        "notify": {
+          "type": "boolean"
+        },
+        "outcome": {
+          "enum": ["no_change", "progress", "done", "blocked", "needs_attention"],
+          "type": "string"
+        },
+        "priority": {
+          "enum": ["low", "normal", "high"],
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        }
+      },
+      "required": ["outcome", "notify", "summary"],
+      "type": "object"
+    },
+    "name": "heartbeat_respond",
     "type": "function"
   }
 ]

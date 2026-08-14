@@ -108,6 +108,7 @@ import {
 } from "../../infra/voicewake-routing.js";
 import type { PromptImageOrderEntry } from "../../media/prompt-image-order.js";
 import type { PluginHookSessionEndReason } from "../../plugins/hook-types.js";
+import { decideDispatchPressure } from "../../process/dispatch-pressure-guard.js";
 import {
   classifySessionKeyShape,
   isAcpSessionKey,
@@ -115,7 +116,6 @@ import {
   parseAgentSessionKey,
 } from "../../routing/session-key.js";
 import { defaultRuntime } from "../../runtime.js";
-import { decideDispatchPressure } from "../../process/dispatch-pressure-guard.js";
 import {
   annotateInterSessionPromptText,
   normalizeInputProvenance,
