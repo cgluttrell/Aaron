@@ -2136,12 +2136,13 @@ export function createDiagnosticsOtelService(): OpenClawPluginService {
             ...(headers ? { headers } : {}),
             ...(logHttpAgentOptions ? { httpAgentOptions: logHttpAgentOptions } : {}),
           });
-          const logProcessor = new BatchLogRecordProcessor(
-            logExporter,
-            typeof otel.flushIntervalMs === "number"
+          // sdk-logs 0.221 takes a single config object; the exporter moved inside it (matches upstream service-logs.ts).
+          const logProcessor = new BatchLogRecordProcessor({
+            exporter: logExporter,
+            ...(typeof otel.flushIntervalMs === "number"
               ? { scheduledDelayMillis: Math.max(1000, otel.flushIntervalMs) }
-              : {},
-          );
+              : {}),
+          });
           logProvider = new LoggerProvider({
             resource,
             processors: [logProcessor],
