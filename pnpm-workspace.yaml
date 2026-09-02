@@ -96,7 +96,7 @@ blockExoticSubdeps: true
 
 overrides:
   "@anthropic-ai/sdk": 0.109.1
-  "@opentelemetry/core": 2.8.0
+  "@opentelemetry/core": 2.10.0
   "@aws-sdk/core": 3.974.27
   "@aws-sdk/credential-provider-node": 3.972.61
   "@aws-sdk/xml-builder": 3.972.33
@@ -104,7 +104,7 @@ overrides:
   "@hono/node-server": 1.19.14
   "@vitest/browser": 4.1.10
   "@vitest/browser-playwright": 4.1.10
-  axios: 1.19.0
+  axios: 1.18.0
   brace-expansion: 5.0.9
   fast-uri: 3.1.5
   follow-redirects: 1.16.0
