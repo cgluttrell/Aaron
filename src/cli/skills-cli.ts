@@ -1,6 +1,8 @@
 // Skills CLI for workspace status, install/update, ClawHub verification, and workshop proposals.
+import fs from "node:fs/promises";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import type { Command } from "commander";
+import * as Diff from "diff";
 import {
   GATEWAY_CLIENT_MODES,
   GATEWAY_CLIENT_NAMES,
@@ -39,6 +41,7 @@ import {
   type SkillCuratorStatus,
   unpinCuratedSkill,
 } from "../skills/workshop/curator.js";
+import { stripProposalFrontmatterForSkill } from "../skills/workshop/frontmatter.js";
 import {
   applySkillProposal,
   inspectSkillProposal,
@@ -51,6 +54,7 @@ import {
   rejectSkillProposal,
   reviseSkillProposal,
 } from "../skills/workshop/service.js";
+import { hashSkillProposalContent } from "../skills/workshop/store.js";
 import type {
   SkillProposalManifest,
   SkillProposalReadResult,
@@ -76,6 +80,8 @@ type ResolvedClawHubSkillVerificationTarget = Extract<
   Awaited<ReturnType<typeof resolveClawHubSkillVerificationTarget>>,
   { ok: true }
 >;
+
+const MAX_SKILL_WORKSHOP_REVIEW_DIFF_LINES = 120;
 
 function resolveSkillClawHubRiskOptions(
   acknowledgeClawHubRisk: boolean,
@@ -266,8 +272,9 @@ function formatSkillProposalList(manifest: SkillProposalManifest): string {
     .join("\n")}\n`;
 }
 
-function formatSkillProposalInspect(read: SkillProposalReadResult): string {
+async function formatSkillProposalInspect(read: SkillProposalReadResult): Promise<string> {
   const { record } = read;
+  const review = await formatSkillProposalReview(read);
   const supportFiles =
     read.supportFiles && read.supportFiles.length > 0
       ? [
@@ -285,11 +292,110 @@ function formatSkillProposalInspect(read: SkillProposalReadResult): string {
     `Scanner: ${record.scan.state}`,
     record.statusReason ? `Reason: ${record.statusReason}` : undefined,
     "",
+    review,
+    "",
     read.content,
     ...supportFiles,
   ]
     .filter((line) => line !== undefined)
     .join("\n");
+}
+
+async function formatSkillProposalReview(read: SkillProposalReadResult): Promise<string> {
+  const { record } = read;
+  const proposedSkillContent = stripProposalFrontmatterForSkill(read.content);
+  const currentSkillContent = await readOptionalTextFile(record.target.skillFile);
+  const targetState = summarizeProposalTargetState({
+    currentSkillContent,
+    proposedSkillContent,
+    proposal: read,
+  });
+  const persistenceWarning =
+    "Persistence: apply writes the workspace skill file directly; commit/push it through the repo PR flow when the workspace is git-tracked.";
+  const diff = formatSkillProposalDiff({
+    currentSkillContent,
+    proposedSkillContent,
+    targetPath: record.target.skillFile,
+  });
+  return [
+    "Review before apply:",
+    `Target state: ${targetState}`,
+    "Live write: apply will write the applied SKILL.md content to the target path.",
+    persistenceWarning,
+    "",
+    diff,
+  ].join("\n");
+}
+
+function summarizeProposalTargetState(params: {
+  proposal: SkillProposalReadResult;
+  currentSkillContent: string | null;
+  proposedSkillContent: string;
+}): string {
+  const { currentSkillContent, proposal } = params;
+  const { record } = proposal;
+  if (record.kind === "create") {
+    return currentSkillContent === null
+      ? "new skill; target does not exist yet"
+      : "target already exists; apply will fail without overwriting";
+  }
+  if (currentSkillContent === null) {
+    return "target missing; apply will fail";
+  }
+  if (
+    record.target.currentContentHash &&
+    hashSkillProposalContent(currentSkillContent) !== record.target.currentContentHash
+  ) {
+    return "target changed since proposal creation; apply will mark the proposal stale";
+  }
+  return "target baseline unchanged";
+}
+
+function formatSkillProposalDiff(params: {
+  currentSkillContent: string | null;
+  proposedSkillContent: string;
+  targetPath: string;
+}): string {
+  const current = params.currentSkillContent ?? "";
+  const targetLabel = params.currentSkillContent === null ? "/dev/null" : params.targetPath;
+  const diff = Diff.createTwoFilesPatch(
+    targetLabel,
+    `${params.targetPath} (proposed)`,
+    current,
+    params.proposedSkillContent,
+    undefined,
+    undefined,
+    {
+      context: 3,
+      headerOptions: Diff.FILE_HEADERS_ONLY,
+    },
+  ).trimEnd();
+  if (!diff.trim()) {
+    return "Applied SKILL.md diff: no content changes.";
+  }
+  const lines = diff.split("\n");
+  const truncated = lines.length > MAX_SKILL_WORKSHOP_REVIEW_DIFF_LINES;
+  const visible = truncated ? lines.slice(0, MAX_SKILL_WORKSHOP_REVIEW_DIFF_LINES) : lines;
+  return [
+    "Applied SKILL.md diff:",
+    ...visible,
+    ...(truncated
+      ? [
+          `... diff truncated after ${MAX_SKILL_WORKSHOP_REVIEW_DIFF_LINES} lines; use --json or inspect the proposal file for full content.`,
+        ]
+      : []),
+  ].join("\n");
+}
+
+async function readOptionalTextFile(filePath: string): Promise<string | null> {
+  try {
+    return await fs.readFile(filePath, "utf8");
+  } catch (error) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
 }
 
 function formatSkillCuratorStatus(status: SkillCuratorStatus): string {
@@ -802,7 +908,7 @@ export function registerSkillsCli(program: Command) {
           defaultRuntime.writeJson(proposal);
           return;
         }
-        defaultRuntime.writeStdout(formatSkillProposalInspect(proposal));
+        defaultRuntime.writeStdout(await formatSkillProposalInspect(proposal));
       } catch (err) {
         defaultRuntime.error(String(err));
         defaultRuntime.exit(1);
@@ -988,7 +1094,11 @@ export function registerSkillsCli(program: Command) {
             return;
           }
           defaultRuntime.writeStdout(
-            `Applied ${applied.record.id} -> ${applied.targetSkillFile}\n`,
+            [
+              `Applied ${applied.record.id} -> ${applied.targetSkillFile}`,
+              "Persistence: this was a live workspace skill write; commit/push it through the repo PR flow when the workspace is git-tracked.",
+              "",
+            ].join("\n"),
           );
         } catch (err) {
           defaultRuntime.error(String(err));
