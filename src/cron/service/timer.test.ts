@@ -134,7 +134,7 @@ describe("cron service timer seam coverage", () => {
       sample: {
         cgroupDir: "/sys/fs/cgroup/openclaw",
         currentBytes: 900,
-        inactiveFileBytes: 0,
+        fileCacheBytes: 0,
         workingSetBytes: 900,
         maxBytes: 1000,
         usageRatio: 0.9,

@@ -47,7 +47,7 @@ export type DispatchPressureDecision =
 export type DispatchPressureSample = {
   cgroupDir: string;
   currentBytes: number;
-  inactiveFileBytes: number;
+  fileCacheBytes: number;
   workingSetBytes: number;
   maxBytes?: number;
   usageRatio?: number;
@@ -141,23 +141,23 @@ function readCgroupMemorySample(
     if (typeof current !== "number") {
       return undefined;
     }
-    const inactiveFileBytes = parseMemoryStatValue(
-      read(path.join(cgroupDir, "memory.stat")),
-      "inactive_file",
-    );
-    const workingSetBytes = Math.max(0, current - inactiveFileBytes);
+    // Working set excludes all page cache (`file`), not only `inactive_file`. Active file cache
+    // is still reclaimable, and an unbounded gateway cgroup accumulates many GB of it (sessions,
+    // SQLite, node_modules). Counting it deferred every isolated dispatch for days (T2273).
+    const fileCacheBytes = parseMemoryStatValue(read(path.join(cgroupDir, "memory.stat")), "file");
+    const workingSetBytes = Math.max(0, current - fileCacheBytes);
     if (max === "max" || typeof max !== "number" || max <= 0) {
       return {
         cgroupDir,
         currentBytes: current,
-        inactiveFileBytes,
+        fileCacheBytes,
         workingSetBytes,
       };
     }
     return {
       cgroupDir,
       currentBytes: current,
-      inactiveFileBytes,
+      fileCacheBytes,
       workingSetBytes,
       maxBytes: max,
       usageRatio: workingSetBytes / max,
