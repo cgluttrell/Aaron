@@ -159,7 +159,7 @@ describe("agent handler session create events", () => {
       sample: {
         cgroupDir: "/sys/fs/cgroup/openclaw",
         currentBytes: 900,
-        inactiveFileBytes: 0,
+        fileCacheBytes: 0,
         workingSetBytes: 900,
         maxBytes: 1000,
         usageRatio: 0.9,

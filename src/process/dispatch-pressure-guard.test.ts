@@ -27,7 +27,7 @@ describe("dispatch pressure guard", () => {
         readTextFile: reader({
           "/cgroup/gateway/memory.current": String(950),
           "/cgroup/gateway/memory.max": String(1000),
-          "/cgroup/gateway/memory.stat": "inactive_file 50\n",
+          "/cgroup/gateway/memory.stat": "anon 900\nfile 50\ninactive_file 50\n",
         }),
       },
     );
@@ -46,13 +46,35 @@ describe("dispatch pressure guard", () => {
         readTextFile: reader({
           "/cgroup/gateway/memory.current": String(950),
           "/cgroup/gateway/memory.max": String(1000),
-          "/cgroup/gateway/memory.stat": "inactive_file 500\n",
+          "/cgroup/gateway/memory.stat": "anon 450\nfile 500\ninactive_file 500\n",
         }),
       },
     );
 
     expect(decision.status).toBe("allow");
     expect(decision.status === "allow" ? decision.reason : "").toBe("below_threshold");
+  });
+
+  it("does not count active file cache as working set on an unbounded cgroup", () => {
+    // Regression for T2273: 14.4 GB current with 12.2 GB page cache (11 GB of it active) and
+    // 1.6 GB anon deferred every isolated dispatch for days. Only anon-like memory is pressure.
+    const decision = decideDispatchPressure(
+      { workKind: "cron_isolated_agent", workId: "job-active-cache" },
+      {
+        cgroupDir: "/cgroup/gateway",
+        readTextFile: reader({
+          "/cgroup/gateway/memory.current": String(14_400),
+          "/cgroup/gateway/memory.max": "max",
+          "/cgroup/gateway/memory.stat":
+            "anon 1600\nfile 12200\nactive_file 11100\ninactive_file 1100\n",
+        }),
+        unboundedWorkingSetBytesLimit: 6_000,
+      },
+    );
+
+    expect(decision.status).toBe("allow");
+    expect(decision.status === "allow" ? decision.sample?.workingSetBytes : 0).toBe(2_200);
+    expect(decision.status === "allow" ? decision.sample?.fileCacheBytes : 0).toBe(12_200);
   });
 
   it("defers on an absolute working-set threshold when the cgroup is unbounded", () => {
@@ -63,7 +85,7 @@ describe("dispatch pressure guard", () => {
         readTextFile: reader({
           "/cgroup/gateway/memory.current": String(7_000),
           "/cgroup/gateway/memory.max": "max",
-          "/cgroup/gateway/memory.stat": "inactive_file 500\n",
+          "/cgroup/gateway/memory.stat": "anon 6500\nfile 500\ninactive_file 500\n",
         }),
         unboundedWorkingSetBytesLimit: 6_000,
       },
@@ -80,7 +102,7 @@ describe("dispatch pressure guard", () => {
     const readTextFile = reader({
       "/cgroup/gateway/memory.current": String(100),
       "/cgroup/gateway/memory.max": String(1000),
-      "/cgroup/gateway/memory.stat": "inactive_file 20\n",
+      "/cgroup/gateway/memory.stat": "anon 80\nfile 20\ninactive_file 20\n",
     });
     expect(
       decideDispatchPressure(
@@ -96,7 +118,7 @@ describe("dispatch pressure guard", () => {
         readTextFile: reader({
           "/cgroup/gateway/memory.current": String(190),
           "/cgroup/gateway/memory.max": String(1000),
-          "/cgroup/gateway/memory.stat": "inactive_file 20\n",
+          "/cgroup/gateway/memory.stat": "anon 170\nfile 20\ninactive_file 20\n",
         }),
         nowMs: () => 31_000,
       },
@@ -119,7 +141,7 @@ describe("dispatch pressure guard", () => {
         readTextFile: reader({
           "/cgroup/gateway/memory.current": String(950),
           "/cgroup/gateway/memory.max": String(1000),
-          "/cgroup/gateway/memory.stat": "inactive_file 0\n",
+          "/cgroup/gateway/memory.stat": "anon 950\nfile 0\ninactive_file 0\n",
         }),
       },
     );
