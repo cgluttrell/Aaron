@@ -241,6 +241,79 @@ describe("diagnostic memory", () => {
     });
   });
 
+  it("does not emit critical pressure when the cgroup total is mostly file cache", () => {
+    const events: DiagnosticEventPayload[] = [];
+    const stop = onDiagnosticEvent((event) => events.push(event));
+
+    emitDiagnosticMemorySample({
+      now: 1000,
+      uptimeMs: 0,
+      memoryUsage: memoryUsage({ rss: 500 }),
+      cgroupMemoryUsage: {
+        currentBytes: 14_700,
+        fileCacheBytes: 12_500,
+        workingSetBytes: 2_200,
+        maxBytes: "max",
+      },
+      thresholds: {
+        rssWarningBytes: 10_000,
+        heapUsedWarningBytes: 10_000,
+        cgroupMemoryWarningBytes: 4_000,
+        cgroupMemoryCriticalBytes: 6_000,
+        pressureRepeatMs: 60_000,
+      },
+    });
+    stop();
+
+    expect(events.map((event) => event.type)).toEqual(["diagnostic.memory.sample"]);
+  });
+
+  it("emits critical pressure when the cgroup working set crosses the threshold", () => {
+    const events: DiagnosticEventPayload[] = [];
+    const stop = onDiagnosticEvent((event) => events.push(event));
+
+    emitDiagnosticMemorySample({
+      now: 1000,
+      uptimeMs: 0,
+      memoryUsage: memoryUsage({ rss: 500 }),
+      cgroupMemoryUsage: {
+        currentBytes: 7_000,
+        fileCacheBytes: 300,
+        workingSetBytes: 6_700,
+        maxBytes: "max",
+      },
+      thresholds: {
+        rssWarningBytes: 10_000,
+        heapUsedWarningBytes: 10_000,
+        cgroupMemoryWarningBytes: 4_000,
+        cgroupMemoryCriticalBytes: 6_000,
+        pressureRepeatMs: 60_000,
+      },
+    });
+    stop();
+
+    expect(events.at(-1)).toEqual({
+      seq: 2,
+      ts: 1_776_859_200_000,
+      trace: undefined,
+      type: "diagnostic.memory.pressure",
+      level: "critical",
+      reason: "cgroup_memory_threshold",
+      thresholdBytes: 6_000,
+      cgroupMemoryBytes: 7_000,
+      cgroupMemoryFileCacheBytes: 300,
+      cgroupMemoryWorkingSetBytes: 6_700,
+      cgroupMemoryMaxBytes: "max",
+      memory: {
+        arrayBuffersBytes: 5,
+        externalBytes: 10,
+        heapTotalBytes: 80,
+        heapUsedBytes: 40,
+        rssBytes: 500,
+      },
+    });
+  });
+
   it("emits pressure when service cgroup memory grows quickly", () => {
     const events: DiagnosticEventPayload[] = [];
     const stop = onDiagnosticEvent((event) => events.push(event));
@@ -501,6 +574,49 @@ describe("diagnostic memory", () => {
     expect(records.at(-1)?.message).toContain(
       "nextStep=run openclaw gateway status --deep and openclaw gateway diagnostics export; restart gateway if pressure persists",
     );
+  });
+
+  it("logs cgroup total and working-set pressure figures", async () => {
+    setLoggerOverride({ level: "info", consoleLevel: "silent" });
+    const records: Array<Extract<DiagnosticEventPayload, { type: "log.record" }>> = [];
+    const stop = onInternalDiagnosticEvent((event) => {
+      if (event.type === "log.record") {
+        records.push(event);
+      }
+    });
+    try {
+      emitDiagnosticMemorySample({
+        now: Date.parse("2026-04-22T12:00:00.000Z"),
+        memoryUsage: memoryUsage({ rss: 500 }),
+        cgroupMemoryUsage: {
+          currentBytes: 7_000,
+          fileCacheBytes: 300,
+          workingSetBytes: 6_700,
+          maxBytes: "max",
+        },
+        thresholds: {
+          rssWarningBytes: 10_000,
+          heapUsedWarningBytes: 10_000,
+          cgroupMemoryWarningBytes: 4_000,
+          cgroupMemoryCriticalBytes: 6_000,
+          pressureRepeatMs: 60_000,
+        },
+      });
+      await flushDiagnosticEvents();
+    } finally {
+      stop();
+    }
+
+    const pressureRecord = records.find((record) =>
+      record.message.includes("reason=cgroup_memory_threshold"),
+    );
+    expect(pressureRecord?.message).toContain(
+      "memory pressure: level=critical reason=cgroup_memory_threshold",
+    );
+    expect(pressureRecord?.message).toContain("cgroup=6.84 KiB");
+    expect(pressureRecord?.message).toContain("cgroupWorkingSet=6.54 KiB");
+    expect(pressureRecord?.message).toContain("cgroupMemoryBytes=7000");
+    expect(pressureRecord?.message).toContain("cgroupMemoryWorkingSetBytes=6700");
   });
 
   it("writes a stability bundle when critical pressure is emitted", () => {
