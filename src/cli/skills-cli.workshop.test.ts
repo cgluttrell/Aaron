@@ -145,9 +145,14 @@ describe("skills workshop cli", () => {
     expect(mocks.runtimeStdout.at(-1)).toContain(`${proposalId}  pending  create`);
 
     await runCommand(["skills", "workshop", "inspect", proposalId!]);
-    expect(mocks.runtimeStdout.at(-1)).toContain("status: proposal");
-    expect(mocks.runtimeStdout.at(-1)).toContain("--- references/weather.md ---");
-    expect(mocks.runtimeStdout.at(-1)).toContain("Use current conditions before recommendations.");
+    const inspected = mocks.runtimeStdout.at(-1);
+    expect(inspected).toContain("Review before apply:");
+    expect(inspected).toContain("Target state: new skill; target does not exist yet");
+    expect(inspected).toContain("Applied SKILL.md diff:");
+    expect(inspected).toContain("+# Paris Weather");
+    expect(inspected).toContain("status: proposal");
+    expect(inspected).toContain("--- references/weather.md ---");
+    expect(inspected).toContain("Use current conditions before recommendations.");
 
     const revisedPath = path.join(mocks.workspaceDir, "revised-proposal.md");
     await fs.writeFile(
@@ -169,6 +174,8 @@ describe("skills workshop cli", () => {
 
     await runCommand(["skills", "workshop", "apply", proposalId!]);
     expect(mocks.runtimeStdout.at(-1)).toContain("Applied");
+    expect(mocks.runtimeStdout.at(-1)).toContain("live workspace skill write");
+    expect(mocks.runtimeStdout.at(-1)).toContain("repo PR flow");
     await expect(
       fs.readFile(path.join(mocks.workspaceDir, "skills", "paris-weather", "SKILL.md"), "utf8"),
     ).resolves.toContain("Check current weather and alerts");
@@ -178,6 +185,48 @@ describe("skills workshop cli", () => {
         "utf8",
       ),
     ).resolves.toContain("Use current conditions");
+  });
+
+  it("inspects update proposals with a live target diff and stale-target warning", async () => {
+    const skillDir = path.join(mocks.workspaceDir, "skills", "qa-review");
+    const skillFile = path.join(skillDir, "SKILL.md");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      skillFile,
+      "---\nname: qa-review\ndescription: Review PRs\n---\n\n# QA Review\n\nOld checklist.\n",
+      "utf8",
+    );
+    const draftPath = path.join(mocks.workspaceDir, "qa-review-proposal.md");
+    await fs.writeFile(draftPath, "# QA Review\n\nNew checklist.\n", "utf8");
+
+    await runCommand([
+      "skills",
+      "workshop",
+      "propose-update",
+      "qa-review",
+      "--description",
+      "Review PRs safely",
+      "--proposal",
+      draftPath,
+    ]);
+    const proposalId = mocks.runtimeStdout.at(-1);
+    await runCommand(["skills", "workshop", "inspect", proposalId!]);
+    const cleanInspect = mocks.runtimeStdout.at(-1);
+    expect(cleanInspect).toContain("Target state: target baseline unchanged");
+    expect(cleanInspect).toContain("-Old checklist.");
+    expect(cleanInspect).toContain("+New checklist.");
+    expect(cleanInspect).toContain("apply writes the workspace skill file directly");
+
+    await fs.writeFile(
+      skillFile,
+      "---\nname: qa-review\ndescription: Review PRs\n---\n\n# QA Review\n\nChanged elsewhere.\n",
+      "utf8",
+    );
+
+    await runCommand(["skills", "workshop", "inspect", proposalId!]);
+    expect(mocks.runtimeStdout.at(-1)).toContain(
+      "Target state: target changed since proposal creation; apply will mark the proposal stale",
+    );
   });
 
   it("scopes list and inspect to the selected workspace", async () => {

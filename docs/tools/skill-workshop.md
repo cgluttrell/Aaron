@@ -157,6 +157,15 @@ cwd-inferred, then the default agent) and `--json` (structured output).
 `propose-create`, `propose-update`, and `revise` also take `--goal <text>` and
 `--evidence <text>` to record proposal context alongside `--proposal`.
 
+`inspect` shows a review section before the raw proposal content. For update
+proposals, it reports whether the target still matches the proposal baseline and
+prints a bounded unified diff of the exact `SKILL.md` content that `apply` would
+write after removing proposal-only frontmatter.
+
+`apply` writes the active workspace skill file immediately. When the workspace
+is tracked in Git, operators should still persist that live write through the
+normal repository PR flow.
+
 ## Proposal content
 
 While pending, the proposal is stored as `PROPOSAL.md` with proposal-only
