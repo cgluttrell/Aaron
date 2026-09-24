@@ -1600,6 +1600,12 @@ validation. After removing a derived archive file, pruning reacquires before the
 canonical row-deletion transaction; an acquisition failure propagates without
 deleting that recovery row.
 
+An agent execution owner retains failed native-close custody. The next admitted
+operation retries cleanup before opening a replacement generation, so transient
+lifecycle contention cannot permanently disable history eviction. Cleanup
+rechecks the original database identity and request authority; it does not
+replay the failed operation. Explicit resource revocation remains terminal.
+
 Usage-cache rollup writes, pruning, and refresh-lock changes use the same async
 agent-database admission. A cold mutation waits for the existing integrity worker;
 its compare-and-set transaction remains synchronous on the admitted connection.
