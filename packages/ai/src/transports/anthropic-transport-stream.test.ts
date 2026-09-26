@@ -2348,6 +2348,41 @@ describe("anthropic transport stream", () => {
     );
   });
 
+  it.each([
+    ["an OAuth key", "sk-ant-oat-example", "claude-cli/2.1.400", "cc_version=2.1.400;"],
+    ["an API key", "sk-ant-api-example", null, null],
+  ] as const)(
+    "uses installed Claude Code version evidence only on the OAuth path with %s (T2831)",
+    async (_label, apiKey, userAgent, billingVersion) => {
+      guardedFetchMock.mockResolvedValueOnce(
+        createSseResponse([
+          anthropicMessageStart({ id: "msg_1", usage: { input_tokens: 1, output_tokens: 0 } }),
+          anthropicMessageDelta({ stop_reason: "end_turn" }, { input_tokens: 1, output_tokens: 1 }),
+          { type: "message_stop" },
+        ]),
+      );
+
+      await runTransportStream(
+        makeAnthropicTransportModel(),
+        { messages: [{ role: "user", content: "hi" }] } as AnthropicStreamContext,
+        { apiKey, claudeCodeInstalledVersion: "2.1.400" } as AnthropicStreamOptions,
+      );
+
+      const headers = new Headers(guardedFetchCall()[1]?.headers);
+      const system = JSON.stringify(latestAnthropicRequest().payload.system ?? null);
+      if (userAgent) {
+        expect(headers.get("user-agent")).toBe(userAgent);
+        expect(system).toContain(billingVersion);
+      } else {
+        expect(headers.get("user-agent") ?? "").not.toContain("claude-cli/");
+        expect(system).not.toContain("cc_version");
+      }
+      expect(JSON.stringify(latestAnthropicRequest().payload)).not.toContain(
+        "claudeCodeInstalledVersion",
+      );
+    },
+  );
+
   it("preserves Anthropic OAuth identity and tool-name remapping with transport overrides", async () => {
     guardedFetchMock.mockResolvedValueOnce(
       createSseResponse([

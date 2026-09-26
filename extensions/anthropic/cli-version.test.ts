@@ -151,6 +151,19 @@ describe.each(["wrapStreamFn", "wrapSimpleCompletionStreamFn"] as const)(
       },
     );
 
+    it("hands the version to the transport when the OAuth key is injected below the wrapper", async () => {
+      // Embedded runs call the provider stream with no apiKey and inject it just above the
+      // transport (T2831), so the wrapper cannot see the credential it is identifying.
+      const fixture = register();
+      const request = capture(fixture.provider, hook);
+      await request.run({ headers: oauthOptions.headers });
+      const passed = request.base.mock.calls[0]?.[2] as
+        | (Parameters<StreamFn>[2] & { claudeCodeInstalledVersion?: string })
+        | undefined;
+      expect(passed?.claudeCodeInstalledVersion).toBe("2.1.400");
+      expect(passed?.headers).toEqual(oauthOptions.headers);
+    });
+
     it.each(["anthropic", "github-copilot", "microsoft-foundry", "cloudflare-ai-gateway"])(
       "does not probe or alter identity on the %s non-OAuth route",
       async (provider) => {
