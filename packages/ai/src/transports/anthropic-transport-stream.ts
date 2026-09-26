@@ -116,6 +116,29 @@ type AnthropicMessagesClient = {
   };
 };
 
+let reportedClaudeCodeIdentity: string | undefined;
+
+// Anthropic rejects OAuth models for an older advertised client (claude_code_version_too_old),
+// so record what each OAuth request advertises and whether installed-version evidence arrived
+// (T2831). Logged once per distinct outcome; header values carry no credentials.
+function reportAnthropicClaudeCodeIdentity(
+  version: string,
+  optionHeaders: Record<string, string> | undefined,
+): void {
+  const offered = Object.entries(optionHeaders ?? {}).find(
+    ([name]) => name.toLowerCase() === "user-agent",
+  )?.[1];
+  const outcome = `${version}|${offered ?? ""}`;
+  if (reportedClaudeCodeIdentity === outcome) {
+    return;
+  }
+  reportedClaudeCodeIdentity = outcome;
+  getAiTransportHost().logInfo(
+    "anthropic-transport",
+    `anthropic oauth identity advertises claude-cli/${version} (installed-version header: ${offered ?? "absent"})`,
+  );
+}
+
 function resolveAnthropicRequestModelId(model: AnthropicTransportModel): string {
   if (isDirectAnthropicModel(model) && /^anthropic\//i.test(model.id)) {
     return model.id.replace(/^anthropic\//i, "");
@@ -502,6 +525,7 @@ function createAnthropicTransportClient(params: {
   if (isAnthropicOAuthApiKey(apiKey)) {
     const betaHeader = buildAnthropicBetaHeader(model, betaFeatures, { oauth: true });
     const identity = buildAnthropicClaudeCodeIdentity(betaHeader, model.headers, optionHeaders);
+    reportAnthropicClaudeCodeIdentity(identity.version, optionHeaders);
     return {
       client: createAnthropicMessagesClient({
         apiKey: null,
