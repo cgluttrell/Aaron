@@ -103,6 +103,12 @@ type AnthropicTransportModel = Model<"anthropic-messages"> & {
 type AnthropicTransportOptions = AnthropicOptions &
   Pick<SimpleStreamOptions, "reasoning" | "thinkingBudgets" | "stop"> & {
     authProfileId?: string;
+    /**
+     * Installed Claude Code version probed by the Anthropic provider. Used only as OAuth
+     * identity evidence and never sent as a header. It carries the version when the OAuth key
+     * is injected below the provider wrapper, where no user-agent can be added (T2831).
+     */
+    claudeCodeInstalledVersion?: string;
   };
 type AnthropicMessagesClient = {
   messages: {
@@ -124,10 +130,12 @@ let reportedClaudeCodeIdentity: string | undefined;
 function reportAnthropicClaudeCodeIdentity(
   version: string,
   optionHeaders: Record<string, string> | undefined,
+  installedVersionHeaders: Record<string, string> | undefined,
 ): void {
-  const offered = Object.entries(optionHeaders ?? {}).find(
-    ([name]) => name.toLowerCase() === "user-agent",
-  )?.[1];
+  const offered =
+    Object.entries(optionHeaders ?? {}).find(
+      ([name]) => name.toLowerCase() === "user-agent",
+    )?.[1] ?? installedVersionHeaders?.["user-agent"];
   const outcome = `${version}|${offered ?? ""}`;
   if (reportedClaudeCodeIdentity === outcome) {
     return;
@@ -135,7 +143,7 @@ function reportAnthropicClaudeCodeIdentity(
   reportedClaudeCodeIdentity = outcome;
   getAiTransportHost().logInfo(
     "anthropic-transport",
-    `anthropic oauth identity advertises claude-cli/${version} (installed-version header: ${offered ?? "absent"})`,
+    `anthropic oauth identity advertises claude-cli/${version} (installed-version evidence: ${offered ?? "absent"})`,
   );
 }
 
@@ -524,8 +532,17 @@ function createAnthropicTransportClient(params: {
   }
   if (isAnthropicOAuthApiKey(apiKey)) {
     const betaHeader = buildAnthropicBetaHeader(model, betaFeatures, { oauth: true });
-    const identity = buildAnthropicClaudeCodeIdentity(betaHeader, model.headers, optionHeaders);
-    reportAnthropicClaudeCodeIdentity(identity.version, optionHeaders);
+    // Installed-version evidence ranks below explicit caller headers, as the wrapper header did.
+    const installedVersionHeaders = options?.claudeCodeInstalledVersion
+      ? { "user-agent": `claude-cli/${options.claudeCodeInstalledVersion}` }
+      : undefined;
+    const identity = buildAnthropicClaudeCodeIdentity(
+      betaHeader,
+      model.headers,
+      installedVersionHeaders,
+      optionHeaders,
+    );
+    reportAnthropicClaudeCodeIdentity(identity.version, optionHeaders, installedVersionHeaders);
     return {
       client: createAnthropicMessagesClient({
         apiKey: null,
@@ -702,6 +719,9 @@ function resolveAnthropicTransportOptions(
     anthropicCompactThreshold: options?.anthropicCompactThreshold,
     cacheTtlPruning: options?.cacheTtlPruning,
     ...(options?.authProfileId ? { authProfileId: options.authProfileId } : {}),
+    ...(options?.claudeCodeInstalledVersion
+      ? { claudeCodeInstalledVersion: options.claudeCodeInstalledVersion }
+      : {}),
   });
   if (reasoning === "off") {
     resolved.thinkingEnabled = false;

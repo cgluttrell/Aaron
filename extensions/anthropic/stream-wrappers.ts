@@ -57,22 +57,32 @@ export function createAnthropicClaudeCodeIdentityWrapper(
 ): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
   return (model, context, options) => {
-    if (
-      model.provider !== "anthropic" ||
-      (sourceApi ?? model.api) !== "anthropic-messages" ||
-      !isAnthropicOAuthApiKey(options?.apiKey ?? getEnvApiKey(model.provider))
-    ) {
+    if (model.provider !== "anthropic" || (sourceApi ?? model.api) !== "anthropic-messages") {
       return underlying(model, context, options);
     }
-    return resolveVersion().then((version) =>
-      underlying(
+    const visibleApiKey = options?.apiKey ?? getEnvApiKey(model.provider);
+    if (visibleApiKey && !isAnthropicOAuthApiKey(visibleApiKey)) {
+      return underlying(model, context, options);
+    }
+    // Embedded runs inject the OAuth key below this wrapper (T2831), so an unseen key may still
+    // be OAuth. Hand the version to the transport as an option: it becomes identity evidence on
+    // the OAuth path and is never sent, so API-key requests keep their own client identity.
+    return resolveVersion().then((version) => {
+      if (!version) {
+        return underlying(model, context, options);
+      }
+      const withEvidence = { ...options, claudeCodeInstalledVersion: version } as typeof options;
+      return underlying(
         model,
         context,
-        version
-          ? { ...options, headers: { ...options?.headers, "user-agent": `claude-cli/${version}` } }
-          : options,
-      ),
-    );
+        visibleApiKey
+          ? {
+              ...withEvidence,
+              headers: { ...options?.headers, "user-agent": `claude-cli/${version}` },
+            }
+          : withEvidence,
+      );
+    });
   };
 }
 
