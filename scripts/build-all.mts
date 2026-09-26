@@ -149,6 +149,7 @@ export const BUILD_ALL_STEPS: BuildAllStep[] = [
   tsxStep("check-cli-bootstrap-imports", "scripts/check-cli-bootstrap-imports.mts"),
   pluginAssetStep("copy"),
   tsxStep("runtime-postbuild", "scripts/runtime-postbuild.mts"),
+  tsxStep("check-message-runtime-imports", "scripts/check-message-runtime-imports.mts"),
   tsxStep("build-stamp", "scripts/build-stamp.mts"),
   tsxStep("runtime-postbuild-stamp", "scripts/runtime-postbuild-stamp.mts"),
   {
@@ -229,7 +230,13 @@ const BUILD_ALL_PROFILES: Record<string, string[]> = {
   package: ["clean:dist", ...FULL_BUILD_STEP_LABELS],
   ciArtifacts: [...CI_ARTIFACT_STEP_LABELS],
   // Smoke builds retain typed compilation and publication checks without the UI/metadata tail.
-  strictSmoke: [...FULL_RUNTIME_STEP_LABELS, "check-plugin-sdk-exports"],
+  // Keep the lazy message gateway runtime import covered by strict smoke (fork T1048).
+  strictSmoke: [
+    ...FULL_RUNTIME_STEP_LABELS.flatMap((step) =>
+      step === "runtime-postbuild" ? [step, "check-message-runtime-imports"] : [step],
+    ),
+    "check-plugin-sdk-exports",
+  ],
   pluginSdkStrictSmoke: [
     ...FULL_RUNTIME_STEP_LABELS.filter((step) => !step.startsWith("plugins:assets:")),
     "check-plugin-sdk-exports",
