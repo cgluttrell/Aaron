@@ -183,7 +183,9 @@ describe("dispatch pressure guard first-sample report (fork)", () => {
     expect(first.status).toBe("allow");
     expect(logMocks.info).toHaveBeenCalledTimes(1);
     expect(logMocks.info).toHaveBeenCalledWith(
-      "dispatch pressure guard active",
+      "dispatch pressure guard active: cgroupDir=/cgroup/gateway currentBytes=3000" +
+        " fileCacheBytes=1000 workingSetBytes=2000 maxBytes=max" +
+        " threshold.workingSetBytes=6442450944",
       expect.objectContaining({
         cgroupDir: "/cgroup/gateway",
         workingSetBytes: 2_000,

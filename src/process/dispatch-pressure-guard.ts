@@ -106,17 +106,29 @@ function reportFirstSampleOnce(
     );
     return;
   }
-  log.info("dispatch pressure guard active", {
+  const threshold =
+    sample.maxBytes !== undefined
+      ? { usageRatio: limits.usageRatioLimit }
+      : { workingSetBytes: limits.unboundedWorkingSetBytesLimit };
+  const fields = {
     cgroupDir: sample.cgroupDir,
     currentBytes: sample.currentBytes,
     fileCacheBytes: sample.fileCacheBytes,
     workingSetBytes: sample.workingSetBytes,
     maxBytes: sample.maxBytes ?? "max",
-    threshold:
-      sample.maxBytes !== undefined
-        ? { usageRatio: limits.usageRatioLimit }
-        : { workingSetBytes: limits.unboundedWorkingSetBytesLimit },
-  });
+  };
+  // Plain console sinks (journald) render structured fields only for warn and above, so the
+  // proof values ride in the message text as well as in the structured record.
+  const thresholdText =
+    "usageRatio" in threshold
+      ? `usageRatio=${threshold.usageRatio}`
+      : `workingSetBytes=${threshold.workingSetBytes}`;
+  log.info(
+    `dispatch pressure guard active: cgroupDir=${fields.cgroupDir} currentBytes=${fields.currentBytes}` +
+      ` fileCacheBytes=${fields.fileCacheBytes} workingSetBytes=${fields.workingSetBytes}` +
+      ` maxBytes=${fields.maxBytes} threshold.${thresholdText}`,
+    { ...fields, threshold },
+  );
 }
 
 function readTextFile(file: string): string {
