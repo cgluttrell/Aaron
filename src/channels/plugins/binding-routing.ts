@@ -9,6 +9,7 @@ import {
   type ConversationRef,
   type SessionBindingRecord,
 } from "../../infra/outbound/session-binding-service.js";
+import { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { ResolvedAgentRoute } from "../../routing/resolve-route.js";
 import { deriveLastRoutePolicy } from "../../routing/resolve-route.js";
 import {
@@ -27,6 +28,23 @@ import type { ConfiguredBindingResolution } from "./binding-types.js";
 import { resolveConfiguredBinding } from "./configured-binding-registry.js";
 
 const CONFIGURED_BINDING_ROUTE_READY_TIMEOUT_MS = 30_000;
+const log = createSubsystemLogger("channels/binding");
+
+// A failed ready check makes the channel drop the inbound message, so it must be visible at the
+// default log level; channel callers only record it verbosely (T2825).
+function warnConfiguredBindingRouteNotReady(
+  bindingResolution: ConfiguredBindingResolution | null,
+  error: string,
+): void {
+  const conversation = bindingResolution?.record?.conversation;
+  const target = bindingResolution?.statefulTarget;
+  log.warn(
+    `configured binding not ready; inbound message dropped: ${error}` +
+      ` channel=${conversation?.channel ?? "unknown"} accountId=${conversation?.accountId ?? "unknown"}` +
+      ` conversationId=${conversation?.conversationId ?? "unknown"}` +
+      ` driver=${target?.driverId ?? "unknown"} sessionKey=${target?.sessionKey ?? "unknown"}`,
+  );
+}
 
 export type ConfiguredBindingRouteResult = {
   bindingResolution: ConfiguredBindingResolution | null;
@@ -292,6 +310,9 @@ export async function ensureConfiguredBindingRouteReady(params: {
     { ref: false },
   );
   if (result !== timeoutToken) {
+    if (!result.ok) {
+      warnConfiguredBindingRouteNotReady(params.bindingResolution, result.error);
+    }
     return result;
   }
   // Let late driver work finish for diagnostics, but return a bounded failure to the caller.
@@ -308,5 +329,7 @@ export async function ensureConfiguredBindingRouteReady(params: {
     (err: unknown) =>
       logVerbose(`configured binding route ready check rejected after timeout: ${String(err)}`),
   );
-  return { ok: false, error: "Configured binding route ready check timed out" };
+  const error = "Configured binding route ready check timed out";
+  warnConfiguredBindingRouteNotReady(params.bindingResolution, error);
+  return { ok: false, error };
 }

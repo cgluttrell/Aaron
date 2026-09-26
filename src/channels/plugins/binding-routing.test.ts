@@ -21,6 +21,18 @@ vi.mock("./acp-stateful-target-driver.js", () => ({
   ensureConfiguredAcpBindingTargetReady: acpReadiness,
 }));
 
+const bindingLog = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock("../../logging/subsystem.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../logging/subsystem.js")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (subsystem: string) => {
+      const logger = actual.createSubsystemLogger(subsystem);
+      return subsystem === "channels/binding" ? { ...logger, warn: bindingLog.warn } : logger;
+    },
+  };
+});
+
 function createRoute(): ResolvedAgentRoute {
   const result: RuntimeConversationBindingRouteResult = {
     bindingRecord: null,
@@ -367,6 +379,29 @@ describe("ensureConfiguredBindingRouteReady", () => {
   afterEach(() => {
     vi.useRealTimers();
     acpReadiness.mockReset();
+    bindingLog.warn.mockReset();
+  });
+
+  it("warns when a failed ready check drops an inbound message", async () => {
+    acpReadiness.mockResolvedValue({ ok: false, error: "ACP agent disconnected" });
+    const bindingResolution = {
+      record: { conversation: { channel: "discord", accountId: "cal", conversationId: "123" } },
+      statefulTarget: { driverId: "acp", sessionKey: "agent:cal:acp:binding:discord:cal:abc" },
+    } as never;
+    await expect(ensureConfiguredBindingRouteReady({ cfg: {} as never, bindingResolution })).resolves.toEqual({
+      ok: false,
+      error: "ACP agent disconnected",
+    });
+    expect(bindingLog.warn).toHaveBeenCalledWith(expect.stringContaining("inbound message dropped"));
+  });
+
+  it("does not warn when the target is ready", async () => {
+    acpReadiness.mockResolvedValue({ ok: true });
+    await expect(ensureConfiguredBindingRouteReady({
+      cfg: {} as never,
+      bindingResolution: { statefulTarget: { driverId: "acp" } } as never,
+    })).resolves.toEqual({ ok: true });
+    expect(bindingLog.warn).not.toHaveBeenCalled();
   });
 
   it("returns a bounded failure when target readiness never settles", async () => {
@@ -384,5 +419,9 @@ describe("ensureConfiguredBindingRouteReady", () => {
       ok: false,
       error: "Configured binding route ready check timed out",
     });
+    expect(bindingLog.warn).toHaveBeenCalledTimes(1);
+    expect(String(bindingLog.warn.mock.calls[0]?.[0])).toContain(
+      "configured binding not ready; inbound message dropped: Configured binding route ready check timed out",
+    );
   });
 });
