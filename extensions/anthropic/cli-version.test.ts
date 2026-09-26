@@ -212,14 +212,15 @@ it("shares lazy CLI discovery across native execution and both OAuth wrappers", 
   ).toContain("--exclude-dynamic-system-prompt-sections");
 });
 
-it("bounds requests even while process cleanup is pending and caches the fallback", async () => {
+it("bounds requests even while process cleanup is pending, then adopts the late version", async () => {
   vi.useFakeTimers();
   const pending = createDeferred<CommandResult>();
   const runner = vi.fn<CommandRunner>(() => pending.promise);
   const fixture = register(runner);
   const request = capture(fixture.provider, "wrapStreamFn");
   const response = request.run();
-  await vi.advanceTimersByTimeAsync(1_499);
+  // 1.5s budget plus a 200ms grace for a result that lost the race to a stalled event loop.
+  await vi.advanceTimersByTimeAsync(1_699);
   expect(request.base).not.toHaveBeenCalled();
   await vi.advanceTimersByTimeAsync(1);
   await response;
@@ -233,9 +234,65 @@ it("bounds requests even while process cleanup is pending and caches the fallbac
   });
   await request.run();
   expect(runner).toHaveBeenCalledOnce();
+  // T2831: a main-thread stall made the probe miss its budget although the CLI had answered.
   pending.resolve(versionResult("2.1.400 (Claude Code)"));
+  await vi.advanceTimersByTimeAsync(0);
   await request.run();
-  expect(request.base.mock.calls[2]?.[2]?.headers).toEqual(oauthOptions.headers);
+  expect(request.base.mock.calls[2]?.[2]?.headers?.["user-agent"]).toBe("claude-cli/2.1.400");
+  expect(runner).toHaveBeenCalledOnce();
+});
+
+it.each([
+  [
+    "a stall-classified timeout with complete output",
+    { code: 124, termination: "timeout" },
+    "claude-cli/2.1.400",
+  ],
+  ["a failed exit", { code: 1, termination: "exit" }, undefined],
+] as const)("reads version evidence from %s", async (_label, overrides, identity) => {
+  const fixture = register(
+    vi.fn<CommandRunner>().mockResolvedValue(versionResult("2.1.400 (Claude Code)", overrides)),
+  );
+  const request = capture(fixture.provider, "wrapStreamFn");
+  await request.run();
+  expect(request.base.mock.calls[0]?.[2]?.headers?.["user-agent"]).toBe(identity);
+});
+
+it("lets the triggering request use a result that settles inside the grace", async () => {
+  vi.useFakeTimers();
+  const pending = createDeferred<CommandResult>();
+  const fixture = register(vi.fn<CommandRunner>(() => pending.promise));
+  const request = capture(fixture.provider, "wrapStreamFn");
+  const response = request.run();
+  await vi.advanceTimersByTimeAsync(1_600);
+  pending.resolve(versionResult("2.1.400 (Claude Code)", { code: 124, termination: "timeout" }));
+  await response;
+  expect(request.base.mock.calls[0]?.[2]?.headers?.["user-agent"]).toBe("claude-cli/2.1.400");
+});
+
+it("retries a failed probe after the cooldown instead of pinning the floor", async () => {
+  vi.useFakeTimers();
+  const runner = vi
+    .fn<CommandRunner>()
+    .mockRejectedValueOnce(new Error("synthetic launch failure"))
+    .mockResolvedValue(versionResult("2.1.400 (Claude Code)"));
+  const fixture = register(runner);
+  const request = capture(fixture.provider, "wrapStreamFn");
+  await request.run();
+  await vi.advanceTimersByTimeAsync(59_999);
+  await request.run();
+  expect(runner).toHaveBeenCalledOnce();
+  expect(request.base.mock.calls.map((call) => call[2]?.headers)).toEqual([
+    oauthOptions.headers,
+    oauthOptions.headers,
+  ]);
+  await vi.advanceTimersByTimeAsync(1);
+  await request.run();
+  expect(runner).toHaveBeenCalledTimes(2);
+  expect(request.base.mock.calls[2]?.[2]?.headers?.["user-agent"]).toBe("claude-cli/2.1.400");
+  await vi.advanceTimersByTimeAsync(120_000);
+  await request.run();
+  expect(runner).toHaveBeenCalledTimes(2);
 });
 
 it("recognizes environment OAuth credentials while an explicit API key wins", async () => {
