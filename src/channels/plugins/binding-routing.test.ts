@@ -18,6 +18,18 @@ import {
 } from "./binding-routing.js";
 import { registerStatefulBindingTargetDriver } from "./stateful-target-drivers.js";
 
+const bindingLog = vi.hoisted(() => ({ warn: vi.fn() }));
+vi.mock("../../logging/subsystem.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../logging/subsystem.js")>();
+  return {
+    ...actual,
+    createSubsystemLogger: (subsystem: string) => {
+      const logger = actual.createSubsystemLogger(subsystem);
+      return subsystem === "channels/binding" ? { ...logger, warn: bindingLog.warn } : logger;
+    },
+  };
+});
+
 function createRoute(): ResolvedAgentRoute {
   return {
     agentId: "main",
@@ -328,6 +340,45 @@ describe("ensureConfiguredBindingRouteReady", () => {
   afterEach(() => {
     vi.useRealTimers();
     unregisterDriver?.();
+    bindingLog.warn.mockReset();
+  });
+
+  const acpBinding = {
+    record: {
+      conversation: { channel: "discord", accountId: "cal", conversationId: "1540261795829125160" },
+    },
+    statefulTarget: { driverId: "flaky", sessionKey: "agent:cal:acp:binding:discord:cal:abc" },
+  } as never;
+
+  function registerFlakyDriver(result: { ok: true } | { ok: false; error: string }) {
+    unregisterDriver = registerStatefulBindingTargetDriver({
+      id: "flaky",
+      ensureReady: async () => result,
+      ensureSession: async () => ({ ok: false, sessionKey: "unused", error: "not used" }),
+    });
+  }
+
+  it("warns at the default level when a failed ready check drops the inbound message", async () => {
+    registerFlakyDriver({ ok: false, error: "ACP agent disconnected (connection_close)" });
+
+    await expect(
+      ensureConfiguredBindingRouteReady({ cfg: {} as never, bindingResolution: acpBinding }),
+    ).resolves.toEqual({ ok: false, error: "ACP agent disconnected (connection_close)" });
+    expect(bindingLog.warn).toHaveBeenCalledTimes(1);
+    expect(bindingLog.warn).toHaveBeenCalledWith(
+      "configured binding not ready; inbound message dropped: ACP agent disconnected (connection_close)" +
+        " channel=discord accountId=cal conversationId=1540261795829125160" +
+        " driver=flaky sessionKey=agent:cal:acp:binding:discord:cal:abc",
+    );
+  });
+
+  it("does not warn when the target is ready", async () => {
+    registerFlakyDriver({ ok: true });
+
+    await expect(
+      ensureConfiguredBindingRouteReady({ cfg: {} as never, bindingResolution: acpBinding }),
+    ).resolves.toEqual({ ok: true });
+    expect(bindingLog.warn).not.toHaveBeenCalled();
   });
 
   it("returns a bounded failure when target readiness never settles", async () => {
@@ -353,5 +404,9 @@ describe("ensureConfiguredBindingRouteReady", () => {
       ok: false,
       error: "Configured binding route ready check timed out",
     });
+    expect(bindingLog.warn).toHaveBeenCalledTimes(1);
+    expect(String(bindingLog.warn.mock.calls[0]?.[0])).toContain(
+      "configured binding not ready; inbound message dropped: Configured binding route ready check timed out",
+    );
   });
 });
