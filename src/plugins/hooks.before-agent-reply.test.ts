@@ -78,4 +78,25 @@ describe("before_agent_reply", () => {
     });
     expect(handler).toHaveBeenCalledOnce();
   });
+  it("bounds a hung handler with the 75s default and fails open (fork T1565)", async () => {
+    vi.useFakeTimers();
+    try {
+      const hung = vi.fn(() => new Promise<never>(() => {}));
+      const registry = createMockPluginRegistry([{ hookName: "before_agent_reply", handler: hung }]);
+      const runner = createHookRunner(registry);
+
+      const pending = runner.runBeforeAgentReply(event, TEST_PLUGIN_AGENT_CTX);
+      let settled = false;
+      void pending.then(() => {
+        settled = true;
+      });
+      await vi.advanceTimersByTimeAsync(74_000);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await expect(pending).resolves.toBeUndefined();
+      expect(hung).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
