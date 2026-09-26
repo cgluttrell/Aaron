@@ -24,6 +24,8 @@ type CronWakeResult = { ok: true } | { ok: false; reason?: "unwakeable-session-k
 export type CronServiceRunResult = CronRunResult;
 export type CronServiceRunOptions = {
   payload?: CronPayload;
+  /** Fork T1847: attributed override of the gateway dispatch-pressure guard. */
+  dispatchPressureOverride?: import("../process/dispatch-pressure-guard.js").DispatchPressureOverride;
   /** Internal event-source runs keep their persisted trigger on force execution. */
   evaluateTrigger?: boolean;
   /** Current stream batch exposed to trigger scripts as trigger.streamBatch. */
@@ -64,7 +66,7 @@ export interface CronServiceContract {
   enqueueRun(
     id: string,
     mode?: CronRunMode,
-    opts?: CronCommitGuardOptions,
+    opts?: CronCommitGuardOptions & { dispatchPressureOverride?: import("../process/dispatch-pressure-guard.js").DispatchPressureOverride },
   ): Promise<CronServiceRunResult>;
   getJob(id: string): CronJob | undefined;
   readJob(id: string): Promise<CronJob | undefined>;

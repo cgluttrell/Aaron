@@ -36,6 +36,7 @@ import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
 import { resolveGatewaySessionStoreTargetWithStore } from "../session-utils-store-lookup.js";
 import { readGatewayDedupeEntry, resolveAgentDedupeKeys } from "./agent-dedupe.js";
 import type { AgentTurnContext, AgentTurnIo, AgentTurnPrincipal } from "./types.js";
+import { isGatewayAdmin } from "../session-sharing-policy.js";
 
 export type AgentRequestPreflight = NonNullable<ReturnType<typeof prepareAgentRequestPreflight>>;
 
@@ -147,6 +148,14 @@ export function prepareAgentRequestPreflight(params: {
   }
   if (request.cwd && !normalizeOptionalString(params.client?.internal?.pluginRuntimeOwnerId)) {
     return rejectInvalidRequest("cwd is reserved for plugin-owned subagent runs");
+  }
+  // Fork T1847: only admin or backend callers may override the dispatch-pressure guard.
+  if (
+    request.dispatchPressureOverride &&
+    !isGatewayAdmin(params.client) &&
+    !canUseInternalRuntimeHandoff
+  ) {
+    return rejectInvalidRequest("dispatch pressure override is reserved for admin or backend callers.");
   }
   const allowModelOverride =
     hasGatewayAdminScope(params.client) || params.client?.internal?.allowModelOverride === true;
