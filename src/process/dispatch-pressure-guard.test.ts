@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const logMocks = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn() }));
 vi.mock("../logging/subsystem.js", () => ({
-  createSubsystemLogger: () => ({ info: logMocks.info, warn: logMocks.warn, debug: vi.fn(), error: vi.fn() }),
+  createSubsystemLogger: () => ({
+    info: logMocks.info,
+    warn: logMocks.warn,
+    debug: vi.fn(),
+    error: vi.fn(),
+  }),
 }));
 import {
   decideDispatchPressure,
@@ -179,7 +184,11 @@ describe("dispatch pressure guard first-sample report (fork)", () => {
     expect(logMocks.info).toHaveBeenCalledTimes(1);
     expect(logMocks.info).toHaveBeenCalledWith(
       "dispatch pressure guard active",
-      expect.objectContaining({ cgroupDir: "/cgroup/gateway", workingSetBytes: 2_000, maxBytes: "max" }),
+      expect.objectContaining({
+        cgroupDir: "/cgroup/gateway",
+        workingSetBytes: 2_000,
+        maxBytes: "max",
+      }),
     );
   });
 

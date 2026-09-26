@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DispatchPressureDecision } from "../../process/dispatch-pressure-guard.js";
-import { evaluateAgentRunDispatchPressure } from "./agent-run-admission-phase.js";
+import { evaluateAgentRunDispatchPressure } from "./agent-run-admission-pressure.js";
 
 const sample = {
   currentBytes: 7_000,
@@ -12,7 +12,10 @@ const sample = {
   windowMs: 1_000,
 };
 
-function run(decision: DispatchPressureDecision, overrides: Partial<Parameters<typeof evaluateAgentRunDispatchPressure>[0]> = {}) {
+function run(
+  decision: DispatchPressureDecision,
+  overrides: Partial<Parameters<typeof evaluateAgentRunDispatchPressure>[0]> = {},
+) {
   const log = { warn: vi.fn() };
   const decide = vi.fn(() => decision);
   const result = evaluateAgentRunDispatchPressure({
@@ -26,11 +29,20 @@ function run(decision: DispatchPressureDecision, overrides: Partial<Parameters<t
 }
 
 describe("evaluateAgentRunDispatchPressure (fork T1847)", () => {
-  const defer = { status: "defer", reason: "cgroup_memory_threshold", sample, threshold: 0.85 } as unknown as DispatchPressureDecision;
+  const defer = {
+    status: "defer",
+    reason: "cgroup_memory_threshold",
+    sample,
+    threshold: 0.85,
+  } as unknown as DispatchPressureDecision;
 
   it("defers a background run under pressure with an UNAVAILABLE refusal and a log line", () => {
     const { result, log, decide } = run(defer);
-    expect(decide).toHaveBeenCalledWith({ workKind: "gateway_agent", workId: "run-1", override: undefined });
+    expect(decide).toHaveBeenCalledWith({
+      workKind: "gateway_agent",
+      workId: "run-1",
+      override: undefined,
+    });
     expect(result?.message).toBe("gateway memory pressure guard deferred isolated agent dispatch");
     expect(log.warn).toHaveBeenCalledWith(
       "gateway dispatch pressure guard deferred agent run",
@@ -58,7 +70,12 @@ describe("evaluateAgentRunDispatchPressure (fork T1847)", () => {
   it("lets an attributed override proceed and logs it", () => {
     const override = { approvedBy: "Chris" as const, reason: "urgent" };
     const { result, log, decide } = run(
-      { status: "override", reason: "cgroup_memory_threshold", override, sample } as unknown as DispatchPressureDecision,
+      {
+        status: "override",
+        reason: "cgroup_memory_threshold",
+        override,
+        sample,
+      } as unknown as DispatchPressureDecision,
       { override },
     );
     expect(decide).toHaveBeenCalledWith({ workKind: "gateway_agent", workId: "run-1", override });
@@ -70,7 +87,10 @@ describe("evaluateAgentRunDispatchPressure (fork T1847)", () => {
   });
 
   it("proceeds silently when there is no pressure", () => {
-    const { result, log } = run({ status: "allow", reason: "below_threshold" } as unknown as DispatchPressureDecision);
+    const { result, log } = run({
+      status: "allow",
+      reason: "below_threshold",
+    } as unknown as DispatchPressureDecision);
     expect(result).toBeUndefined();
     expect(log.warn).not.toHaveBeenCalled();
   });
