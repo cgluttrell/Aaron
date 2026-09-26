@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { parseStrictNonNegativeInteger } from "@openclaw/normalization-core/number-coercion";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 
 const MB = 1024 * 1024;
 const DEFAULT_MEMORY_USAGE_RATIO_LIMIT = 0.85;
@@ -83,6 +84,35 @@ type PreviousSample = {
 };
 
 let previousSample: PreviousSample | undefined;
+// An "allow" decision leaves no other trace, so report the first real sampling outcome once
+// per process: proof the guard runs on the dispatch path and reads the expected cgroup.
+let firstSampleReported = false;
+const log = createSubsystemLogger("gateway/dispatch-pressure");
+
+function reportFirstSampleOnce(sample: DispatchPressureSample | undefined, limits: {
+  usageRatioLimit: number;
+  unboundedWorkingSetBytesLimit: number;
+}): void {
+  if (firstSampleReported) {
+    return;
+  }
+  firstSampleReported = true;
+  if (!sample) {
+    log.warn("dispatch pressure guard inactive: cgroup v2 memory files unavailable; dispatch is never deferred");
+    return;
+  }
+  log.info("dispatch pressure guard active", {
+    cgroupDir: sample.cgroupDir,
+    currentBytes: sample.currentBytes,
+    fileCacheBytes: sample.fileCacheBytes,
+    workingSetBytes: sample.workingSetBytes,
+    maxBytes: sample.maxBytes ?? "max",
+    threshold:
+      sample.maxBytes !== undefined
+        ? { usageRatio: limits.usageRatioLimit }
+        : { workingSetBytes: limits.unboundedWorkingSetBytesLimit },
+  });
+}
 
 function readTextFile(file: string): string {
   return fs.readFileSync(file, "utf8");
@@ -197,6 +227,11 @@ export function decideDispatchPressure(
   options: DispatchPressureGuardOptions = {},
 ): DispatchPressureDecision {
   const rawSample = readCgroupMemorySample(options);
+  reportFirstSampleOnce(rawSample, {
+    usageRatioLimit: options.memoryUsageRatioLimit ?? DEFAULT_MEMORY_USAGE_RATIO_LIMIT,
+    unboundedWorkingSetBytesLimit:
+      options.unboundedWorkingSetBytesLimit ?? DEFAULT_UNBOUNDED_WORKING_SET_BYTES_LIMIT,
+  });
   if (rawSample === undefined) {
     return input.override
       ? { status: "override", reason: "chris_approved_urgent", override: input.override }
@@ -264,4 +299,5 @@ export function decideDispatchPressure(
 
 export function resetDispatchPressureGuardForTest(): void {
   previousSample = undefined;
+  firstSampleReported = false;
 }
