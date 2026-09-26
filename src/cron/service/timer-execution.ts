@@ -34,6 +34,7 @@ import {
   normalizeQueuedSystemEventHandle,
   removeQueuedSystemEventHandle,
 } from "./timer-trigger.js";
+import { decideDispatchPressure } from "../../process/dispatch-pressure-guard.js";
 
 /** Executes a cron job without mutating persisted job state. */
 export async function executeJobCore(
@@ -387,6 +388,58 @@ async function executeDetachedCronJob(
   }
   if (abortSignal?.aborted) {
     return interrupted();
+  }
+
+  // Fork T1847 (with T2273/T2480): defer isolated agent dispatch while the gateway's cgroup
+  // working set is under pressure, unless an attributed override was supplied.
+  const pressureDecision = (state.deps.dispatchPressureGuard ?? decideDispatchPressure)({
+    workKind: "cron_isolated_agent",
+    workId: job.id,
+    override: options?.dispatchPressureOverride,
+  });
+  if (pressureDecision.status === "defer") {
+    const error = "gateway memory pressure guard deferred isolated cron agent dispatch";
+    state.deps.log.warn(
+      {
+        jobId: job.id,
+        reason: pressureDecision.reason,
+        currentBytes: pressureDecision.sample.currentBytes,
+        fileCacheBytes: pressureDecision.sample.fileCacheBytes,
+        workingSetBytes: pressureDecision.sample.workingSetBytes,
+        maxBytes: pressureDecision.sample.maxBytes,
+        usageRatio: pressureDecision.sample.usageRatio,
+        growthBytes: pressureDecision.sample.growthBytes,
+        windowMs: pressureDecision.sample.windowMs,
+        threshold: pressureDecision.threshold,
+      },
+      "cron: isolated agent dispatch deferred by gateway pressure guard",
+    );
+    return {
+      status: "skipped",
+      error,
+      diagnostics: createCronRunDiagnosticsFromError("cron-preflight", error, {
+        severity: "warn",
+        nowMs: state.deps.nowMs,
+      }),
+    };
+  }
+  if (pressureDecision.status === "override") {
+    state.deps.log.warn(
+      {
+        jobId: job.id,
+        approvedBy: pressureDecision.override.approvedBy,
+        reason: pressureDecision.override.reason,
+        pressureReason: pressureDecision.reason,
+        currentBytes: pressureDecision.sample?.currentBytes,
+        fileCacheBytes: pressureDecision.sample?.fileCacheBytes,
+        workingSetBytes: pressureDecision.sample?.workingSetBytes,
+        maxBytes: pressureDecision.sample?.maxBytes,
+        usageRatio: pressureDecision.sample?.usageRatio,
+        growthBytes: pressureDecision.sample?.growthBytes,
+        windowMs: pressureDecision.sample?.windowMs,
+      },
+      "cron: gateway pressure guard override allowed isolated agent dispatch",
+    );
   }
 
   const res = await state.deps.runIsolatedAgentJob({

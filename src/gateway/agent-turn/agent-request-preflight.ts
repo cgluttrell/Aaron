@@ -37,6 +37,7 @@ import {
   resolveCanUseInternalRuntimeHandoff,
 } from "./agent-handler-helpers.js";
 import type { AgentTurnContext, AgentTurnIo, AgentTurnPrincipal } from "./types.js";
+import { isGatewayAdmin } from "../session-sharing-policy.js";
 
 export type AgentRequestPreflight = {
   request: AgentRunRequest;
@@ -187,6 +188,22 @@ export function prepareAgentRequestPreflight(params: {
       false,
       undefined,
       errorShape(ErrorCodes.INVALID_REQUEST, "cwd is reserved for plugin-owned subagent runs"),
+    ]);
+    return undefined;
+  }
+  // Fork T1847: only admin or backend callers may override the dispatch-pressure guard.
+  if (
+    request.dispatchPressureOverride &&
+    !isGatewayAdmin(params.client) &&
+    !canUseInternalRuntimeHandoff
+  ) {
+    params.io.emitAcceptance([
+      false,
+      undefined,
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        "dispatch pressure override is reserved for admin or backend callers.",
+      ),
     ]);
     return undefined;
   }

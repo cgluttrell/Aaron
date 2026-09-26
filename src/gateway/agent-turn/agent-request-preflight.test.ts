@@ -595,3 +595,44 @@ describe("agent request session ownership preflight", () => {
     );
   });
 });
+
+describe("agent request dispatch pressure override preflight (fork T1847)", () => {
+  const override = { approvedBy: "Chris", reason: "urgent operator recovery" };
+
+  function preflightWithOverride(client?: unknown) {
+    const respond = vi.fn();
+    const result = prepareAgentRequestPreflight({
+      request: {
+        message: "hello",
+        sessionKey: "agent:main:main",
+        idempotencyKey: "override-run",
+        dispatchPressureOverride: override,
+      },
+      io: createAgentTurnIo(respond),
+      context: { getRuntimeConfig: () => ({}), dedupe: new Map() },
+      client,
+    } as never);
+    return { respond, result };
+  }
+
+  function refusalMessages(respond: ReturnType<typeof vi.fn>): string[] {
+    return respond.mock.calls
+      .filter((call) => call[0] === false)
+      .map((call) => String((call[2] as { message?: string } | undefined)?.message ?? ""));
+  }
+
+  it("refuses an override from a caller that is neither admin nor backend", () => {
+    const { respond, result } = preflightWithOverride(undefined);
+    expect(result).toBeUndefined();
+    expect(refusalMessages(respond)).toContain(
+      "dispatch pressure override is reserved for admin or backend callers.",
+    );
+  });
+
+  it("does not refuse the override for an admin caller", () => {
+    const { respond } = preflightWithOverride({ connect: { scopes: ["operator.admin"] } });
+    expect(refusalMessages(respond)).not.toContain(
+      "dispatch pressure override is reserved for admin or backend callers.",
+    );
+  });
+});

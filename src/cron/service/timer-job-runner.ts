@@ -55,6 +55,8 @@ type CronCoreRunOptions = {
   streamSourceIdentity?: string;
   runReceipt?: import("../store/run-receipt.types.js").CronRunReceiptHandle;
   executionIdentity?: import("./state.js").CronExecutionIdentityAdmission;
+  /** Fork T1847: attributed override of the gateway dispatch-pressure guard. */
+  dispatchPressureOverride?: import("../../process/dispatch-pressure-guard.js").DispatchPressureOverride;
 };
 
 async function deliverPrimaryWebhook(
@@ -279,6 +281,7 @@ async function executeJobCoreWithTimeoutUnfinalized(
     const executionIdentity = opts?.executionIdentity;
     const coreOptions: ExecuteJobCoreOptions = {
       activeJobMarker: opts?.activeJobMarker,
+      dispatchPressureOverride: opts?.dispatchPressureOverride,
       owningCronLaneTaskMarker: opts?.owningCronLaneTaskMarker,
       streamBatch: opts?.streamBatch,
       streamScheduleKey: opts?.streamScheduleKey,

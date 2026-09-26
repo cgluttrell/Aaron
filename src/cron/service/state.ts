@@ -237,6 +237,10 @@ export type CronServiceDeps = {
     abortSignal: AbortSignal;
     onDeliveryAccepted: () => void;
   }) => Promise<void>;
+  /** Fork T1847: injectable dispatch-pressure guard (tests); defaults to decideDispatchPressure. */
+  dispatchPressureGuard?: (
+    params: import("../../process/dispatch-pressure-guard.js").DispatchPressureGuardInput,
+  ) => import("../../process/dispatch-pressure-guard.js").DispatchPressureDecision;
   cleanupTimedOutAgentRun?: (params: {
     job: CronJob;
     timeoutMs: number;

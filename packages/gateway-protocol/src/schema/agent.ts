@@ -347,6 +347,13 @@ export const AgentParamsSchema = closedObject({
     Type.Union([Type.Literal("automatic"), Type.Literal("message_tool_only")]),
   ),
   disableMessageTool: Type.Optional(Type.Boolean()),
+  // Fork T1847: an explicit, attributed override of the dispatch-pressure guard.
+  dispatchPressureOverride: Type.Optional(
+    closedObject({
+      approvedBy: Type.Literal("Chris"),
+      reason: NonEmptyString,
+    }),
+  ),
   swarmCollector: Type.Optional(Type.Boolean()),
   swarmOutputSchema: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   // Host-owned recovery turns can force every Code Mode exec onto the

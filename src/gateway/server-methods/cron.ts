@@ -94,6 +94,7 @@ import { startCronListDiagnostics } from "./cron-list-diagnostics.js";
 import { compactCronListJob } from "./cron-list-projection.js";
 import { cronRunLogPageFilters, filterCronRunLogJobsByAgent } from "./cron-run-log-filters.js";
 import { resolveOperatorSessionCreation } from "./session-creation-provenance.js";
+import { isGatewayAdmin } from "../session-sharing-policy.js";
 import type { GatewayClient, GatewayRequestHandlers, RespondFn } from "./types.js";
 import { assertValidParams } from "./validation.js";
 
@@ -1138,6 +1139,16 @@ export const cronHandlers: GatewayRequestHandlers = {
       respondInvalidCronParams(respond, "cron.run", "Gateway process changed after preflight");
       return;
     }
+    // Fork T1847: only admin callers may override the dispatch-pressure guard.
+    const dispatchPressureOverride = p.dispatchPressureOverride;
+    if (dispatchPressureOverride && !isGatewayAdmin(client)) {
+      respondInvalidCronParams(
+        respond,
+        "cron.run",
+        "dispatch pressure override is reserved for admin callers",
+      );
+      return;
+    }
     let result: Awaited<ReturnType<typeof context.cron.enqueueRun>>;
     try {
       const commitGuard = resolveCronMutationCommitGuard(
@@ -1146,9 +1157,13 @@ export const cronHandlers: GatewayRequestHandlers = {
         { callerScope, jobId },
         { sessionMutationCommitGuard, hasCurrentClientAuthority },
       );
-      result = commitGuard
-        ? await context.cron.enqueueRun(jobId, p.mode ?? "force", { commitGuard })
-        : await context.cron.enqueueRun(jobId, p.mode ?? "force");
+      result =
+        commitGuard || dispatchPressureOverride
+          ? await context.cron.enqueueRun(jobId, p.mode ?? "force", {
+              ...(commitGuard ? { commitGuard } : {}),
+              ...(dispatchPressureOverride ? { dispatchPressureOverride } : {}),
+            })
+          : await context.cron.enqueueRun(jobId, p.mode ?? "force");
     } catch (error) {
       if (error instanceof TypeError) {
         respondInvalidCronParams(respond, "cron.run", formatErrorMessage(error));

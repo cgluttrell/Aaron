@@ -45,6 +45,8 @@ export type AgentRunRequest = {
   idempotencyKey: string;
   sourceReplyDeliveryMode?: "automatic" | "message_tool_only";
   disableMessageTool?: boolean;
+  /** Fork T1847: attributed override of the gateway dispatch-pressure guard. */
+  dispatchPressureOverride?: { approvedBy: "Chris"; reason: string };
   swarmCollector?: boolean;
   swarmOutputSchema?: Record<string, unknown>;
   forceRestartSafeTools?: boolean;
