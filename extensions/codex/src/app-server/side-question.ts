@@ -75,6 +75,7 @@ import {
   buildCodexNativeHookRelayDisabledConfig,
   resolveCodexNativeHookRelayEvents,
   resolveCodexNativeHookRelayTtlMs,
+  isCodexNativeHookRelayDisabledByEnv,
 } from "./native-hook-relay.js";
 import { createCodexNativePreToolUseFailureBuffer } from "./native-pre-tool-use-failures.js";
 import {
@@ -581,7 +582,12 @@ export async function runCodexAppServerSideQuestion(
       configuredEvents: options.nativeHookRelay?.events,
       appServer,
     });
-    if (options.nativeHookRelay && options.nativeHookRelay.enabled !== false) {
+    // Fork kill-switch (OPENCLAW_CODEX_NATIVE_HOOK_RELAY): side questions register their own relay.
+    if (
+      options.nativeHookRelay &&
+      options.nativeHookRelay.enabled !== false &&
+      !isCodexNativeHookRelayDisabledByEnv()
+    ) {
       const channelId = buildAgentHookContextChannelFields({
         sessionKey: params.sessionKey,
         messageChannel: params.messageChannel,
@@ -631,7 +637,7 @@ export async function runCodexAppServerSideQuestion(
           hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
           clearOmittedEvents: true,
         })
-      : options.nativeHookRelay?.enabled === false
+      : options.nativeHookRelay?.enabled === false || isCodexNativeHookRelayDisabledByEnv()
         ? buildCodexNativeHookRelayDisabledConfig()
         : undefined;
     const runtimeThreadConfig = buildCodexRuntimeThreadConfig(webSearchPlan.threadConfig, {
