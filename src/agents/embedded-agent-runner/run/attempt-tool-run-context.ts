@@ -65,10 +65,14 @@ export function buildEmbeddedAttemptToolRunContext(
 ) {
   const { currentInboundAudio, replyOperation } = params;
   // Collector output is mandatory result transport, even on a narrowed tool surface.
+  // Fork T1233: a heartbeat run keeps its response tool through a narrowed runtime allowlist.
+  const forcedRuntimeToolNames = [
+    ...(params.swarmCollector && params.swarmOutputSchema ? ["structured_output"] : []),
+    ...(params.trigger === "heartbeat" ? ["heartbeat_respond"] : []),
+  ];
   const runtimeToolAllowlist = mergeForcedEmbeddedAttemptToolsAllow(params.toolsAllow, {
     forceMessageTool: params.forceMessageTool,
-    forceToolNames:
-      params.swarmCollector && params.swarmOutputSchema ? ["structured_output"] : undefined,
+    forceToolNames: forcedRuntimeToolNames.length > 0 ? forcedRuntimeToolNames : undefined,
   });
   return {
     clientCaps: params.clientCaps,
