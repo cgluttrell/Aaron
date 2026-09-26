@@ -141,7 +141,13 @@ function parseMemoryStatValue(raw: string, key: string): number {
   return 0;
 }
 
-function resolveCgroupV2Dir(options: DispatchPressureGuardOptions): string | undefined {
+/** Inputs for reading the process's cgroup v2 memory, injectable for tests. */
+export type CgroupMemoryReadOptions = Pick<
+  DispatchPressureGuardOptions,
+  "readTextFile" | "cgroupDir"
+>;
+
+function resolveCgroupV2Dir(options: CgroupMemoryReadOptions): string | undefined {
   if (options.cgroupDir) {
     return options.cgroupDir;
   }
@@ -162,8 +168,13 @@ function resolveCgroupV2Dir(options: DispatchPressureGuardOptions): string | und
   }
 }
 
-function readCgroupMemorySample(
-  options: DispatchPressureGuardOptions,
+/**
+ * Reads this process's cgroup v2 memory: `memory.current`, `memory.max`, and the working set
+ * (current minus all `file` page cache). Undefined off Linux or without cgroup v2 memory files.
+ * Shared by the dispatch guard and memory diagnostics so both judge the same number.
+ */
+export function readCgroupMemorySample(
+  options: CgroupMemoryReadOptions = {},
 ): DispatchPressureSample | undefined {
   const cgroupDir = resolveCgroupV2Dir(options);
   if (!cgroupDir) {
