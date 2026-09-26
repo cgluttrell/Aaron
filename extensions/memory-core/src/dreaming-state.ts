@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type {
   OpenKeyedStoreOptions,
@@ -18,7 +19,10 @@ export const SHORT_TERM_PHASE_SIGNAL_NAMESPACE = "short-term-phase-signals";
 export const SHORT_TERM_META_NAMESPACE = "short-term-meta";
 export const SHORT_TERM_LOCK_NAMESPACE = "short-term-locks";
 
-const DREAMING_WORKSPACE_STATE_MAX_ENTRIES = 50_000;
+// Namespace capacity for Dreaming workspace-keyed plugin-state rows.
+// At this cap the keyed store evicts oldest created_at first; see the skip path in
+// writeMemoryCoreWorkspaceEntries for the intentional no-refresh retention policy.
+export const DREAMING_WORKSPACE_STATE_MAX_ENTRIES = 50_000;
 const WORKSPACE_STATE_YIELD_EVERY = 10;
 export const SHORT_TERM_LOCK_MAX_ENTRIES = 4_096;
 export const SESSION_SEEN_HASHES_PER_CHUNK = 512;
@@ -125,33 +129,47 @@ export async function writeMemoryCoreWorkspaceEntries<T>(
 ): Promise<void> {
   const store = openWorkspaceStore<T>(params.namespace);
   const workspaceKey = memoryCoreWorkspaceStateKey(params.workspaceDir);
+  const workspaceDir = path.resolve(params.workspaceDir);
+  // Fork patch T1565 (port of upstream PR #111392, still open): read the workspace's rows once,
+  // register only new or changed rows, and reuse the map for the delete pass.
+  const existingByKey = new Map(
+    (await readWorkspaceStoreEntries(store, workspaceKey)).map(
+      (entry) => [entry.key, entry.value] as const,
+    ),
+  );
   const replacementKeys = new Set<string>();
   // Scalar store calls can finish synchronously; await alone does not service I/O.
   let completed = 0;
   for (const entry of params.entries) {
     const stateKey = memoryCoreWorkspaceEntryKey(params.workspaceDir, entry.key);
     replacementKeys.add(stateKey);
-    await store.register(stateKey, {
-      version: 1,
+    const nextValue = {
+      version: 1 as const,
       workspaceKey,
-      workspaceDir: path.resolve(params.workspaceDir),
+      workspaceDir,
       key: entry.key,
       value: entry.value,
-    });
+    };
+    const current = existingByKey.get(stateKey);
+    if (current === undefined || !isDeepStrictEqual(current, nextValue)) {
+      await store.register(stateKey, nextValue);
+      // Keep comparisons in write order so duplicate logical keys preserve the
+      // keyed store's sequential last-write-wins behavior.
+      existingByKey.set(stateKey, nextValue);
+    }
     if (++completed % WORKSPACE_STATE_YIELD_EVERY === 0) {
       await yieldToEventLoop();
     }
   }
-  for (const entry of await readWorkspaceStoreEntries(store, workspaceKey)) {
-    if (!replacementKeys.has(entry.key)) {
-      await store.delete(entry.key);
+  for (const stateKey of existingByKey.keys()) {
+    if (!replacementKeys.has(stateKey)) {
+      await store.delete(stateKey);
       if (++completed % WORKSPACE_STATE_YIELD_EVERY === 0) {
         await yieldToEventLoop();
       }
     }
   }
 }
-
 // Caller owns typed encoding for values written to plugin state.
 export async function writeMemoryCoreWorkspaceEntry<T>(
   params: WriteMemoryCoreWorkspaceEntryParams<T>,
