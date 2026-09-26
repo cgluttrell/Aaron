@@ -134,6 +134,8 @@ export type ExecuteJobCoreOptions = {
       }
     | undefined;
   executionIdentity?: import("./state.js").CronExecutionIdentityAdmission;
+  /** Fork T1847: attributed override of the gateway dispatch-pressure guard. */
+  dispatchPressureOverride?: import("../../process/dispatch-pressure-guard.js").DispatchPressureOverride;
   /** Revalidates the durable run fence after awaited planning and before effects. */
   assertRunCurrent?: () => void;
   streamBatch?: string;

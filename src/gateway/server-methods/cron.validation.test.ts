@@ -4544,3 +4544,41 @@ describe("cron method validation", () => {
   });
 });
 /* oxlint-disable max-lines -- TODO: split this grandfathered oversized file. */
+
+describe("cron.run dispatch pressure override (fork T1847)", () => {
+  const override = { approvedBy: "Chris", reason: "urgent operator recovery" };
+
+  it("refuses an override from a non-admin caller before enqueueing", async () => {
+    const job = createCronJob({ id: "cron-42", agentId: "ops" });
+    const { context, respond } = await invokeCron(
+      "cron.run",
+      { id: "cron-42", dispatchPressureOverride: override },
+      { currentJob: job, client: callerClient("ops") },
+    );
+
+    expect(context.cron.enqueueRun).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({
+        message: expect.stringContaining("dispatch pressure override is reserved for admin callers"),
+      }),
+    );
+  });
+
+  it("passes an admin caller's override through to enqueueRun", async () => {
+    const job = createCronJob({ id: "cron-42" });
+    const adminClient = { connect: { scopes: ["operator.admin"] } } as unknown as GatewayClient;
+    const { context } = await invokeCron(
+      "cron.run",
+      { id: "cron-42", dispatchPressureOverride: override },
+      { currentJob: job, client: adminClient },
+    );
+
+    expect(context.cron.enqueueRun).toHaveBeenCalledWith(
+      "cron-42",
+      "force",
+      expect.objectContaining({ dispatchPressureOverride: override }),
+    );
+  });
+});

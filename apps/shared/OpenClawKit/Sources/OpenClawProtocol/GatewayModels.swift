@@ -580,6 +580,7 @@ public struct AgentParams: Codable, Sendable {
     public let sessioneffects: AnyCodable?
     public let sourcereplydeliverymode: AnyCodable?
     public let disablemessagetool: Bool?
+    public let dispatchpressureoverride: [String: AnyCodable]?
     public let swarmcollector: Bool?
     public let swarmoutputschema: [String: AnyCodable]?
     public let forcerestartsafetools: Bool?
@@ -631,6 +632,7 @@ public struct AgentParams: Codable, Sendable {
         sessioneffects: AnyCodable? = nil,
         sourcereplydeliverymode: AnyCodable? = nil,
         disablemessagetool: Bool? = nil,
+        dispatchpressureoverride: [String: AnyCodable]? = nil,
         swarmcollector: Bool? = nil,
         swarmoutputschema: [String: AnyCodable]? = nil,
         forcerestartsafetools: Bool? = nil,
@@ -681,6 +683,7 @@ public struct AgentParams: Codable, Sendable {
         self.sessioneffects = sessioneffects
         self.sourcereplydeliverymode = sourcereplydeliverymode
         self.disablemessagetool = disablemessagetool
+        self.dispatchpressureoverride = dispatchpressureoverride
         self.swarmcollector = swarmcollector
         self.swarmoutputschema = swarmoutputschema
         self.forcerestartsafetools = forcerestartsafetools
@@ -733,6 +736,7 @@ public struct AgentParams: Codable, Sendable {
         case sessioneffects = "sessionEffects"
         case sourcereplydeliverymode = "sourceReplyDeliveryMode"
         case disablemessagetool = "disableMessageTool"
+        case dispatchpressureoverride = "dispatchPressureOverride"
         case swarmcollector = "swarmCollector"
         case swarmoutputschema = "swarmOutputSchema"
         case forcerestartsafetools = "forceRestartSafeTools"

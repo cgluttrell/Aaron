@@ -159,7 +159,7 @@ export class CronService implements CronServiceContract {
   async enqueueRun(
     id: string,
     mode?: CronRunMode,
-    opts?: { commitGuard?: () => void },
+    opts?: { commitGuard?: () => void; dispatchPressureOverride?: import("../process/dispatch-pressure-guard.js").DispatchPressureOverride },
   ): Promise<CronServiceRunResult> {
     const result = await runOps.enqueueRun(this.state, id, mode, opts);
     if (result.ok && "runnable" in result) {
