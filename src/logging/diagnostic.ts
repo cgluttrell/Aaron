@@ -1128,7 +1128,9 @@ export function startDiagnosticHeartbeat(
   }
   const livenessGraceUntil =
     opts?.startupGraceMs != null && opts.startupGraceMs > 0 ? Date.now() + opts.startupGraceMs : 0;
-  lastDiagnosticHeartbeatTickAt = Date.now();
+  // globalThis.performance is the same clock as node:perf_hooks in production, and the one
+  // fake timers drive in tests.
+  lastDiagnosticHeartbeatTickAt = globalThis.performance.now();
   heartbeatInterval = setInterval(() => {
     // Reuse this tick for exporter demand changes; GC collection never adds a timer.
     reconcileDiagnosticGcObserver();
@@ -1146,9 +1148,12 @@ export function startDiagnosticHeartbeat(
       opts?.testTimings?.stuckSessionAbortMs ?? resolveStuckSessionAbortMs(stuckSessionWarnMs);
     const compactionSafetyTimeoutMs = resolveCompactionTimeoutMs(heartbeatConfig);
     const now = Date.now();
+    // Measure tick lateness on the monotonic clock. A wall-clock step (WSL2 advances ~2.8s every
+    // ~32s here) otherwise reads as event-loop delay and defers stuck-session recovery (T2843).
+    const tickAt = globalThis.performance.now();
     const heartbeatElapsedMs =
-      lastDiagnosticHeartbeatTickAt === undefined ? 0 : now - lastDiagnosticHeartbeatTickAt;
-    lastDiagnosticHeartbeatTickAt = now;
+      lastDiagnosticHeartbeatTickAt === undefined ? 0 : tickAt - lastDiagnosticHeartbeatTickAt;
+    lastDiagnosticHeartbeatTickAt = tickAt;
     const heartbeatOverdueMs = Math.max(0, heartbeatElapsedMs - DIAGNOSTIC_HEARTBEAT_INTERVAL_MS);
     const inStartupGrace = livenessGraceUntil > 0 && now < livenessGraceUntil;
     // Observe ordinary timer jitter at the scheduled tick so it cannot consume
