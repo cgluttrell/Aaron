@@ -7,6 +7,10 @@ import {
   type DiagnosticMemoryUsage,
 } from "../infra/diagnostic-events.js";
 import { sampleTrackedWorkerMemory } from "../infra/worker-cpu.js";
+import {
+  readCgroupMemorySample,
+  type DispatchPressureSample,
+} from "../process/dispatch-pressure-guard.js";
 import { createSubsystemLogger } from "./subsystem.js";
 
 const WARNING_RATIO = 0.8;
@@ -216,6 +220,11 @@ function logMemoryPressure(pressure: MemoryPressure): void {
 export function emitDiagnosticMemorySample(options?: {
   now?: number;
   memoryUsage?: NodeJS.MemoryUsage;
+  /**
+   * Injected service-cgroup sample; `null` means none. When omitted, cgroup v2 is read only if
+   * `memoryUsage` is also live (not injected).
+   */
+  cgroupMemory?: DispatchPressureSample | null;
   heapSizeLimitBytes?: number;
   processMemoryLimitBytes?: number;
   physicalMemoryBytes?: number;
