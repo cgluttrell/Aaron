@@ -189,7 +189,9 @@ describe("before_agent_reply hook runner (claiming pattern)", () => {
     vi.useFakeTimers();
     try {
       const hung = vi.fn(() => new Promise<never>(() => {}));
-      const registry = createMockPluginRegistry([{ hookName: "before_agent_reply", handler: hung }]);
+      const registry = createMockPluginRegistry([
+        { hookName: "before_agent_reply", handler: hung },
+      ]);
       const runner = createHookRunner(registry);
 
       const pending = runner.runBeforeAgentReply(EVENT, TEST_PLUGIN_AGENT_CTX);

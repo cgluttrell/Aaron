@@ -678,12 +678,19 @@ function storeOptions(
  * Proposal", or Proposed Changes + Evidence Plan + Scope Guard sections) would overwrite a
  * working skill with its own change request. Refuse it before any file is written.
  */
-export function assertUpdateProposalContainsFullSkillBody(kind: string, skillContent: string): void {
+export function assertUpdateProposalContainsFullSkillBody(
+  kind: string,
+  skillContent: string,
+): void {
   if (kind !== "update") {
     return;
   }
   const normalized = skillContent.replace(/\r\n/g, "\n");
-  const firstHeading = normalized.match(/^#\s+(.+)$/m)?.[1]?.trim().toLowerCase() ?? "";
+  const firstHeading =
+    normalized
+      .match(/^#\s+(.+)$/m)?.[1]
+      ?.trim()
+      .toLowerCase() ?? "";
   const hasPatchInstructionHeadings =
     /^##\s+Proposed Changes\s*$/im.test(normalized) && /^##\s+Evidence Plan\s*$/im.test(normalized);
   const hasScopeGuard = /^##\s+Scope Guard\s*$/im.test(normalized);

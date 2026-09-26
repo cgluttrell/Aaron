@@ -4652,7 +4652,9 @@ describe("cron.run dispatch pressure override (fork T1847)", () => {
       false,
       undefined,
       expect.objectContaining({
-        message: expect.stringContaining("dispatch pressure override is reserved for admin callers"),
+        message: expect.stringContaining(
+          "dispatch pressure override is reserved for admin callers",
+        ),
       }),
     );
   });

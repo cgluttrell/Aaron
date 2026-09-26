@@ -3,6 +3,7 @@ import {
   type HeartbeatRunResult,
 } from "../../infra/heartbeat-wake.js";
 import type { CommandLaneTaskMarker } from "../../process/command-queue.js";
+import { decideDispatchPressure } from "../../process/dispatch-pressure-guard.js";
 import {
   type CronActiveJobMarker,
   isCronActiveJobMarkerCurrent,
@@ -34,7 +35,6 @@ import {
   normalizeQueuedSystemEventHandle,
   removeQueuedSystemEventHandle,
 } from "./timer-trigger.js";
-import { decideDispatchPressure } from "../../process/dispatch-pressure-guard.js";
 
 /** Executes a cron job without mutating persisted job state. */
 export async function executeJobCore(
