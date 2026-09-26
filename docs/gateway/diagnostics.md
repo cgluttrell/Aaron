@@ -487,7 +487,7 @@ paths. No configuration setting is needed.
 Before starting expensive isolated agent or isolated cron-agent work, the
 Gateway samples the service cgroup on Linux cgroup v2 hosts. Non-urgent
 isolated dispatch is deferred when cgroup working set
-(`memory.current - inactive_file`) is at or above 85% of `memory.max`, when an
+(`memory.current` minus all page cache, the `file` line of `memory.stat`) is at or above 85% of `memory.max`, when an
 unbounded cgroup exceeds the absolute working-set guardrail, or when working set
 grows quickly inside the sample window.
 
@@ -499,7 +499,10 @@ systemd `MemoryMax` denominator.
 
 Deferrals are visible in Gateway logs as `gateway dispatch pressure guard
 deferred agent run` or `cron: isolated agent dispatch deferred by gateway
-pressure guard`. Cron deferrals are recorded as skipped preflight runs so the
+pressure guard`. The first sampling outcome in each Gateway process is logged once
+(`dispatch pressure guard active`, or `dispatch pressure guard inactive` when cgroup v2 memory
+files are unavailable), since an allowed dispatch leaves no other trace. Cron deferrals are
+recorded as skipped preflight runs so the
 scheduler moves to the next normal fire instead of immediately retrying under
 the same pressure.
 
