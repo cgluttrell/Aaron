@@ -54,6 +54,8 @@ type CronCoreRunOptions = {
   streamScheduleKey?: string;
   streamSourceIdentity?: string;
   executionIdentity?: import("./state.js").CronExecutionIdentityAdmission;
+  /** Fork T1847: attributed override of the gateway dispatch-pressure guard. */
+  dispatchPressureOverride?: import("../../process/dispatch-pressure-guard.js").DispatchPressureOverride;
 } & (
   | { runReceipt: CronRunReceiptHandle; runReceiptContext: OpenClawStateWorkerContext }
   | { runReceipt?: undefined; runReceiptContext?: undefined }
@@ -339,6 +341,7 @@ async function executeJobCoreWithTimeoutUnfinalized(
     const coreOptions: ExecuteJobCoreOptions = {
       deliveryAttemptFence,
       activeJobMarker: opts?.activeJobMarker,
+      dispatchPressureOverride: opts?.dispatchPressureOverride,
       owningCronLaneTaskMarker: opts?.owningCronLaneTaskMarker,
       streamBatch: opts?.streamBatch,
       streamScheduleKey: opts?.streamScheduleKey,

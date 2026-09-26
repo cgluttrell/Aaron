@@ -76,6 +76,8 @@ export type OnExitRunOptions = {
 
 export type ManualRunOptions = {
   onExit?: OnExitRunOptions;
+  /** Fork T1847: attributed override of the gateway dispatch-pressure guard. */
+  dispatchPressureOverride?: import("../../process/dispatch-pressure-guard.js").DispatchPressureOverride;
   runId?: string;
   /** Revalidates the caller before preflight effects and durable reservation. */
   commitGuard?: () => void;
@@ -426,6 +428,9 @@ export async function prepareManualRun(
         ? { streamSourceIdentity: opts.streamSourceIdentity }
         : {}),
       ...(opts?.onTriggerDisposition ? { onTriggerDisposition: opts.onTriggerDisposition } : {}),
+      ...(opts?.dispatchPressureOverride
+        ? { dispatchPressureOverride: opts.dispatchPressureOverride }
+        : {}),
     } as const;
   });
 }
