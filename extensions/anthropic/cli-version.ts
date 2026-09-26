@@ -1,4 +1,5 @@
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk/plugin-entry";
+import { createSubsystemLogger } from "openclaw/plugin-sdk/runtime-env";
 import { withTimeout } from "openclaw/plugin-sdk/time-runtime";
 import { parseClaudeCodeVersion, supportsClaudeDynamicSystemPromptSections } from "./cli-shared.js";
 import { resolveClaudeTerminalExecutable } from "./session-catalog-executable.js";
@@ -7,6 +8,7 @@ import { resolveClaudeTerminalExecutable } from "./session-catalog-executable.js
 // the process lifetime (T2831: one timed-out probe kept Opus 5.5 rejected until restart).
 const FAILED_PROBE_RETRY_MS = 60_000;
 const LATE_RESULT_GRACE_MS = 200;
+const log = createSubsystemLogger("anthropic-cli-version");
 
 /** Share one lazy discovery result between native CLI capabilities and OAuth identity. */
 export function createClaudeCodeVersionProbe(
@@ -17,11 +19,13 @@ export function createClaudeCodeVersionProbe(
   let installedVersion: string | undefined;
   let inFlight: Promise<string | undefined> | undefined;
   let failedAt: number | undefined;
+  let lastFailure: string | undefined;
   const probe = async (): Promise<string | undefined> => {
     try {
       // Login-shell PATH discovery can block well beyond the request probe budget.
       const executable = resolveClaudeTerminalExecutable(process.env, { pathStrategy: "direct" });
       if (!executable) {
+        lastFailure = "no claude executable on PATH";
         return undefined;
       }
       // The runner retains process cleanup; requests need not wait for a slow tree kill.
@@ -47,13 +51,16 @@ export function createClaudeCodeVersionProbe(
         () => undefined,
       );
       // After a stall the CLI has usually exited already; a short grace lets this request use it.
-      installedVersion ??= readVersion(
-        await withTimeout(run, 1_500).catch(
-          async () => await withTimeout(run, LATE_RESULT_GRACE_MS),
-        ),
+      const result = await withTimeout(run, 1_500).catch(
+        async () => await withTimeout(run, LATE_RESULT_GRACE_MS),
       );
+      installedVersion ??= readVersion(result);
+      if (!installedVersion) {
+        lastFailure = `code=${result.code} termination=${result.termination}`;
+      }
       return installedVersion;
-    } catch {
+    } catch (error) {
+      lastFailure = String(error);
       return undefined;
     }
   };
@@ -68,6 +75,14 @@ export function createClaudeCodeVersionProbe(
       return undefined;
     }
     inFlight = probe().then((version) => {
+      // Silent before T2831; a missing version decides what every OAuth request advertises.
+      if (version) {
+        log.info(`claude code version probe: ${version}`);
+      } else {
+        log.warn(
+          `claude code version probe found no version (${lastFailure ?? "unknown"}); OAuth requests use the transport floor; retry in ${FAILED_PROBE_RETRY_MS / 1_000}s`,
+        );
+      }
       failedAt = version ? undefined : nowMs();
       inFlight = undefined;
       return version;
