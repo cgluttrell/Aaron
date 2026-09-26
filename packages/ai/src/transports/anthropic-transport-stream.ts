@@ -56,6 +56,26 @@ const ANTHROPIC_MESSAGES_ERROR_BODY_READ_IDLE_TIMEOUT_MS = 10_000;
 const ANTHROPIC_MESSAGES_SSE_PENDING_BUFFER_MAX_CHARS = 16 * 1024 * 1024;
 type AnthropicTransportModel = Model<"anthropic-messages">;
 
+let reportedClaudeCodeIdentity: string | undefined;
+function reportAnthropicClaudeCodeIdentity(
+  version: string,
+  optionHeaders: Record<string, string> | undefined,
+): void {
+  const offered = Object.entries(optionHeaders ?? {}).find(
+    ([name]) => name.toLowerCase() === "user-agent",
+  )?.[1];
+  const outcome = `${version}|${offered ?? ""}`;
+  if (reportedClaudeCodeIdentity === outcome) {
+    return;
+  }
+  reportedClaudeCodeIdentity = outcome;
+  getAiTransportHost().logInfo(
+    "anthropic-transport",
+    `anthropic oauth identity advertises claude-cli/${version} (installed-version header: ${offered ?? "absent"})`,
+  );
+}
+
+
 function isKimiAnthropicProvider(provider: string | undefined): boolean {
   return /^kimi(?:-|$)/.test(normalizeLowercaseStringOrEmpty(provider ?? ""));
 }
@@ -291,6 +311,7 @@ function createAnthropicTransportClient(params: {
     const betaHeader = buildAnthropicBetaHeader(model, betaFeatures, { oauth: isOAuthToken });
     if (isOAuthToken) {
       const identity = buildAnthropicClaudeCodeIdentity(betaHeader, model.headers, optionHeaders);
+      reportAnthropicClaudeCodeIdentity(identity.version, optionHeaders);
       defaultHeaders = identity.headers;
       claudeCodeVersion = identity.version;
     } else {
