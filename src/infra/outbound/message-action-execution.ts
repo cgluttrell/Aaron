@@ -24,7 +24,7 @@ import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { readBooleanParam } from "../../plugin-sdk/boolean-param.js";
 import { extractToolPayload } from "../../plugin-sdk/tool-payload.js";
 import { resolvePollMaxSelections } from "../../polls.js";
-import { createLazyRuntimeModule } from "../../shared/lazy-runtime.js";
+import { createLazyPromiseLoader } from "../../shared/lazy-runtime.js";
 import { stripUnsupportedCitationControlMarkers } from "../../shared/text/citation-control-markers.js";
 import { formatErrorMessage } from "../errors.js";
 import { throwIfAborted } from "./abort.js";
@@ -61,9 +61,12 @@ const log = createSubsystemLogger("outbound/message-action");
 
 // Gateway runtime is only needed for remote message action dispatch or
 // idempotency keys; keep normal in-process actions import-light.
-const loadMessageActionGatewayRuntime = createLazyRuntimeModule(
+// Fork T1048 (originally b6141d9cbff, re-expressed for v2026.9.6): createLazyRuntimeModule
+// caches rejections, so one ERR_MODULE_NOT_FOUND during a dist rebuild pins the failure
+// until restart. createLazyPromiseLoader evicts a rejected load so the next call retries.
+const loadMessageActionGatewayRuntime = createLazyPromiseLoader(
   () => import("./message.gateway.runtime.js"),
-);
+).load;
 
 const MESSAGE_ACTION_RECONCILIATION_TIMEOUT_MS = 60_000;
 const MESSAGE_ACTION_RECONCILIATION_MAX_MS = 9 * 60_000;
