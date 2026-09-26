@@ -33,10 +33,10 @@ import { hasGatewayAdminScope } from "../operator-scopes.js";
 import { resolveExpectedExistingSessionConstraint } from "../server-methods/agent-expected-session.js";
 import type { AgentRunRequest } from "../server-methods/agent-request-types.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
+import { isGatewayAdmin } from "../session-sharing-policy.js";
 import { resolveGatewaySessionStoreTargetWithStore } from "../session-utils-store-lookup.js";
 import { readGatewayDedupeEntry, resolveAgentDedupeKeys } from "./agent-dedupe.js";
 import type { AgentTurnContext, AgentTurnIo, AgentTurnPrincipal } from "./types.js";
-import { isGatewayAdmin } from "../session-sharing-policy.js";
 
 export type AgentRequestPreflight = NonNullable<ReturnType<typeof prepareAgentRequestPreflight>>;
 
