@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const logMocks = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn() }));
+vi.mock("../logging/subsystem.js", () => ({
+  createSubsystemLogger: () => ({ info: logMocks.info, warn: logMocks.warn, debug: vi.fn(), error: vi.fn() }),
+}));
 import {
   decideDispatchPressure,
   resetDispatchPressureGuardForTest,
@@ -149,5 +154,42 @@ describe("dispatch pressure guard", () => {
     expect(decision.status).toBe("override");
     expect(decision.status === "override" ? decision.override.approvedBy : "").toBe("Chris");
     expect(decision.status === "override" ? decision.sample?.currentBytes : 0).toBe(950);
+  });
+});
+
+describe("dispatch pressure guard first-sample report (fork)", () => {
+  beforeEach(() => {
+    resetDispatchPressureGuardForTest();
+    logMocks.info.mockClear();
+    logMocks.warn.mockClear();
+  });
+
+  const unboundedFiles = {
+    "/cgroup/gateway/memory.current": String(3_000),
+    "/cgroup/gateway/memory.max": "max",
+    "/cgroup/gateway/memory.stat": "anon 1500\nfile 1000\ninactive_file 400\n",
+  };
+
+  it("logs 'dispatch pressure guard active' once, on the first real sample, even for an allow", () => {
+    const options = { cgroupDir: "/cgroup/gateway", readTextFile: reader(unboundedFiles) };
+    const first = decideDispatchPressure({ workKind: "gateway_agent", workId: "run-1" }, options);
+    decideDispatchPressure({ workKind: "gateway_agent", workId: "run-2" }, options);
+
+    expect(first.status).toBe("allow");
+    expect(logMocks.info).toHaveBeenCalledTimes(1);
+    expect(logMocks.info).toHaveBeenCalledWith(
+      "dispatch pressure guard active",
+      expect.objectContaining({ cgroupDir: "/cgroup/gateway", workingSetBytes: 2_000, maxBytes: "max" }),
+    );
+  });
+
+  it("warns once when cgroup v2 memory files are unavailable", () => {
+    const options = { cgroupDir: "/cgroup/gateway", readTextFile: reader({}) };
+    decideDispatchPressure({ workKind: "gateway_agent", workId: "run-1" }, options);
+    decideDispatchPressure({ workKind: "gateway_agent", workId: "run-2" }, options);
+
+    expect(logMocks.warn).toHaveBeenCalledTimes(1);
+    expect(String(logMocks.warn.mock.calls[0]?.[0])).toContain("dispatch pressure guard inactive");
+    expect(logMocks.info).not.toHaveBeenCalled();
   });
 });
