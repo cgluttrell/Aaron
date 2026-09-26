@@ -665,6 +665,13 @@ export const CronRunParamsSchema = cronIdOrJobIdParams({
   mode: Type.Optional(
     Type.Union([Type.Literal("due"), Type.Literal("force"), Type.Literal("if-enabled")]),
   ),
+  // Fork T1847: an explicit, attributed override of the dispatch-pressure guard.
+  dispatchPressureOverride: Type.Optional(
+    closedObject({
+      approvedBy: Type.Literal("Chris"),
+      reason: NonEmptyString,
+    }),
+  ),
   /** Rejects the mutation if the Gateway restarted after the caller's preflight. */
   expectedProcessInstanceId: Type.Optional(NonEmptyString),
   /** Holds the response until the queued run records its outcome or this many ms pass. */

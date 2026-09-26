@@ -63,6 +63,7 @@ async function finishPreparedManualRun(
         streamSourceIdentity: prepared.streamSourceIdentity,
         runReceipt: prepared.runReceipt,
         runReceiptContext: prepared.runReceiptContext,
+        dispatchPressureOverride: prepared.dispatchPressureOverride,
         executionIdentity: createCronOwnerExecutionIdentityAdmission({
           state,
           runReceipt: prepared.runReceipt,
@@ -245,7 +246,7 @@ export async function enqueueRun(
   state: CronServiceState,
   id: string,
   mode?: CronRunMode,
-  opts?: { commitGuard?: () => void },
+  opts?: { commitGuard?: () => void; dispatchPressureOverride?: import("../../process/dispatch-pressure-guard.js").DispatchPressureOverride },
 ) {
   const disposition = await inspectManualRunDisposition(state, id, mode, opts);
   if (!disposition.ok || !("runnable" in disposition && disposition.runnable)) {
@@ -287,6 +288,9 @@ export async function enqueueRun(
           scheduleOwnershipAtMs,
           terminalTracker,
           commitGuard: opts?.commitGuard,
+          ...(opts?.dispatchPressureOverride
+            ? { dispatchPressureOverride: opts.dispatchPressureOverride }
+            : {}),
         });
         if (!prepared.ok || !prepared.ran) {
           acceptance.resolve(prepared);

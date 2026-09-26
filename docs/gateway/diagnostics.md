@@ -585,6 +585,42 @@ counts or quantiles; the signed `_sum` can decrease, so `rate()` on that sum is 
 valid. Do not sum across methods to estimate allocation throughput. Both
 histograms use registered method labels and the existing exporter cap, without
 new configuration; disabled or uninterested diagnostics skip heap sampling.
+## Dispatch pressure guard
+
+Before starting expensive isolated agent or isolated cron-agent work, the
+Gateway samples the service cgroup on Linux cgroup v2 hosts. Non-urgent
+isolated dispatch is deferred when cgroup working set
+(`memory.current - inactive_file`) is at or above 85% of `memory.max`, when an
+unbounded cgroup exceeds the absolute working-set guardrail, or when working set
+grows quickly inside the sample window.
+
+The guard deliberately uses working set instead of raw `memory.current` because
+`memory.current` includes reclaimable file cache and can overstate real pressure
+on hosts with active filesystem caches. On cgroups where `memory.max` is `max`,
+the absolute working-set threshold keeps the guard effective without requiring a
+systemd `MemoryMax` denominator.
+
+Deferrals are visible in Gateway logs as `gateway dispatch pressure guard
+deferred agent run` or `cron: isolated agent dispatch deferred by gateway
+pressure guard`. Cron deferrals are recorded as skipped preflight runs so the
+scheduler moves to the next normal fire instead of immediately retrying under
+the same pressure.
+
+Urgent operator work can bypass the guard only with an explicit
+`dispatchPressureOverride` marker:
+
+```json
+{
+  "dispatchPressureOverride": {
+    "approvedBy": "Chris",
+    "reason": "brief urgent reason"
+  }
+}
+```
+
+Agent dispatch overrides are accepted only from admin/backend Gateway callers;
+`cron.run` overrides are accepted only from admin callers. Overrides are logged
+with the approving name, reason, and current cgroup sample when available.
 
 ## Related
 
