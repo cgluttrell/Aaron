@@ -80,6 +80,7 @@ import {
   CODEX_NATIVE_HOOK_RELAY_EVENTS,
   emitCodexNativePreToolUseFailureDiagnostic,
   type CodexNativePreToolUseFailure,
+  isCodexNativeHookRelayDisabledByEnv,
 } from "./native-hook-relay.js";
 import {
   mergeCodexThreadConfigs,
@@ -682,7 +683,7 @@ export async function runCodexAppServerSideQuestion(
           hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
           clearOmittedEvents: true,
         })
-      : options.nativeHookRelay?.enabled === false
+      : options.nativeHookRelay?.enabled === false || isCodexNativeHookRelayDisabledByEnv()
         ? buildCodexNativeHookRelayDisabledConfig()
         : undefined;
     const runtimeThreadConfig = buildCodexRuntimeThreadConfig(webSearchPlan.threadConfig, {
@@ -1042,7 +1043,8 @@ function registerCodexSideNativeHookRelay(params: {
   assertCurrent: () => void;
   onPreToolUseFailure: (failure: CodexNativePreToolUseFailure) => void;
 }): ReturnType<typeof registerNativeHookRelayForBundledRuntime> | undefined {
-  if (params.options.enabled === false) {
+  // Side questions register their own relay, so the kill-switch applies here too.
+  if (params.options.enabled === false || isCodexNativeHookRelayDisabledByEnv()) {
     return undefined;
   }
   return registerNativeHookRelayForBundledRuntime({

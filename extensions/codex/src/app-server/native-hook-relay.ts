@@ -25,6 +25,7 @@ import { resolveCodexToolAbortTerminalReason } from "./dynamic-tool-execution.js
 import { nativeHookRelayUnregisterQueue } from "./native-hook-relay-state.js";
 import type { CodexNativeProcessAuthority } from "./native-process-authority.js";
 import { isJsonObject, type JsonObject, type JsonValue } from "./protocol.js";
+import { readBooleanEnv } from "./config-utils.js";
 
 /** Codex hook events that can be registered through OpenClaw's native relay. */
 export const CODEX_NATIVE_HOOK_RELAY_EVENTS: readonly NativeHookRelayEvent[] = [
@@ -177,6 +178,22 @@ export function emitCodexNativePreToolUseFailureDiagnostic(params: {
   });
 }
 
+/**
+ * Operator kill-switch for the Codex native hook relay (fork patch, originally
+ * 01c61e65de7, re-expressed for v2026.9.6).
+ *
+ * Each relayed event spawns a full `openclaw` CLI plus an `openclaw-hooks` child
+ * (~330 MB apiece), so an install with no tool-event hook consumers pays a large
+ * per-tool-call cost for nothing (upstream openclaw/openclaw#91009). Unset keeps
+ * the relay on; OPENCLAW_CODEX_NATIVE_HOOK_RELAY=0/false/no/off disables it. Four
+ * call sites must all honor it (relay creation, the run-attempt config patch, the
+ * side-question relay and the side-question config patch), or the relay stays live
+ * on one path. Remove once openclaw/openclaw#121668 lands real plugin config.
+ */
+export function isCodexNativeHookRelayDisabledByEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return readBooleanEnv(env.OPENCLAW_CODEX_NATIVE_HOOK_RELAY) === false;
+}
+
 /** Registers an OpenClaw native hook relay for a Codex app-server turn. */
 export function createCodexNativeHookRelay(params: {
   options:
@@ -212,7 +229,7 @@ export function createCodexNativeHookRelay(params: {
   assertCurrent?: () => void;
   onPreToolUseFailure: (failure: CodexNativePreToolUseFailure) => void | Promise<void>;
 }): CodexNativeHookRelay | undefined {
-  if (params.options?.enabled === false) {
+  if (params.options?.enabled === false || isCodexNativeHookRelayDisabledByEnv()) {
     return undefined;
   }
   const directChildClaims = new Map<string, symbol>();
