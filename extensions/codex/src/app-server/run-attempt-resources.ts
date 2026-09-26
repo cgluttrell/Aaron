@@ -24,6 +24,7 @@ import {
   CODEX_NATIVE_HOOK_RELAY_TTL_GRACE_MS,
   createCodexNativeHookRelay,
   type CodexNativeHookRelay,
+  isCodexNativeHookRelayDisabledByEnv,
 } from "./native-hook-relay.js";
 import { createCodexNativePreToolUseFailureBuffer } from "./native-pre-tool-use-failures.js";
 import {
@@ -602,7 +603,9 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
             events: relayEvents,
             hookTimeoutSec: options.nativeHookRelay?.hookTimeoutSec,
           })
-        : options.nativeHookRelay?.enabled === false
+        : // The env kill-switch suppresses registration, so it must also emit the
+          // clearing config; otherwise Codex keeps its previous relay hook commands.
+          options.nativeHookRelay?.enabled === false || isCodexNativeHookRelayDisabledByEnv()
           ? buildCodexNativeHookRelayDisabledConfig()
           : undefined,
       nativeHookRelayGeneration: state.nativeHookRelay?.generation,

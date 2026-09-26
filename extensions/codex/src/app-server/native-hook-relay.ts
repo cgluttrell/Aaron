@@ -14,6 +14,7 @@ import {
   addTimerTimeoutGraceMs,
   finiteSecondsToTimerSafeMilliseconds,
 } from "openclaw/plugin-sdk/number-runtime";
+import { parseBooleanValue } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { PluginHookToolContext } from "openclaw/plugin-sdk/types";
 import type { CodexAppServerClient } from "./client.js";
 import { stringifyCodexPolicy } from "./config-policy-json.js";
@@ -175,6 +176,23 @@ export function emitCodexNativePreToolUseFailureDiagnostic(params: {
   });
 }
 
+/**
+ * Operator kill-switch for the Codex native hook relay (fork patch, originally
+ * 01c61e65de7, re-expressed for v2026.9.6 and v2026.9.8).
+ *
+ * Each relayed event spawns a full `openclaw` CLI plus an `openclaw-hooks` child
+ * (~330 MB apiece), so an install with no tool-event hook consumers pays a large
+ * per-tool-call cost for nothing (upstream openclaw/openclaw#91009). Unset keeps
+ * the relay on; OPENCLAW_CODEX_NATIVE_HOOK_RELAY=0/false/no/off disables it. Four
+ * call sites must all honor it (relay creation, the run-attempt config patch, the
+ * side-question relay and the side-question config patch), or the relay stays live
+ * on one path. Remove once openclaw/openclaw#121668 lands real plugin config.
+ */
+export function isCodexNativeHookRelayDisabledByEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return parseBooleanValue(env.OPENCLAW_CODEX_NATIVE_HOOK_RELAY) === false;
+}
+
+/** Registers an OpenClaw native hook relay for a Codex app-server turn. */
 export function createCodexNativeHookRelay(params: {
   options:
     | {
@@ -215,7 +233,7 @@ export function createCodexNativeHookRelay(params: {
   assertCurrent?: () => void;
   onPreToolUseFailure: (failure: CodexNativePreToolUseFailure) => void | Promise<void>;
 }): CodexNativeHookRelay | undefined {
-  if (params.options?.enabled === false) {
+  if (params.options?.enabled === false || isCodexNativeHookRelayDisabledByEnv()) {
     return undefined;
   }
   const modelInputTools: CodexNativeModelInputTools = params.nativeModelAdmission?.tools ?? [
