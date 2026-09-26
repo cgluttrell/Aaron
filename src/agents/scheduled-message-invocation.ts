@@ -41,6 +41,12 @@ export function createEmbeddedMessageInvocationPolicy(params: {
   config?: OpenClawConfig;
   capabilityProfile: ResolvedConversationCapabilityProfile;
   runtimeProfileAlsoAllow: string[];
+  /**
+   * Fork T1233: tools the runtime requires regardless of configured allowlists (the forced
+   * heartbeat response tool). Merged into every non-profile layer and the inherited layer so
+   * a group/sender/sandbox/subagent allowlist cannot strip them.
+   */
+  runtimeRequiredPolicyAlsoAllow?: string[];
   toolSearchControlAllowlist: string[];
   scheduledToolPolicy?: ScheduledToolPolicyContext;
   pluginMetadataSnapshot?: Parameters<
@@ -57,7 +63,11 @@ export function createEmbeddedMessageInvocationPolicy(params: {
   const policies = resolveConversationToolPolicies({
     capabilityProfile: params.capabilityProfile,
     additionalProfileAllow: params.runtimeProfileAlsoAllow,
-    additionalPolicyAllow: params.toolSearchControlAllowlist,
+    additionalPolicyAllow: [
+      ...params.toolSearchControlAllowlist,
+      ...(params.runtimeRequiredPolicyAlsoAllow ?? []),
+    ],
+    additionalInheritedAllow: params.runtimeRequiredPolicyAlsoAllow,
   });
   const filter = (currentProfile = params.capabilityProfile): AnyAgentTool[] => {
     const currentPolicies =
@@ -66,7 +76,11 @@ export function createEmbeddedMessageInvocationPolicy(params: {
         : resolveConversationToolPolicies({
             capabilityProfile: currentProfile,
             additionalProfileAllow: params.runtimeProfileAlsoAllow,
-            additionalPolicyAllow: params.toolSearchControlAllowlist,
+            additionalPolicyAllow: [
+              ...params.toolSearchControlAllowlist,
+              ...(params.runtimeRequiredPolicyAlsoAllow ?? []),
+            ],
+            additionalInheritedAllow: params.runtimeRequiredPolicyAlsoAllow,
           });
     const { tools, declaredToolAllowlist, unavailableCoreToolReason } = params.catalog();
     return applyToolPolicyPipeline({

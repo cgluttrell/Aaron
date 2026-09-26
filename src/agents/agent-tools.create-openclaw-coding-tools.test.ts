@@ -3446,3 +3446,35 @@ describe("createOpenClawCodingTools message provider policy", () => {
     ]);
   });
 });
+
+describe("heartbeat response tool through configured policies (fork T1233)", () => {
+  it("keeps heartbeat response available when sender policy only allows message", () => {
+    const tools = createOpenClawCodingTools({
+      config: { tools: { toolsBySender: { "*": { allow: ["message"] } } } } as OpenClawConfig,
+      trigger: "heartbeat",
+      senderIsOwner: false,
+    });
+    const names = new Set(tools.map((tool) => tool.name));
+    expect(names.has("message")).toBe(true);
+    expect(names.has("heartbeat_respond")).toBe(true);
+  });
+
+  it("enables heartbeat response on heartbeat runs whatever the visible-reply mode", () => {
+    const tools = createOpenClawCodingTools({
+      config: {
+        messages: { groupChat: { visibleReplies: "message_tool" } },
+        tools: { profile: "coding" },
+      } as OpenClawConfig,
+      trigger: "heartbeat",
+    });
+    expect(tools.map((tool) => tool.name)).toContain("heartbeat_respond");
+  });
+
+  it("does not expose heartbeat response on ordinary turns", () => {
+    const tools = createOpenClawCodingTools({
+      config: { tools: { profile: "coding" } } as OpenClawConfig,
+      trigger: "user",
+    });
+    expect(tools.map((tool) => tool.name)).not.toContain("heartbeat_respond");
+  });
+});

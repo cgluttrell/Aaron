@@ -108,3 +108,20 @@ describe("buildEmbeddedAttemptToolRunContext", () => {
     ).toBe(false);
   });
 });
+
+describe("heartbeat response tool through narrowed runtime allowlists (fork T1233)", () => {
+  it("adds heartbeat_respond to an explicit runtime allowlist on heartbeat runs", () => {
+    const context = buildEmbeddedAttemptToolRunContext({ trigger: "heartbeat", toolsAllow: ["message"] });
+    expect(context.runtimeToolAllowlist).toEqual(["message", "heartbeat_respond"]);
+  });
+
+  it("materializes heartbeat_respond through an empty runtime allowlist", () => {
+    const context = buildEmbeddedAttemptToolRunContext({ trigger: "heartbeat", toolsAllow: [] });
+    expect(context.runtimeToolAllowlist).toEqual(["heartbeat_respond"]);
+  });
+
+  it("leaves non-heartbeat runs unchanged", () => {
+    const context = buildEmbeddedAttemptToolRunContext({ trigger: "user", toolsAllow: ["message"] });
+    expect(context.runtimeToolAllowlist).toEqual(["message"]);
+  });
+});
