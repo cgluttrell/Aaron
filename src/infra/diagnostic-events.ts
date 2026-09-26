@@ -719,11 +719,24 @@ type DiagnosticMemorySampleEvent = DiagnosticBaseEvent & {
 export type DiagnosticMemoryPressureEvent = DiagnosticBaseEvent & {
   type: "diagnostic.memory.pressure";
   level: "warning" | "critical";
-  reason: "rss_threshold" | "heap_threshold" | "rss_growth";
+  reason:
+    | "rss_threshold"
+    | "heap_threshold"
+    | "rss_growth"
+    | "cgroup_memory_threshold"
+    | "cgroup_memory_growth";
   memory: DiagnosticMemoryUsage;
   thresholdBytes?: number;
   rssGrowthBytes?: number;
   windowMs?: number;
+  /** Service cgroup `memory.current`, including reclaimable page cache. */
+  cgroupMemoryBytes?: number;
+  /** Service cgroup working set: `memory.current` minus the `file` page cache. */
+  cgroupMemoryWorkingSetBytes?: number;
+  cgroupMemoryFileCacheBytes?: number;
+  cgroupMemoryGrowthBytes?: number;
+  /** Service cgroup `memory.max`; absent when the cgroup is unbounded. */
+  cgroupMemoryMaxBytes?: number;
 };
 
 type DiagnosticPayloadLargeEvent = DiagnosticBaseEvent & {
