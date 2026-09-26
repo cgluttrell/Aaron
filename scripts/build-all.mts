@@ -135,6 +135,7 @@ export const BUILD_ALL_STEPS: BuildAllStep[] = [
     pnpmArgs: ["plugins:assets:copy"],
   },
   tsxStep("runtime-postbuild", "scripts/runtime-postbuild.mts"),
+  tsxStep("check-message-runtime-imports", "scripts/check-message-runtime-imports.mts"),
   tsxStep("build-stamp", "scripts/build-stamp.mts"),
   tsxStep("runtime-postbuild-stamp", "scripts/runtime-postbuild-stamp.mts"),
   {
@@ -216,7 +217,13 @@ export const BUILD_ALL_PROFILES: Record<string, string[]> = {
   package: ["clean:dist", ...FULL_BUILD_STEP_LABELS],
   ciArtifacts: [...CI_ARTIFACT_STEP_LABELS],
   // Smoke builds retain typed compilation and publication checks without the UI/metadata tail.
-  strictSmoke: [...FULL_RUNTIME_STEP_LABELS, ...SDK_DECLARATION_STEP_LABELS],
+  // They also prove the message gateway runtime alias survives the build (T1048).
+  strictSmoke: [
+    ...FULL_RUNTIME_STEP_LABELS.flatMap((step) =>
+      step === "runtime-postbuild" ? [step, "check-message-runtime-imports"] : [step],
+    ),
+    ...SDK_DECLARATION_STEP_LABELS,
+  ],
   pluginSdkStrictSmoke: [
     ...FULL_COMPILER_STEP_LABELS,
     ...RUNTIME_STEP_LABELS,

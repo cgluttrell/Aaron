@@ -1154,6 +1154,18 @@ describe("resolveBuildAllSteps", () => {
     }
   });
 
+  it("checks the message gateway runtime alias only in strict smoke builds, after postbuild", () => {
+    const labels = resolveBuildAllSteps("strictSmoke").map((step) => step.label);
+    expect(labels.indexOf("check-message-runtime-imports")).toBe(
+      labels.indexOf("runtime-postbuild") + 1,
+    );
+    for (const profile of Object.keys(BUILD_ALL_PROFILES).filter(
+      (name) => name !== "strictSmoke",
+    )) {
+      expect(BUILD_ALL_PROFILES[profile]).not.toContain("check-message-runtime-imports");
+    }
+  });
+
   it("builds isolated external plugin output after tsdown and before runtime postbuild", () => {
     for (const profile of Object.keys(BUILD_ALL_PROFILES)) {
       const labels = resolveBuildAllSteps(profile).map((step) => step.label);
