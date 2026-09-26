@@ -15,7 +15,7 @@ import type { ChannelPollResult } from "../../channels/plugins/types.public.js";
 import { createChannelPartialDeliveryError } from "../../channels/turn/partial-delivery-error.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { normalizePollInput } from "../../polls.js";
-import { createLazyRuntimeModule } from "../../shared/lazy-runtime.js";
+import { createLazyPromiseLoader } from "../../shared/lazy-runtime.js";
 import { GATEWAY_CLIENT_NAMES } from "../../utils/message-channel.js";
 import { formatErrorMessage } from "../errors.js";
 import { resolveMessageChannelSelection } from "./channel-selection.js";
@@ -47,9 +47,12 @@ import { resolveOutboundTarget } from "./targets.js";
 
 const SEND_BUFFER_MEDIA_URL = "buffer://message-send/attachment";
 
-const loadMessageConfigRuntime = createLazyRuntimeModule(
+// Fork T1048 (originally b6141d9cbff, re-expressed for v2026.9.6): createLazyRuntimeModule
+// caches rejections, so one ERR_MODULE_NOT_FOUND during a dist rebuild pins the failure
+// until restart. createLazyPromiseLoader evicts a rejected load so the next call retries.
+const loadMessageConfigRuntime = createLazyPromiseLoader(
   () => import("./message.config.runtime.js"),
-);
+).load;
 
 type MessageSendParams = Pick<
   DeliverOutboundPayloadsParams,
