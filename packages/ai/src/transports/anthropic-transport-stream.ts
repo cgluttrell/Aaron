@@ -60,10 +60,12 @@ let reportedClaudeCodeIdentity: string | undefined;
 function reportAnthropicClaudeCodeIdentity(
   version: string,
   optionHeaders: Record<string, string> | undefined,
+  installedVersionHeaders: Record<string, string> | undefined,
 ): void {
-  const offered = Object.entries(optionHeaders ?? {}).find(
-    ([name]) => name.toLowerCase() === "user-agent",
-  )?.[1];
+  const offered =
+    Object.entries(optionHeaders ?? {}).find(
+      ([name]) => name.toLowerCase() === "user-agent",
+    )?.[1] ?? installedVersionHeaders?.["user-agent"];
   const outcome = `${version}|${offered ?? ""}`;
   if (reportedClaudeCodeIdentity === outcome) {
     return;
@@ -71,7 +73,7 @@ function reportAnthropicClaudeCodeIdentity(
   reportedClaudeCodeIdentity = outcome;
   getAiTransportHost().logInfo(
     "anthropic-transport",
-    `anthropic oauth identity advertises claude-cli/${version} (installed-version header: ${offered ?? "absent"})`,
+    `anthropic oauth identity advertises claude-cli/${version} (installed-version evidence: ${offered ?? "absent"})`,
   );
 }
 
@@ -310,8 +312,16 @@ function createAnthropicTransportClient(params: {
     }
     const betaHeader = buildAnthropicBetaHeader(model, betaFeatures, { oauth: isOAuthToken });
     if (isOAuthToken) {
-      const identity = buildAnthropicClaudeCodeIdentity(betaHeader, model.headers, optionHeaders);
-      reportAnthropicClaudeCodeIdentity(identity.version, optionHeaders);
+      const installedVersionHeaders = options?.claudeCodeInstalledVersion
+        ? { "user-agent": `claude-cli/${options.claudeCodeInstalledVersion}` }
+        : undefined;
+      const identity = buildAnthropicClaudeCodeIdentity(
+        betaHeader,
+        model.headers,
+        installedVersionHeaders,
+        optionHeaders,
+      );
+      reportAnthropicClaudeCodeIdentity(identity.version, optionHeaders, installedVersionHeaders);
       defaultHeaders = identity.headers;
       claudeCodeVersion = identity.version;
     } else {
