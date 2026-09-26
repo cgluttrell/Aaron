@@ -1,8 +1,8 @@
 // Memory Core dreaming state lives in SQLite-backed plugin state.
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { isDeepStrictEqual } from "node:util";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import type {
   OpenKeyedStoreOptions,
   PluginStateKeyedStore,

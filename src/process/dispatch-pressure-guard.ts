@@ -89,16 +89,21 @@ let previousSample: PreviousSample | undefined;
 let firstSampleReported = false;
 const log = createSubsystemLogger("gateway/dispatch-pressure");
 
-function reportFirstSampleOnce(sample: DispatchPressureSample | undefined, limits: {
-  usageRatioLimit: number;
-  unboundedWorkingSetBytesLimit: number;
-}): void {
+function reportFirstSampleOnce(
+  sample: DispatchPressureSample | undefined,
+  limits: {
+    usageRatioLimit: number;
+    unboundedWorkingSetBytesLimit: number;
+  },
+): void {
   if (firstSampleReported) {
     return;
   }
   firstSampleReported = true;
   if (!sample) {
-    log.warn("dispatch pressure guard inactive: cgroup v2 memory files unavailable; dispatch is never deferred");
+    log.warn(
+      "dispatch pressure guard inactive: cgroup v2 memory files unavailable; dispatch is never deferred",
+    );
     return;
   }
   log.info("dispatch pressure guard active", {

@@ -465,7 +465,10 @@ export async function enqueueRun(
   state: CronServiceState,
   id: string,
   mode?: CronRunMode,
-  opts?: { commitGuard?: () => void; dispatchPressureOverride?: import("../../process/dispatch-pressure-guard.js").DispatchPressureOverride },
+  opts?: {
+    commitGuard?: () => void;
+    dispatchPressureOverride?: import("../../process/dispatch-pressure-guard.js").DispatchPressureOverride;
+  },
 ) {
   const disposition = await inspectManualRunDisposition(state, id, mode, opts);
   if (!disposition.ok || !("runnable" in disposition && disposition.runnable)) {
