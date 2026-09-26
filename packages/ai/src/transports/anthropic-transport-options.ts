@@ -18,6 +18,12 @@ const ANTHROPIC_MESSAGES_FALLBACK_CONTEXT_DIVISOR = 4;
 export type AnthropicTransportOptions = AnthropicOptions &
   Pick<SimpleStreamOptions, "reasoning" | "thinkingBudgets" | "stop"> & {
     authProfileId?: string;
+    /**
+     * Installed Claude Code version probed by the Anthropic provider. Used only as OAuth
+     * identity evidence and never sent as a header. It carries the version when the OAuth key
+     * is injected below the provider wrapper, where no user-agent can be added (T2831).
+     */
+    claudeCodeInstalledVersion?: string;
   };
 
 function resolvePositiveAnthropicTokenLimit(value: unknown): number | undefined {
@@ -107,6 +113,9 @@ export function resolveAnthropicTransportOptions(
     anthropicCompactThreshold: options?.anthropicCompactThreshold,
     cacheTtlPruning: options?.cacheTtlPruning,
     ...(options?.authProfileId ? { authProfileId: options.authProfileId } : {}),
+    ...(options?.claudeCodeInstalledVersion
+      ? { claudeCodeInstalledVersion: options.claudeCodeInstalledVersion }
+      : {}),
   });
   if (reasoning === "off") {
     resolved.thinkingEnabled = false;
