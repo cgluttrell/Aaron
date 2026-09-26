@@ -128,11 +128,12 @@ function* assembleOpenClawCodingTools(
   const executionSessionKey = options?.runSessionKey ?? options?.sessionKey;
   const attachmentReadRoot = subagentAttachmentRootForRun(executionAgentId, executionSessionKey);
 
-  const enableHeartbeatTool =
-    options?.enableHeartbeatTool === true ||
-    (options?.trigger === "heartbeat" &&
-      options?.config?.messages?.visibleReplies === "message_tool");
-  const forceHeartbeatTool = options?.forceHeartbeatTool === true || enableHeartbeatTool;
+  // Fork T1233 (originally 78d3f9cddd4, re-expressed for v2026.9.6): every heartbeat-triggered
+  // run needs its response tool, whatever the visible-reply mode, and restrictive allowlists
+  // must not strip it (see runtimeRequiredPolicyAlsoAllow below).
+  const forceHeartbeatTool =
+    options?.forceHeartbeatTool === true || options?.trigger === "heartbeat";
+  const enableHeartbeatTool = options?.enableHeartbeatTool === true || forceHeartbeatTool;
   const toolSearchConfig = resolveToolSearchConfig(options?.config);
   const toolSearchControlsEnabled =
     options?.includeToolSearchControls === true && toolSearchConfig.enabled;
@@ -403,6 +404,7 @@ function* assembleOpenClawCodingTools(
       )
     : coreTools;
   const messageInvocationPolicy = createEmbeddedMessageInvocationPolicy({
+    runtimeRequiredPolicyAlsoAllow: forceHeartbeatTool ? [HEARTBEAT_RESPONSE_TOOL_NAME] : [],
     config: options?.config,
     capabilityProfile,
     runtimeProfileAlsoAllow,
