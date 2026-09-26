@@ -155,6 +155,18 @@ const DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK: Partial<Record<PluginHookName, 
   skill_proposal_evaluate: 120_000,
 };
 
+// Claiming hooks (before_agent_reply, inbound_claim, reply_dispatch) do not read the
+// modifying-hook table, so a handler that registers no timeoutMs runs unbounded. Fork
+// patch T1565 (originally 032005393e7, re-expressed for v2026.9.6): a heartbeat-triggered
+// memory-core dreaming pass awaited an internal narrative-generation lock with no bound,
+// and with this hook unbudgeted too, a wedged lock froze the whole interactive turn. The
+// budget sits above memory-core's 60s narrative bound so legitimate dreaming is not cut
+// off; the claiming runner catches the timeout and treats the hook as not handled, so the
+// turn proceeds without it.
+const DEFAULT_CLAIMING_HOOK_TIMEOUT_MS_BY_HOOK: Partial<Record<PluginHookName, number>> = {
+  before_agent_reply: 75_000,
+};
+
 function deepFreezeHookValue<T>(value: T, seen = new WeakSet<object>()): T {
   if ((typeof value !== "object" && typeof value !== "function") || value === null) {
     return value;
@@ -629,7 +641,8 @@ export function createHookRunner(
     normalizePositiveTimeoutMs(modifyingHookTimeoutMsByHook[hookName]);
 
   const getClaimingHookTimeoutMs = (hook: PluginHookRegistration): number | undefined =>
-    normalizePositiveTimeoutMs(hook.timeoutMs);
+    normalizePositiveTimeoutMs(hook.timeoutMs) ??
+    normalizePositiveTimeoutMs(DEFAULT_CLAIMING_HOOK_TIMEOUT_MS_BY_HOOK[hook.hookName]);
 
   const runSyncMessageHookStep = <K extends SyncHookName>(
     hook: PluginHookRegistration<K>,
