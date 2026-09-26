@@ -66,7 +66,9 @@ export interface CronServiceContract {
   enqueueRun(
     id: string,
     mode?: CronRunMode,
-    opts?: CronCommitGuardOptions & { dispatchPressureOverride?: import("../process/dispatch-pressure-guard.js").DispatchPressureOverride },
+    opts?: CronCommitGuardOptions & {
+      dispatchPressureOverride?: import("../process/dispatch-pressure-guard.js").DispatchPressureOverride;
+    },
   ): Promise<CronServiceRunResult>;
   getJob(id: string): CronJob | undefined;
   readJob(id: string): Promise<CronJob | undefined>;
