@@ -22,6 +22,7 @@ import {
   skillLibraryRevisionDir,
   stageSkillLibraryBundle,
 } from "./bundle.js";
+import { assertUpdateContainsFullSkillBody } from "./authoring.js";
 import { captureSkillLibraryAccess } from "./store-access.js";
 import { assertSkillLibraryRevision, type SkillLibraryAuthority } from "./store.js";
 export { skillLibraryReceipt } from "./receipt.js";
@@ -95,6 +96,7 @@ export async function saveSkillLibrary(
   }
   if (previous) {
     assertSkillLibraryRevision(previous, params.expectedRevision);
+    assertUpdateContainsFullSkillBody(params.content);
   } else if (params.expectedRevision !== null) {
     throw new SkillLibraryError("CONFLICT", "A new skill requires expectedRevision: null.");
   }
