@@ -1,5 +1,6 @@
 import { channel } from "node:diagnostics_channel";
 import { totalmem } from "node:os";
+// Diagnostic memory helpers capture process and service-cgroup memory facts for support diagnostics.
 import { getHeapStatistics } from "node:v8";
 import {
   emitInternalDiagnosticEvent as emitDiagnosticEvent,
@@ -7,6 +8,10 @@ import {
   type DiagnosticMemoryUsage,
 } from "../infra/diagnostic-events.js";
 import { sampleTrackedWorkerMemory } from "../infra/worker-cpu.js";
+import {
+  readCgroupMemorySample,
+  type DispatchPressureSample,
+} from "../process/dispatch-pressure-guard.js";
 import { createSubsystemLogger } from "./subsystem.js";
 
 const MB = 1024 * 1024;
@@ -23,6 +28,11 @@ const DEFAULT_RSS_GROWTH_WARNING_BYTES = 512 * MB;
 const DEFAULT_RSS_GROWTH_CRITICAL_BYTES = 1024 * MB;
 const DEFAULT_RSS_GROWTH_WARNING_RATIO = 0.04;
 const DEFAULT_RSS_GROWTH_CRITICAL_RATIO = 0.08;
+// Fork T2480: service-cgroup working set (children included), the budget the kernel OOMs on.
+const DEFAULT_CGROUP_MEMORY_WARNING_BYTES = 4 * GB;
+const DEFAULT_CGROUP_MEMORY_CRITICAL_BYTES = 6 * GB;
+const DEFAULT_CGROUP_MEMORY_GROWTH_WARNING_BYTES = GB;
+const DEFAULT_CGROUP_MEMORY_GROWTH_CRITICAL_BYTES = 2 * GB;
 const DEFAULT_GROWTH_WINDOW_MS = 10 * 60 * 1000;
 const DEFAULT_PRESSURE_REPEAT_MS = 5 * 60 * 1000;
 const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
@@ -41,6 +51,10 @@ type DiagnosticMemoryThresholds = {
   heapUsedCriticalBytes?: number;
   rssGrowthWarningBytes?: number;
   rssGrowthCriticalBytes?: number;
+  cgroupMemoryWarningBytes?: number;
+  cgroupMemoryCriticalBytes?: number;
+  cgroupMemoryGrowthWarningBytes?: number;
+  cgroupMemoryGrowthCriticalBytes?: number;
   growthWindowMs?: number;
   pressureRepeatMs?: number;
 };
@@ -59,6 +73,7 @@ type DiagnosticMemoryState = {
     baseline: DiagnosticMemorySample;
     risingWindows: number;
   } | null;
+  lastCgroupSample: { ts: number; workingSetBytes: number } | null;
   lastPressureAtByKey: Map<string, number>;
 };
 
@@ -85,6 +100,7 @@ function resolveProcessMemoryLimitBytes(
 
 const state: DiagnosticMemoryState = {
   growth: null,
+  lastCgroupSample: null,
   lastPressureAtByKey: new Map(),
 };
 
@@ -168,6 +184,14 @@ function resolveThresholds(
         DEFAULT_RSS_GROWTH_CRITICAL_BYTES,
         Math.floor(growthMemoryLimitBytes * DEFAULT_RSS_GROWTH_CRITICAL_RATIO),
       ),
+    cgroupMemoryWarningBytes:
+      thresholds?.cgroupMemoryWarningBytes ?? DEFAULT_CGROUP_MEMORY_WARNING_BYTES,
+    cgroupMemoryCriticalBytes:
+      thresholds?.cgroupMemoryCriticalBytes ?? DEFAULT_CGROUP_MEMORY_CRITICAL_BYTES,
+    cgroupMemoryGrowthWarningBytes:
+      thresholds?.cgroupMemoryGrowthWarningBytes ?? DEFAULT_CGROUP_MEMORY_GROWTH_WARNING_BYTES,
+    cgroupMemoryGrowthCriticalBytes:
+      thresholds?.cgroupMemoryGrowthCriticalBytes ?? DEFAULT_CGROUP_MEMORY_GROWTH_CRITICAL_BYTES,
     growthWindowMs: thresholds?.growthWindowMs ?? DEFAULT_GROWTH_WINDOW_MS,
     pressureRepeatMs: thresholds?.pressureRepeatMs ?? DEFAULT_PRESSURE_REPEAT_MS,
   };
@@ -256,6 +280,95 @@ function pickGrowthPressure(params: {
   return null;
 }
 
+function cgroupPressureMetrics(
+  cgroup: DispatchPressureSample,
+): Pick<
+  DiagnosticMemoryPressureEvent,
+  | "cgroupMemoryBytes"
+  | "cgroupMemoryWorkingSetBytes"
+  | "cgroupMemoryFileCacheBytes"
+  | "cgroupMemoryMaxBytes"
+> {
+  return {
+    cgroupMemoryBytes: cgroup.currentBytes,
+    cgroupMemoryWorkingSetBytes: cgroup.workingSetBytes,
+    cgroupMemoryFileCacheBytes: cgroup.fileCacheBytes,
+    ...(cgroup.maxBytes !== undefined ? { cgroupMemoryMaxBytes: cgroup.maxBytes } : {}),
+  };
+}
+
+// Process RSS misses child processes (Codex, hooks, exec) that share the service cgroup, so
+// the cgroup working set is judged separately (fork T2480).
+function pickCgroupThresholdPressure(params: {
+  memory: DiagnosticMemoryUsage;
+  cgroup: DispatchPressureSample | undefined;
+  thresholds: Required<DiagnosticMemoryThresholds>;
+}): Omit<DiagnosticMemoryPressureEvent, "seq" | "ts" | "type"> | null {
+  const { memory, cgroup, thresholds } = params;
+  if (!cgroup) {
+    return null;
+  }
+  const level =
+    cgroup.workingSetBytes >= thresholds.cgroupMemoryCriticalBytes
+      ? "critical"
+      : cgroup.workingSetBytes >= thresholds.cgroupMemoryWarningBytes
+        ? "warning"
+        : undefined;
+  if (!level) {
+    return null;
+  }
+  return {
+    level,
+    reason: "cgroup_memory_threshold",
+    memory,
+    thresholdBytes:
+      level === "critical"
+        ? thresholds.cgroupMemoryCriticalBytes
+        : thresholds.cgroupMemoryWarningBytes,
+    ...cgroupPressureMetrics(cgroup),
+  };
+}
+
+function pickCgroupGrowthPressure(params: {
+  now: number;
+  memory: DiagnosticMemoryUsage;
+  cgroup: DispatchPressureSample | undefined;
+  thresholds: Required<DiagnosticMemoryThresholds>;
+}): Omit<DiagnosticMemoryPressureEvent, "seq" | "ts" | "type"> | null {
+  const { now, memory, cgroup, thresholds } = params;
+  const previous = state.lastCgroupSample;
+  state.lastCgroupSample = cgroup ? { ts: now, workingSetBytes: cgroup.workingSetBytes } : null;
+  if (!cgroup || !previous) {
+    return null;
+  }
+  const windowMs = now - previous.ts;
+  if (windowMs <= 0 || windowMs > thresholds.growthWindowMs) {
+    return null;
+  }
+  const cgroupMemoryGrowthBytes = cgroup.workingSetBytes - previous.workingSetBytes;
+  const level =
+    cgroupMemoryGrowthBytes >= thresholds.cgroupMemoryGrowthCriticalBytes
+      ? "critical"
+      : cgroupMemoryGrowthBytes >= thresholds.cgroupMemoryGrowthWarningBytes
+        ? "warning"
+        : undefined;
+  if (!level) {
+    return null;
+  }
+  return {
+    level,
+    reason: "cgroup_memory_growth",
+    memory,
+    thresholdBytes:
+      level === "critical"
+        ? thresholds.cgroupMemoryGrowthCriticalBytes
+        : thresholds.cgroupMemoryGrowthWarningBytes,
+    cgroupMemoryGrowthBytes,
+    ...cgroupPressureMetrics(cgroup),
+    windowMs,
+  };
+}
+
 function shouldEmitPressure(
   pressure: Omit<DiagnosticMemoryPressureEvent, "seq" | "ts" | "type">,
   now: number,
@@ -308,7 +421,11 @@ function formatPressureRatio(params: {
       ? pressure.memory.heapUsedBytes
       : pressure.reason === "rss_growth"
         ? pressure.rssGrowthBytes
-        : pressure.memory.rssBytes;
+        : pressure.reason === "cgroup_memory_threshold"
+          ? pressure.cgroupMemoryWorkingSetBytes
+          : pressure.reason === "cgroup_memory_growth"
+            ? pressure.cgroupMemoryGrowthBytes
+            : pressure.memory.rssBytes;
   if (typeof value !== "number" || !Number.isFinite(value)) {
     return undefined;
   }
@@ -333,6 +450,12 @@ function formatPressureSummary(
       : "",
     pressure.rssGrowthBytes !== undefined
       ? `rssGrowth=${formatReadableBytes(pressure.rssGrowthBytes)}`
+      : "",
+    pressure.cgroupMemoryWorkingSetBytes !== undefined
+      ? `cgroupWorkingSet=${formatReadableBytes(pressure.cgroupMemoryWorkingSetBytes)}`
+      : "",
+    pressure.cgroupMemoryGrowthBytes !== undefined
+      ? `cgroupGrowth=${formatReadableBytes(pressure.cgroupMemoryGrowthBytes)}`
       : "",
   ];
   return parts.filter((part): part is string => Boolean(part)).join(" ");
@@ -380,6 +503,17 @@ function logMemoryPressure(
       : "") +
     formatOptionalPressureMetric("thresholdBytes", pressure.thresholdBytes) +
     formatOptionalPressureMetric("rssGrowthBytes", pressure.rssGrowthBytes) +
+    formatOptionalPressureMetric("cgroupMemoryBytes", pressure.cgroupMemoryBytes) +
+    formatOptionalPressureMetric(
+      "cgroupMemoryWorkingSetBytes",
+      pressure.cgroupMemoryWorkingSetBytes,
+    ) +
+    formatOptionalPressureMetric(
+      "cgroupMemoryFileCacheBytes",
+      pressure.cgroupMemoryFileCacheBytes,
+    ) +
+    formatOptionalPressureMetric("cgroupMemoryGrowthBytes", pressure.cgroupMemoryGrowthBytes) +
+    formatOptionalPressureMetric("cgroupMemoryMaxBytes", pressure.cgroupMemoryMaxBytes) +
     formatOptionalPressureMetric("windowMs", pressure.windowMs) +
     (pressure.memory.workerCount
       ? " workerLimitScope=js-heap-only; external/ArrayBuffers are not capped; nested workers are not included."
@@ -391,6 +525,11 @@ function logMemoryPressure(
 export function emitDiagnosticMemorySample(options?: {
   now?: number;
   memoryUsage?: NodeJS.MemoryUsage;
+  /**
+   * Injected service-cgroup sample; `null` means none. When omitted, cgroup v2 is read only if
+   * `memoryUsage` is also live (not injected).
+   */
+  cgroupMemory?: DispatchPressureSample | null;
   heapSizeLimitBytes?: number;
   processMemoryLimitBytes?: number;
   physicalMemoryBytes?: number;
@@ -419,8 +558,21 @@ export function emitDiagnosticMemorySample(options?: {
     });
   }
 
+  // An injected process sample is synthetic, so live cgroup facts are only read beside a live one.
+  const cgroup =
+    options?.cgroupMemory !== undefined
+      ? (options.cgroupMemory ?? undefined)
+      : options?.memoryUsage
+        ? undefined
+        : readCgroupMemorySample();
+  // Both growth trackers are stateful, so they sample every tick before precedence applies.
   const growthPressure = pickGrowthPressure({ current, thresholds });
-  const pressure = pickThresholdPressure({ memory, thresholds }) ?? growthPressure;
+  const cgroupGrowthPressure = pickCgroupGrowthPressure({ now, memory, cgroup, thresholds });
+  const pressure =
+    pickCgroupThresholdPressure({ memory, cgroup, thresholds }) ??
+    pickThresholdPressure({ memory, thresholds }) ??
+    cgroupGrowthPressure ??
+    growthPressure;
   if (pressure?.level === "critical") {
     channel("openclaw.memory.critical").publish(undefined);
   }
@@ -437,6 +589,7 @@ export function emitDiagnosticMemorySample(options?: {
 /** Clears process-local memory diagnostic state for isolated tests. */
 export function resetDiagnosticMemoryForTest(): void {
   state.growth = null;
+  state.lastCgroupSample = null;
   state.lastPressureAtByKey.clear();
 }
 
