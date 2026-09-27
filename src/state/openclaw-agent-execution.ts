@@ -105,6 +105,7 @@ export function captureOpenClawAgentDatabaseExecution(
   }
   const executionOptions = { agentId, path: pathname, env: context.environment };
   let retired = false;
+  let revoked = false;
   let borrowers = 0;
   let generation: AgentDatabaseNativeGeneration | undefined;
   let fileIdentity: AgentDatabaseExecutionFileIdentity | undefined;
@@ -371,6 +372,14 @@ export function captureOpenClawAgentDatabaseExecution(
         finishRetirement();
       })().catch((error: unknown) => {
         closing = undefined;
+        if (!revoked) {
+          // A rejected native close has not retired anything yet: the owner still holds
+          // its generation and lease, and `executions` still points at it. Leaving it
+          // retired would refuse every later borrower with "admission is closed" until
+          // the process drains. Re-admit the owner instead; its retained cleanupFailure
+          // makes the next request retry the native close before any new work.
+          retired = false;
+        }
         throw error;
       });
       return closing;
@@ -380,6 +389,7 @@ export function captureOpenClawAgentDatabaseExecution(
     agentId,
     path: pathname,
     revoke() {
+      revoked = true;
       retired = true;
       clearIdleTimer();
     },
