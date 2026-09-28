@@ -326,7 +326,6 @@ export async function resolveChannelTarget(params: {
   preferredKind?: ChannelDirectoryEntryKind;
   runtime?: RuntimeEnv;
   unknownTargetMode?: "error" | "normalized";
-  directoryMatchMode?: "exact" | "substring";
   plugin?: ChannelPlugin;
 }): Promise<ResolveMessagingTargetResult> {
   const raw = params.input.trim();
@@ -384,7 +383,7 @@ export async function resolveChannelTarget(params: {
     entries,
     query,
     plugin,
-    matchMode: reservedLiteral ? "exact" : (params.directoryMatchMode ?? "exact"),
+    matchMode: reservedLiteral ? "exact" : "substring",
   });
   if (match.kind === "single") {
     const entry = match.entry;
