@@ -47,6 +47,7 @@ describe("target error helpers", () => {
     expect(isReservedTargetLiteralError(reservedTargetLiteralError("Telegram", "current"))).toBe(
       true,
     );
+    expect(reservedTargetLiteralError("Telegram", "current").message).not.toContain("channel:<id>");
     expect(isReservedTargetLiteralError(new Error('Unknown target "current" for Telegram.'))).toBe(
       false,
     );

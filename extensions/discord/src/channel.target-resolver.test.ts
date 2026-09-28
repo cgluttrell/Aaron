@@ -24,6 +24,14 @@ function requireResolveTarget() {
 }
 
 describe("discordPlugin messaging target resolver", () => {
+  it("owns reserved destination literals and explicit-address guidance", () => {
+    expect(discordPlugin.messaging?.targetResolver?.reservedLiterals).toEqual([
+      "me",
+      "self",
+      "owner",
+    ]);
+    expect(discordPlugin.messaging?.targetResolver?.hint).toContain("user:<id> or channel:<id>");
+  });
   it("resolves Discord usernames through the messaging target resolver", async () => {
     vi.spyOn(directoryLive, "listDiscordDirectoryPeersLive").mockResolvedValueOnce([
       { kind: "user", id: "user:999", name: "Jane" } as const,
