@@ -38,7 +38,7 @@ export function unknownTargetError(provider: string, raw: string, hint?: string)
 
 export function reservedTargetLiteralError(provider: string, raw: string, hint?: string): Error {
   return new MessageActionDeniedError(
-    `Reserved target "${raw}" for ${provider} cannot be used as a literal destination. Use user:<id> or channel:<id>.${formatTargetHint(hint, true)}`,
+    `Reserved target "${raw}" for ${provider} cannot be used as a literal destination.${formatTargetHint(hint, true)}`,
     "message_target_reserved",
     "message-target:explicit",
   );
