@@ -67,7 +67,7 @@ export function unknownTargetError(provider: string, raw: string, hint?: string)
 }
 
 function reservedTargetLiteralMessage(provider: string, raw: string, hint?: string): string {
-  return `Reserved target "${raw}" for ${provider} cannot be used as a literal destination. Provide an explicit id or handle.${formatTargetHint(hint, true)}`;
+  return `Reserved target "${raw}" for ${provider} cannot be used as a literal destination. Use user:<id> or channel:<id>.${formatTargetHint(hint, true)}`;
 }
 
 export function reservedTargetLiteralError(provider: string, raw: string, hint?: string): Error {
