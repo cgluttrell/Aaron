@@ -63,7 +63,6 @@ export async function resolveChannelTarget(params: {
   preferredKind?: TargetResolveKind;
   runtime?: RuntimeEnv;
   unknownTargetMode?: "error" | "normalized";
-  directoryMatchMode?: "exact" | "substring";
   plugin?: ChannelPlugin;
 }): Promise<ResolveMessagingTargetResult> {
   return resolveMessagingTarget(params);
@@ -409,7 +408,6 @@ async function resolveMessagingTarget(params: {
   preferredKind?: TargetResolveKind;
   runtime?: RuntimeEnv;
   unknownTargetMode?: "error" | "normalized";
-  directoryMatchMode?: "exact" | "substring";
   plugin?: ChannelPlugin;
 }): Promise<ResolveMessagingTargetResult> {
   const raw = normalizeChannelTargetInput(params.input);
@@ -426,11 +424,6 @@ async function resolveMessagingTarget(params: {
   const plugin = params.plugin ?? resolveTargetChannelPlugin(params.channel);
   const providerLabel = plugin?.meta?.label ?? params.channel;
   const hint = plugin?.messaging?.targetResolver?.hint;
-  // These bare words describe a recipient, not an address. Never send to a
-  // same-named or substring-matched directory entry by accident.
-  if (/^(me|self|owner)$/i.test(raw)) {
-    return { ok: false, error: reservedTargetLiteralError(providerLabel, raw, hint) };
-  }
   const kind = detectTargetKind(params.channel, raw, params.preferredKind, plugin);
   const normalizedInput = resolveNormalizedTargetInput(params.channel, raw, plugin);
   const normalized = normalizedInput?.normalized ?? raw;
@@ -480,7 +473,7 @@ async function resolveMessagingTarget(params: {
     entries,
     query,
     plugin,
-    matchMode: reservedLiteral ? "exact" : (params.directoryMatchMode ?? "exact"),
+    matchMode: reservedLiteral ? "exact" : "substring",
   });
   if (match.kind === "single") {
     const entry = match.entry;
