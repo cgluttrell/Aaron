@@ -207,7 +207,7 @@ function matchesDirectoryEntry(params: {
   entry: ChannelDirectoryEntry;
   query: string;
   plugin?: ChannelPlugin;
-  exactOnly?: boolean;
+  matchMode: "exact" | "substring";
 }): boolean {
   const query = normalizeLowercaseStringOrEmpty(params.query);
   if (!query) {
@@ -225,8 +225,8 @@ function matchesDirectoryEntry(params: {
     ? stripTargetPrefixes(params.entry.handle, params.channel, params.plugin)
     : "";
   const candidates = [id, name, handle].map(normalizeLowercaseStringOrEmpty).filter(Boolean);
-  return candidates.some((value) =>
-    params.exactOnly ? value === query : value === query || value.includes(query),
+  return candidates.some(
+    (value) => value === query || (params.matchMode === "substring" && value.includes(query)),
   );
 }
 
@@ -235,7 +235,7 @@ function resolveMatch(params: {
   entries: ChannelDirectoryEntry[];
   query: string;
   plugin?: ChannelPlugin;
-  exactOnly?: boolean;
+  matchMode: "exact" | "substring";
 }) {
   const matches = params.entries.filter((entry) =>
     matchesDirectoryEntry({
@@ -243,7 +243,7 @@ function resolveMatch(params: {
       entry,
       query: params.query,
       plugin: params.plugin,
-      exactOnly: params.exactOnly,
+      matchMode: params.matchMode,
     }),
   );
   if (matches.length === 0) {
@@ -369,6 +369,7 @@ export async function resolveChannelTarget(params: {
   preferredKind?: TargetResolveKind;
   runtime?: RuntimeEnv;
   unknownTargetMode?: "error" | "normalized";
+  directoryMatchMode?: "exact" | "substring";
   plugin?: ChannelPlugin;
 }): Promise<ResolveMessagingTargetResult> {
   const raw = params.input.trim();
@@ -385,6 +386,11 @@ export async function resolveChannelTarget(params: {
   const plugin = params.plugin ?? getRuntimeVisibleChannelPlugin(params.channel);
   const providerLabel = plugin?.meta?.label ?? params.channel;
   const hint = plugin?.messaging?.targetResolver?.hint;
+  // These bare words describe a recipient, not an address. Never send to a
+  // same-named or substring-matched directory entry by accident.
+  if (/^(me|self|owner)$/i.test(raw)) {
+    return { ok: false, error: reservedTargetLiteralError(providerLabel, raw, hint) };
+  }
   const kind = detectTargetKind(params.channel, raw, params.preferredKind, plugin);
   const normalizedInput = resolveNormalizedTargetInput(params.channel, raw, plugin);
   const normalized = normalizedInput?.normalized ?? raw;
@@ -434,7 +440,7 @@ export async function resolveChannelTarget(params: {
     entries,
     query,
     plugin,
-    exactOnly: Boolean(reservedLiteral),
+    matchMode: reservedLiteral ? "exact" : (params.directoryMatchMode ?? "exact"),
   });
   if (match.kind === "single") {
     const entry = match.entry;
