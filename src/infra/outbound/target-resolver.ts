@@ -63,6 +63,8 @@ export async function resolveChannelTarget(params: {
   preferredKind?: TargetResolveKind;
   runtime?: RuntimeEnv;
   unknownTargetMode?: "error" | "normalized";
+  /** Substring directory matching is opt-in; outbound names are exact by default. */
+  directoryMatchMode?: "exact" | "substring";
   plugin?: ChannelPlugin;
 }): Promise<ResolveMessagingTargetResult> {
   return resolveMessagingTarget(params);
@@ -408,6 +410,7 @@ async function resolveMessagingTarget(params: {
   preferredKind?: TargetResolveKind;
   runtime?: RuntimeEnv;
   unknownTargetMode?: "error" | "normalized";
+  directoryMatchMode?: "exact" | "substring";
   plugin?: ChannelPlugin;
 }): Promise<ResolveMessagingTargetResult> {
   const raw = normalizeChannelTargetInput(params.input);
@@ -428,6 +431,9 @@ async function resolveMessagingTarget(params: {
   const normalizedInput = resolveNormalizedTargetInput(params.channel, raw, plugin);
   const normalized = normalizedInput?.normalized ?? raw;
   const reservedLiteral = resolveReservedTargetLiteral({ raw, plugin });
+  if (reservedLiteral && plugin?.messaging?.targetResolver?.rejectReservedLiteralMatches) {
+    return { ok: false, error: reservedTargetLiteralError(providerLabel, reservedLiteral, hint) };
+  }
   if (
     normalizedInput &&
     !reservedLiteral &&
@@ -473,7 +479,7 @@ async function resolveMessagingTarget(params: {
     entries,
     query,
     plugin,
-    matchMode: reservedLiteral ? "exact" : "substring",
+    matchMode: reservedLiteral ? "exact" : (params.directoryMatchMode ?? "exact"),
   });
   if (match.kind === "single") {
     const entry = match.entry;
