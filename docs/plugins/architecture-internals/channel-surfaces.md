@@ -89,6 +89,14 @@ outbound host generic and use the messaging adapter surface for provider rules:
   channel/session references for that provider. Resolution preserves configured
   directory entries before rejecting reserved literals, then fails closed on a
   directory miss.
+- `messaging.targetResolver.rejectReservedLiteralMatches` opts a channel into
+  rejecting its reserved words even when an exact directory entry exists.
+  Otherwise, an exact entry still wins (for example, a Telegram group named
+  `me`). Explicit `user:<id>` and `channel:<id>` targets are unaffected.
+- Shared outbound directory resolution matches names exactly by default.
+  Callers that intentionally offer fuzzy discovery may request
+  `directoryMatchMode: "substring"`; the `openclaw directory --query` CLI
+  uses its plugin directory search directly and keeps substring search.
 - `messaging.targetResolver.resolveTarget(...)` is the plugin fallback when
   core needs a final provider-owned resolution after normalization or after a
   directory miss.

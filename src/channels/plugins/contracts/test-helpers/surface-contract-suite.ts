@@ -98,6 +98,9 @@ export function expectChannelSurfaceContract(params: {
           ),
         ).toBe(true);
       }
+      if (messaging.targetResolver.rejectReservedLiteralMatches !== undefined) {
+        expect(typeof messaging.targetResolver.rejectReservedLiteralMatches).toBe("boolean");
+      }
       if (messaging.targetResolver.resolveTarget) {
         expect(typeof messaging.targetResolver.resolveTarget).toBe("function");
       }

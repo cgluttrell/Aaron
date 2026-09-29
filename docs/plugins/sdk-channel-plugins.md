@@ -805,7 +805,8 @@ the plugin does not grant additional authority to an existing job.
     describeMessageTool and action discovery
   </Card>
   <Card title="Target resolution" icon="crosshair" href="/plugins/architecture-internals#channel-target-resolution">
-    inferTargetChatType, looksLikeId, reservedLiterals, resolveTarget
+    inferTargetChatType, looksLikeId, reservedLiterals,
+    rejectReservedLiteralMatches, resolveTarget
   </Card>
   <Card title="Runtime helpers" icon="settings" href="/plugins/sdk-runtime">
     TTS, STT, media, subagent via api.runtime
