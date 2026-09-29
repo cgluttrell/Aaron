@@ -30,6 +30,7 @@ describe("discordPlugin messaging target resolver", () => {
       "self",
       "owner",
     ]);
+    expect(discordPlugin.messaging?.targetResolver?.rejectReservedLiteralMatches).toBe(true);
     expect(discordPlugin.messaging?.targetResolver?.hint).toContain("user:<id> or channel:<id>");
   });
   it("resolves Discord usernames through the messaging target resolver", async () => {

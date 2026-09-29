@@ -143,6 +143,7 @@ describe("resolveMessagingTarget (directory fallback)", () => {
           ...plugin.messaging,
           targetResolver: {
             reservedLiterals: ["me", "self", "owner"],
+            rejectReservedLiteralMatches: true,
             hint: "Use user:<id> or channel:<id> for reserved names.",
             resolveTarget: mocks.resolveTarget,
           },
@@ -162,7 +163,7 @@ describe("resolveMessagingTarget (directory fallback)", () => {
     },
   );
 
-  it("resolves an exact Discord channel named me before the reserved-literal miss", async () => {
+  it("rejects an exact Discord channel named me as a reserved recipient word", async () => {
     const plugin = mocks.getChannelPlugin() as ChannelPlugin;
     mocks.getChannelPlugin.mockReturnValue({
       ...plugin,
@@ -170,17 +171,22 @@ describe("resolveMessagingTarget (directory fallback)", () => {
         ...plugin.messaging,
         targetResolver: {
           reservedLiterals: ["me", "self", "owner"],
+          rejectReservedLiteralMatches: true,
+          hint: "Use user:<id> or channel:<id> for reserved names.",
           resolveTarget: mocks.resolveTarget,
         },
       },
     });
     mocks.listGroups.mockResolvedValue([{ kind: "group", id: "channel:123", name: "me" }]);
-    const result = await expectOkResolution({ cfg, channel: "discord", input: "me" });
-    expect(result.target.to).toBe("channel:123");
-    expect(result.target.source).toBe("directory");
+    const result = await resolveMessagingTarget({ cfg, channel: "discord", input: "me" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain('Reserved target "me"');
+      expect(result.error.message).toContain("user:<id> or channel:<id>");
+    }
   });
 
-  it("preserves substring matching for ordinary channel names", async () => {
+  it("resolves an exact channel name but rejects an ordinary bare substring", async () => {
     mocks.listGroups.mockResolvedValue([
       { kind: "group", id: "channel:123", name: "external-community-announcements" },
     ]);
@@ -191,21 +197,33 @@ describe("resolveMessagingTarget (directory fallback)", () => {
     });
     expect(exact.target.to).toBe("channel:123");
 
-    const partial = await expectOkResolution({ cfg, channel: "discord", input: "community" });
-    expect(partial.target.to).toBe("channel:123");
+    const partial = await resolveMessagingTarget({ cfg, channel: "discord", input: "community" });
+    expect(partial.ok).toBe(false);
   });
 
   it.each(["slack", "mattermost", "telegram"])(
-    "preserves %s bare-name substring resolution",
+    "rejects %s bare-name substring resolution",
     async (channel) => {
       mocks.listGroups.mockResolvedValue([
         { kind: "group", id: "channel:123", name: "general-chat" },
       ]);
-      const result = await expectOkResolution({ cfg, channel, input: "general" });
-      expect(result.target.to).toBe("channel:123");
-      expect(result.target.source).toBe("directory");
+      const result = await resolveMessagingTarget({ cfg, channel, input: "general" });
+      expect(result.ok).toBe(false);
     },
   );
+
+  it("allows substring directory matching only when explicitly requested", async () => {
+    mocks.listGroups.mockResolvedValue([
+      { kind: "group", id: "channel:123", name: "external-community-announcements" },
+    ]);
+    const result = await expectOkResolution({
+      cfg,
+      channel: "discord",
+      input: "community",
+      directoryMatchMode: "substring",
+    });
+    expect(result.target.to).toBe("channel:123");
+  });
 
   it("does not reuse query-filtered directory misses for later target queries", async () => {
     mocks.getChannelPlugin.mockReturnValue({
@@ -739,6 +757,7 @@ describe("resolveMessagingTarget (directory fallback)", () => {
       cfg,
       channel: "richchat",
       input: "general",
+      directoryMatchMode: "substring",
     });
 
     expect(result.ok).toBe(false);
