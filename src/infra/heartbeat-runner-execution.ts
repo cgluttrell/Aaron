@@ -361,6 +361,11 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   const { entry, sessionKey, run, conversationEntry } = preflight.session;
   const previousUpdatedAt = entry?.updatedAt;
   const projectionSessionKey = run.kind === "isolated" ? run.baseSessionKey : sessionKey;
+  const isMissionControlExecCompletion =
+    scheduledTasks.length === 0 &&
+    preflight.shouldInspectPendingEvents &&
+    preflight.pendingEventEntries.some((event) => isExecCompletionEvent(event.text)) &&
+    parseAgentSessionKey(projectionSessionKey)?.rest.startsWith("mission-control-") === true;
   // Capture the client-owned generation before routing can await. The inspected
   // completion queue owns publication eligibility, not the coalesced wake source.
   // Session-owned work: a background command completion, or the continuation of a turn
@@ -396,7 +401,16 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
     cfg,
     agentId,
     entry: conversationEntry,
-    heartbeat,
+    // MC worker completions belong to their session. An agent-wide heartbeat
+    // destination is not a user-facing route for a routeless worker.
+    heartbeat: isMissionControlExecCompletion
+      ? {
+          ...heartbeat,
+          target: heartbeat?.target === "none" ? "none" : "last",
+          to: undefined,
+          accountId: undefined,
+        }
+      : heartbeat,
     currentSessionKey: sessionKey,
     // A base queue's route stays excluded; events on the actual isolated queue
     // own their route, including exec completion after the base route moves.
@@ -409,7 +423,9 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   // Gate here so neither the relay prompt nor the session publication path can
   // see a projection target the resolver already declined to deliver to.
   const internalProjection =
-    resolvedDelivery.reason === "target-none" ? undefined : projectionCandidate;
+    resolvedDelivery.reason === "target-none" || isMissionControlExecCompletion
+      ? undefined
+      : projectionCandidate;
   // Session-owned work in an internal session (the same eligibility as the routeless
   // projection above: Control UI/WebChat and other operator-owned internal sessions)
   // answers in that session. The heartbeat target is for heartbeat output and must not
