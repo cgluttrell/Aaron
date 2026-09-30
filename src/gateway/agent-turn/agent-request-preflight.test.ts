@@ -618,7 +618,7 @@ describe("agent request dispatch pressure override preflight (fork T1847)", () =
   function refusalMessages(respond: ReturnType<typeof vi.fn>): string[] {
     return respond.mock.calls
       .filter((call) => call[0] === false)
-      .map((call) => String((call[2] as { message?: string } | undefined)?.message ?? ""));
+      .map((call) => String(call[2]?.message ?? ""));
   }
 
   it("refuses an override from a caller that is neither admin nor backend", () => {
