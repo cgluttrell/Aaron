@@ -1,4 +1,5 @@
 import { resolveCliRuntimeExecutionProvider } from "../../agents/model-runtime-aliases.js";
+import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import { isCliProvider } from "./run-execution.runtime.js";
 import type { CronRunExecutionParams } from "./run-execution.types.js";
 import { resolveEffectiveAgentRuntime } from "./run.runtime.js";
@@ -7,10 +8,17 @@ import { resolveEffectiveAgentRuntime } from "./run.runtime.js";
 export function createCronCandidateExecutionResolver(
   params: Pick<
     CronRunExecutionParams,
-    "cfgWithAgentDefaults" | "agentId" | "runSessionKey" | "cronSession"
+    "cfgWithAgentDefaults" | "agentId" | "runSessionKey" | "cronSession" | "job"
   >,
 ) {
   return (provider: string, model: string, sessionRuntimeOverride: string | undefined) => {
+    // The system-owned review uses the same runtime preference as interactive
+    // Workshop review, regardless of the agent model's default harness.
+    sessionRuntimeOverride = params.job.declarationKey?.startsWith(
+      SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
+    )
+      ? "openclaw"
+      : sessionRuntimeOverride;
     const executionProvider = sessionRuntimeOverride
       ? isCliProvider(sessionRuntimeOverride, params.cfgWithAgentDefaults)
         ? sessionRuntimeOverride

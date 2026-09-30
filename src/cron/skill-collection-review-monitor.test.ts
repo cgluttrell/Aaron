@@ -94,7 +94,7 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
     expect(spec?.input.displayName).not.toContain("no-rooted-runtime");
   });
 
-  it("disables only agents whose complete configured chain cannot enforce the review root", () => {
+  it("admits Codex-configured agents because review execution pins OpenClaw", () => {
     const cfg = {
       agents: {
         defaults: { model: "anthropic/claude-sonnet-4-6" },
@@ -137,11 +137,7 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
       ]),
     );
 
-    expect(byAgent.get("blocked")).toMatchObject({
-      enabled: false,
-      displayName: expect.stringContaining("no-rooted-runtime"),
-    });
-    for (const agentId of ["fallback", "embedded", "implicit", "cli", "codex"]) {
+    for (const agentId of ["blocked", "fallback", "embedded", "implicit", "cli", "codex"]) {
       expect(byAgent.get(agentId)?.enabled).toBe(true);
       expect(byAgent.get(agentId)?.displayName).not.toContain("no-rooted-runtime");
     }
@@ -177,7 +173,7 @@ describe("resolveSkillCollectionReviewMonitorSpecs", () => {
         ],
         options,
       );
-      expect(projected?.input.enabled).toBe(false);
+      expect(projected?.input.enabled).toBe(true);
       expect(await fs.readdir(testState.stateDir)).toEqual([]);
     } finally {
       await testState.cleanup();

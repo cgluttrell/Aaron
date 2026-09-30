@@ -4,6 +4,7 @@ import type { ModelCandidate } from "../../agents/model-fallback.types.js";
 import { resolveAgentModelFallbackValues } from "../../config/model-input.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
+import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import type { CronJob } from "../types.js";
 import {
   resolveEffectiveModelFallbacks,
@@ -23,6 +24,11 @@ export function resolveCronFallbacksOverride(params: {
   useSubagentFallbacks?: boolean;
   inheritDefaultFallbacksForAgentStringModel?: boolean;
 }): string[] | undefined {
+  // The system review retains its selected model; a fallback could select a
+  // different model/runtime and bypass the Workshop-root execution contract.
+  if (params.job.declarationKey?.startsWith(SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX)) {
+    return [];
+  }
   const payload = params.job.payload.kind === "agentTurn" ? params.job.payload : undefined;
   const payloadFallbacks = Array.isArray(payload?.fallbacks) ? payload.fallbacks : undefined;
   const hasCronPayloadModelOverride =
