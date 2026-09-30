@@ -365,6 +365,11 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   const { entry, sessionKey, run, conversationEntry } = preflight.session;
   const previousUpdatedAt = entry?.updatedAt;
   const projectionSessionKey = run.kind === "isolated" ? run.baseSessionKey : sessionKey;
+  const isMissionControlExecCompletion =
+    scheduledTasks.length === 0 &&
+    preflight.shouldInspectPendingEvents &&
+    preflight.pendingEventEntries.some((event) => isExecCompletionEvent(event.text)) &&
+    parseAgentSessionKey(projectionSessionKey)?.rest.startsWith("mission-control-") === true;
   // Capture the client-owned generation before routing can await. The inspected
   // completion queue owns publication eligibility, not the coalesced wake source.
   // Session-owned work: a background command completion, or the continuation of a turn
@@ -424,7 +429,11 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   // A conversation's own command completion answers in that conversation.
   const resolvedDelivery = await resolveDeliveryFor(
     preflight.session,
-    preflight.conversationRoute ? { target: "last" } : heartbeat,
+    isMissionControlExecCompletion
+      ? { ...heartbeat, target: heartbeat?.target === "none" ? "none" : "last", to: undefined, accountId: undefined }
+      : preflight.conversationRoute
+        ? { target: "last" }
+        : heartbeat,
     execOwnsRoute ? "exec" : undefined,
   );
   // Operator-chosen suppression is the resolver's verdict, not a config string:
@@ -433,7 +442,8 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   // see a projection target the resolver already declined to deliver to.
   const internalProjection =
     resolvedDelivery.reason === "target-none" ||
-    (execOwnsRoute && !isInternalMessageChannel(preflight.turnSourceDeliveryContext?.channel))
+    (execOwnsRoute && !isInternalMessageChannel(preflight.turnSourceDeliveryContext?.channel)) ||
+    isMissionControlExecCompletion
       ? undefined
       : projectionCandidate;
   // Session-owned work in an internal session (the same eligibility as the routeless
