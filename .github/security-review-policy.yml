@@ -5,9 +5,6 @@
 # apply only to product categories, never to dependency files. For overlapping
 # categories, the first matching category supplies the review guidance.
 
-rollout:
-  pull-request: 152415
-
 exclude:
   test-directories:
     case-insensitive: true
