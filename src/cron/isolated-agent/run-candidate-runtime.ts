@@ -1,4 +1,5 @@
 import { resolveCliRuntimeExecutionProvider } from "../../agents/model-runtime-aliases.js";
+import { supportsCronExecutionRoot } from "../execution-root-runtime.js";
 import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import { isCliProvider } from "./run-execution.runtime.js";
 import type { CronRunExecutionParams } from "./run-execution.types.js";
@@ -12,14 +13,7 @@ export function createCronCandidateExecutionResolver(
   >,
 ) {
   return (provider: string, model: string, sessionRuntimeOverride: string | undefined) => {
-    // The system-owned review uses the same runtime preference as interactive
-    // Workshop review, regardless of the agent model's default harness.
-    sessionRuntimeOverride = params.job.declarationKey?.startsWith(
-      SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
-    )
-      ? "openclaw"
-      : sessionRuntimeOverride;
-    const executionProvider = sessionRuntimeOverride
+    let executionProvider = sessionRuntimeOverride
       ? isCliProvider(sessionRuntimeOverride, params.cfgWithAgentDefaults)
         ? sessionRuntimeOverride
         : provider
@@ -29,7 +23,7 @@ export function createCronCandidateExecutionResolver(
           agentId: params.agentId,
           modelId: model,
         }) ?? provider);
-    const runtime =
+    let runtime =
       sessionRuntimeOverride ??
       resolveEffectiveAgentRuntime({
         cfg: params.cfgWithAgentDefaults,
@@ -39,10 +33,20 @@ export function createCronCandidateExecutionResolver(
         sessionKey: params.runSessionKey,
         sessionEntry: params.cronSession.sessionEntry,
       });
+    let cliExecution = isCliProvider(executionProvider, params.cfgWithAgentDefaults);
+    if (
+      params.job.declarationKey?.startsWith(SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX) &&
+      !supportsCronExecutionRoot(runtime, cliExecution)
+    ) {
+      sessionRuntimeOverride = "openclaw";
+      executionProvider = provider;
+      runtime = "openclaw";
+      cliExecution = false;
+    }
     return {
       sessionRuntimeOverride,
       executionProvider,
-      cliExecution: isCliProvider(executionProvider, params.cfgWithAgentDefaults),
+      cliExecution,
       runtime,
     };
   };
