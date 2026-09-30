@@ -26,20 +26,21 @@ const cfg: OpenClawConfig = {
 
 const logger = { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
-it("projects monitor eligibility without entering provider load planning", () => {
+it("projects review enablement without entering provider load planning", () => {
   const planning = vi
     .spyOn(providerRuntime, "isPluginProvidersLoadInFlight")
     .mockImplementation(() => {
       throw new Error("monitor projection entered provider load planning");
     });
   try {
+    // The blocked model's harness is resolved at execution, where reviews pin OpenClaw.
     expect(
       Array.from(resolveSkillCollectionReviewMonitorSpecs(cfg, []), ({ agentId, input }) => [
         agentId,
         input.enabled,
       ]),
     ).toEqual([
-      ["blocked", false],
+      ["blocked", true],
       ["first", true],
       ["second", true],
     ]);
@@ -90,7 +91,7 @@ describe("skill review reconciliation responsiveness", () => {
       }
       reconciliation = reconcileSkillCollectionReviewJobs({ cron, cfg, logger });
       await committed.promise;
-      expect(projected).toEqual(new Set(["blocked"]));
+      expect(projected).toEqual(new Set());
       const response = await fetch(`http://127.0.0.1:${address.port}/health`);
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ ok: true, status: "live" });
@@ -104,7 +105,7 @@ describe("skill review reconciliation responsiveness", () => {
           .toSorted((left, right) => left.name.localeCompare(right.name))
           .map(({ agentId, enabled }) => [agentId, enabled]),
       ).toEqual([
-        ["blocked", false],
+        ["blocked", true],
         ["first", true],
         ["second", true],
       ]);

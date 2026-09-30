@@ -6,6 +6,7 @@ import {
   runInitialModelFallbackAttempt,
   type TestModelFallbackRunnerParams,
 } from "../../agents/test-helpers/model-fallback-runner.test-support.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   SKILL_WORKSHOP_MAINTENANCE_PROMPT,
   SKILL_WORKSHOP_MAINTENANCE_TOOLS,
@@ -50,7 +51,7 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
   });
 
   it("runs a system review on OpenClaw with its selected Codex-configured model and no fallback", async () => {
-    const cfg = {
+    const cfg: OpenClawConfig = {
       agents: {
         defaults: { model: "anthropic/claude-sonnet-4-6" },
         list: [
@@ -65,7 +66,7 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
         ],
       },
       skills: { workshop: { autonomous: { mode: "auto" } } },
-    } as const;
+    };
     const [spec] = resolveSkillCollectionReviewMonitorSpecs(cfg, []);
     expect(spec?.input.enabled).toBe(true);
     resolveEffectiveAgentRuntimeMock.mockReturnValue("codex");
