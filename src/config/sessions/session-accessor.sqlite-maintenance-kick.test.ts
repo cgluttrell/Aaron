@@ -5,6 +5,7 @@ import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import * as logging from "../../logging/logger.js";
+import { withCliProcessScope } from "../../cli/runtime-cleanup-scope.js";
 import * as agentDatabase from "../../state/openclaw-agent-db.js";
 import {
   closeOpenClawAgentDatabaseByPath,
@@ -64,6 +65,16 @@ function createStore(pruneAfterMs = 1_000, key = sessionKey) {
   };
   return { database, request, scope, storePath, updatedAt };
 }
+
+it("does not start detached maintenance for an executable one-shot CLI write", async () => {
+  const { request } = createStore();
+  const dispatch = vi.mocked(reclamation.runSqliteSessionReclamation);
+
+  withCliProcessScope(() => kickSessionEntryMaintenanceAfterWrite(request));
+  await yieldToEventLoop();
+
+  expect(dispatch).not.toHaveBeenCalled();
+});
 
 it("captures warn-mode age facts without constructing or dispatching reclamation", async () => {
   const { request, storePath } = createStore();
