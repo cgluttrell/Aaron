@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { hasCliProcessScope } from "../../cli/runtime-cleanup-scope.js";
 import { registerNodeSqliteDisposeCallback } from "../../infra/kysely-sync-cache-state.js";
 import { getChildLogger } from "../../logging/logger.js";
 import { isOpenClawAgentDatabasePathCurrent } from "../../state/openclaw-agent-db-identity.js";
@@ -59,7 +60,10 @@ const maintenanceByStore = new Map<string, SessionEntryMaintenanceOwner>();
 export function kickSessionEntryMaintenanceAfterWrite(
   params: SessionEntryMaintenanceRequest,
 ): void {
-  if (params.skipMaintenance) {
+  // Executable one-shot commands drain database workers immediately after their
+  // write; a detached plan cannot finish before that owner is revoked. Gateway
+  // boot clears this scope and keeps the ordinary maintenance cadence.
+  if (params.skipMaintenance || hasCliProcessScope()) {
     return;
   }
   const databasePath = resolveOpenClawAgentSqlitePath(toDatabaseOptions(params.scope));
