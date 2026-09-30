@@ -275,14 +275,16 @@ function createCronPromptExecutor(
         workspaceDir: params.executionRoot ?? params.workspaceDir,
         sessionKey: params.runSessionKey,
         preparation: { kind: "direct" },
-        resolveRuntimeOverride: (provider) =>
-          isSkillCollectionReview
-            ? "openclaw"
-            : resolveSessionRuntimeOverrideForProvider({
-                provider,
-                entry: params.cronSession.sessionEntry,
-                cfg: params.cfgWithAgentDefaults,
-              }),
+        resolveRuntimeOverride: (provider, model) =>
+          resolveCandidateExecution(
+            provider,
+            model,
+            resolveSessionRuntimeOverrideForProvider({
+              provider,
+              entry: params.cronSession.sessionEntry,
+              cfg: params.cfgWithAgentDefaults,
+            }),
+          ).sessionRuntimeOverride,
         resolveContextEngineHost: (provider, model, runtimeOverride) => {
           const { executionProvider, cliExecution } = resolveCandidateExecution(
             provider,
