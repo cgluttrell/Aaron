@@ -54,6 +54,18 @@ import {
   registerGatewayCronReceiptTests,
 } from "./server-cron.receipts.test-support.js";
 
+// Run-state and hook assertions should not depend on the test host's cgroup pressure.
+vi.mock("../process/dispatch-pressure-guard.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../process/dispatch-pressure-guard.js")>();
+  return {
+    ...actual,
+    decideDispatchPressure: () => ({
+      status: "allow" as const,
+      reason: "below_threshold" as const,
+    }),
+  };
+});
+
 type RunCronIsolatedAgentTurnMock = (params: {
   abortSignal?: AbortSignal;
 }) => Promise<{ status: "ok"; summary: string }>;

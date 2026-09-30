@@ -379,6 +379,8 @@ describe("reconcileSkillCollectionReviewJobs", () => {
       enqueueSystemEvent: vi.fn(),
       requestHeartbeat: vi.fn(),
       runIsolatedAgentJob,
+      // This test owns cancellation, not admission under host memory pressure.
+      dispatchPressureGuard: () => ({ status: "allow", reason: "below_threshold" }),
     });
     const config = (mode: "auto" | "off") =>
       ({
