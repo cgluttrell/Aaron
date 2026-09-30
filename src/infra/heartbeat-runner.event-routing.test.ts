@@ -1,5 +1,6 @@
 // Covers heartbeat delivery routes for queued events and isolated completions.
 import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { heartbeatRunnerTelegramPlugin } from "../../test/helpers/infra/heartbeat-runner-channel-plugins.js";
 import { createDeferred } from "../../test/helpers/promise.js";
 import type { InternalGetReplyOptions } from "../auto-reply/reply/get-reply.types.js";
 import { drainFormattedSystemEvents } from "../auto-reply/reply/session-system-events.js";
@@ -7,8 +8,14 @@ import { getReplySystemEventContext } from "../auto-reply/reply/system-event-ses
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveMainSessionKey } from "../config/sessions/main-session.js";
 import { resolveSessionStorePathCore } from "../config/sessions/paths.js";
-import { loadExactSessionEntryReadOnly } from "../config/sessions/session-accessor.js";
+import {
+  loadExactSessionEntryReadOnly,
+  loadTranscriptEvents,
+} from "../config/sessions/session-accessor.js";
+import { readTranscriptEventMessage } from "../config/sessions/session-accessor.sqlite-read.js";
 import { resetCronActiveJobs } from "../cron/active-jobs.js";
+import { setActivePluginRegistry } from "../plugins/runtime.js";
+import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { racePromiseWithAbortSignal } from "./abort-signal.js";
 import { runHeartbeatOnce, startHeartbeatRunner } from "./heartbeat-runner.js";
 import {
@@ -42,6 +49,210 @@ afterEach(async () => {
 });
 
 describe("Heartbeat event routing", () => {
+  const installDiscordSender = () => {
+    const sendDiscord = vi
+      .fn()
+      .mockResolvedValue({ channel: "discord", messageId: "discord-send" });
+    setActivePluginRegistry(
+      createTestRegistry([
+        { pluginId: "telegram", plugin: heartbeatRunnerTelegramPlugin, source: "test" },
+        {
+          pluginId: "discord",
+          plugin: createOutboundTestPlugin({
+            id: "discord",
+            outbound: { deliveryMode: "direct", sendText: sendDiscord, sendMedia: sendDiscord },
+          }),
+          source: "test",
+        },
+      ]),
+    );
+    return sendDiscord;
+  };
+
+  it("keeps a routeless MC worker exec completion internal despite the default Discord destination", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const sendDiscord = installDiscordSender();
+      const sessionKey = "agent:qa-security:mission-control-vex-no-route";
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            workspace: tmpDir,
+            heartbeat: { every: "5m", target: "discord", to: "channel:1483685213484613733" },
+          },
+          list: [{ id: "qa-security" }],
+        },
+        session: { store: storePath },
+      };
+      await seedSessionStore(storePath, sessionKey, {
+        sessionId: "worker-no-route",
+        createdVia: "operator",
+        delivery: { kind: "internal" },
+      });
+      enqueueSystemEvent("Exec completed (worker-command, code 0) :: private result", {
+        sessionKey,
+      });
+      replySpy.mockResolvedValue({ text: "private result" });
+      const sendTelegram = vi.fn();
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        agentId: "qa-security",
+        sessionKey,
+        source: "exec-event",
+        intent: "event",
+        reason: "exec-event",
+        deps: { getReplyFromConfig: replySpy, telegram: sendTelegram },
+      });
+
+      expect(result.status).toBe("ran");
+      expect(replySpy).toHaveBeenCalledOnce();
+      const context = getFirstReplyContext(replySpy);
+      expect(context.Body).toContain("user delivery is disabled");
+      expect(context.Body).not.toContain("Please relay the command output to the user");
+      expect(sendTelegram).not.toHaveBeenCalled();
+      expect(sendDiscord).not.toHaveBeenCalled();
+      const transcript = await loadTranscriptEvents({
+        agentId: "qa-security",
+        sessionKey,
+        sessionId: "worker-no-route",
+        storePath,
+      });
+      expect(
+        transcript
+          .map(readTranscriptEventMessage)
+          .filter((message) => message?.role === "assistant"),
+      ).toEqual([]);
+    });
+  });
+
+  it("routes an MC worker exec completion to its own bound route instead of default Discord", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const sendDiscord = installDiscordSender();
+      const sessionKey = "agent:qa-security:mission-control-vex-bound";
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            workspace: tmpDir,
+            heartbeat: { every: "5m", target: "discord", to: "channel:1483685213484613733" },
+          },
+          list: [{ id: "qa-security" }],
+        },
+        channels: { telegram: { allowFrom: ["*"] } },
+        session: { store: storePath },
+      };
+      await seedSessionStore(storePath, sessionKey, {
+        sessionId: "worker-bound",
+        createdVia: "operator",
+        lastChannel: "telegram",
+        lastTo: "5232990709",
+      });
+      enqueueSystemEvent("Exec completed (worker-command, code 0) :: bound result", { sessionKey });
+      replySpy.mockResolvedValue({ text: "bound result" });
+      const sendTelegram = vi.fn().mockResolvedValue({ messageId: "bound-send" });
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        agentId: "qa-security",
+        sessionKey,
+        source: "exec-event",
+        intent: "event",
+        reason: "exec-event",
+        deps: { getReplyFromConfig: replySpy, telegram: sendTelegram },
+      });
+
+      expect(result.status).toBe("ran");
+      expect(getFirstReplyContext(replySpy).Body).toContain(
+        "Please relay the command output to the user",
+      );
+      expectTelegramSend(sendTelegram, { to: "5232990709", text: "bound result" });
+      expect(sendDiscord).not.toHaveBeenCalled();
+    });
+  });
+
+  it("continues relaying ordinary bound-channel exec completions", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const sessionKey = "agent:main:telegram:direct:5232990709";
+      const cfg: OpenClawConfig = {
+        agents: { defaults: { workspace: tmpDir, heartbeat: { every: "5m", target: "last" } } },
+        channels: { telegram: { allowFrom: ["*"] } },
+        session: { store: storePath },
+      };
+      await seedSessionStore(storePath, sessionKey, {
+        sessionId: "ordinary-bound",
+        lastChannel: "telegram",
+        lastTo: "5232990709",
+      });
+      enqueueSystemEvent("Exec completed (ordinary-command, code 0) :: ordinary result", {
+        sessionKey,
+      });
+      replySpy.mockResolvedValue({ text: "ordinary result" });
+      const sendTelegram = vi.fn().mockResolvedValue({ messageId: "ordinary-send" });
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        agentId: "main",
+        sessionKey,
+        source: "exec-event",
+        intent: "event",
+        reason: "exec-event",
+        deps: { getReplyFromConfig: replySpy, telegram: sendTelegram },
+      });
+
+      expect(result.status).toBe("ran");
+      expect(getFirstReplyContext(replySpy).Body).toContain(
+        "Please relay the command output to the user",
+      );
+      expectTelegramSend(sendTelegram, { to: "5232990709", text: "ordinary result" });
+    });
+  });
+
+  it("keeps configured scheduled-task delivery when an MC worker exec event is queued", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const sendDiscord = installDiscordSender();
+      const sessionKey = "agent:qa-security:mission-control-vex-scheduled";
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            workspace: tmpDir,
+            heartbeat: { every: "5m", target: "discord", to: "channel:1483685213484613733" },
+          },
+          list: [{ id: "qa-security" }],
+        },
+        session: { store: storePath },
+      };
+      await seedSessionStore(storePath, sessionKey, {
+        sessionId: "worker-scheduled",
+        createdVia: "operator",
+        delivery: { kind: "internal" },
+      });
+      enqueueSystemEvent("Exec completed (worker-command, code 0) :: private result", {
+        sessionKey,
+      });
+      replySpy.mockResolvedValue({ text: "scheduled report" });
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        agentId: "qa-security",
+        sessionKey,
+        source: "exec-event",
+        intent: "event",
+        reason: "exec-event",
+        tasks: [{ name: "report", prompt: "Send the scheduled report" }],
+        deps: { getReplyFromConfig: replySpy },
+      });
+
+      expect(result.status).toBe("ran");
+      expect(getFirstReplyContext(replySpy).Body).toContain("Run the following periodic tasks");
+      expect(getFirstReplyContext(replySpy).Body).not.toContain(
+        "Please relay the command output to the user",
+      );
+      expect(sendDiscord).toHaveBeenCalledOnce();
+      expect(sendDiscord.mock.calls[0]?.[0]).toMatchObject({
+        to: "channel:1483685213484613733",
+        text: "scheduled report",
+      });
+    });
+  });
   const createLastTargetConfig = (params: {
     tmpDir: string;
     storePath: string;

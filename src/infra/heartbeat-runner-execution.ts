@@ -361,6 +361,11 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   const { entry, sessionKey, run, conversationEntry } = preflight.session;
   const previousUpdatedAt = entry?.updatedAt;
   const projectionSessionKey = run.kind === "isolated" ? run.baseSessionKey : sessionKey;
+  const isMissionControlExecCompletion =
+    scheduledTasks.length === 0 &&
+    preflight.shouldInspectPendingEvents &&
+    preflight.pendingEventEntries.some((event) => isExecCompletionEvent(event.text)) &&
+    parseAgentSessionKey(projectionSessionKey)?.rest.startsWith("mission-control-") === true;
   // Capture the client-owned generation before routing can await. The inspected
   // completion queue owns publication eligibility, not the coalesced wake source.
   const projectionCandidate =
@@ -391,7 +396,16 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
     cfg,
     agentId,
     entry: conversationEntry,
-    heartbeat,
+    // MC worker completions belong to their session. An agent-wide heartbeat
+    // destination is not a user-facing route for a routeless worker.
+    heartbeat: isMissionControlExecCompletion
+      ? {
+          ...heartbeat,
+          target: heartbeat?.target === "none" ? "none" : "last",
+          to: undefined,
+          accountId: undefined,
+        }
+      : heartbeat,
     currentSessionKey: sessionKey,
     // A base queue's route stays excluded; events on the actual isolated queue
     // own their route, including exec completion after the base route moves.
@@ -403,7 +417,10 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   // an explicit target that never resolves to a route also reports `target-none`.
   // Gate here so neither the relay prompt nor the session publication path can
   // see a projection target the resolver already declined to deliver to.
-  const internalProjection = delivery.reason === "target-none" ? undefined : projectionCandidate;
+  const internalProjection =
+    delivery.reason === "target-none" || isMissionControlExecCompletion
+      ? undefined
+      : projectionCandidate;
   // Routeless ambient polls are pure model burn, but only they may skip:
   // triggered wakes (hook/manual/cron/exec), polls with queued events, and
   // scheduled-task wakes must still run to process their payloads even when
