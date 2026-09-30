@@ -365,6 +365,9 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
     scheduledTasks.length === 0 &&
     preflight.shouldInspectPendingEvents &&
     preflight.pendingEventEntries.some((event) => isExecCompletionEvent(event.text)) &&
+    // Mission Control creates worker sessions with this key prefix. Persisted
+    // operator/internal route facts also describe visible WebChat sessions, so
+    // the key format is the discriminator until creation records distinguish them.
     parseAgentSessionKey(projectionSessionKey)?.rest.startsWith("mission-control-") === true;
   // Capture the client-owned generation before routing can await. The inspected
   // completion queue owns publication eligibility, not the coalesced wake source.
