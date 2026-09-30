@@ -47,6 +47,7 @@ import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { assertCronExecutionRootRuntime } from "../execution-root-runtime.js";
 import { prepareCronRunAdmission } from "../run-admission.js";
 import { resolveCronScheduledToolPolicy } from "../scheduled-tool-policy.js";
+import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import { resolveCronAuthenticatedChannelRequester } from "../tools-allow-provenance.js";
 import type { CronAgentExecutionPhaseUpdate } from "../types.js";
 import {
@@ -71,6 +72,10 @@ import {
 } from "./run-execution.runtime.js";
 import type { CronRunExecutionParams } from "./run-execution.types.js";
 import { resolveCronFallbacksOverride } from "./run-fallback-policy.js";
+import {
+  isCommandStyleCronMessage,
+  resolveIsolatedCronPromptCacheKey,
+} from "./run-prompt-selection.js";
 import {
   setCronSessionAgentHarnessId,
   setCronSessionRuntimeModel,
@@ -98,14 +103,6 @@ function hasCliSessionReuseMetadata(binding: CliSessionBinding): boolean {
   return Object.entries(binding).some(([key, value]) => key !== "sessionId" && value !== undefined);
 }
 
-const COMMAND_STYLE_CRON_PREFIX =
-  /^(?:(?:[A-Z_][A-Z0-9_]*=\S+\s+)+)?(?:cd\s+\S+|(?:\.{1,2}|~)?\/\S+|[A-Za-z]:[\\/]\S+|(?:bash|bun|cargo|deno|docker|gh|git|go|make|node|npm|npx|pnpm|python|python3|ruby|sh|tsx|uv|zsh)\b)/u;
-
-/** Detects single-line cron prompts that look like shell commands or command invocations. */
-function isCommandStyleCronMessage(message: string): boolean {
-  return !message.trim().includes("\n") && COMMAND_STYLE_CRON_PREFIX.test(message.trim());
-}
-
 /** Creates the model-fallback executor for one isolated cron prompt run. */
 function createCronPromptExecutor(
   params: Omit<
@@ -126,6 +123,9 @@ function createCronPromptExecutor(
       useSubagentFallbacks: params.useSubagentFallbacks,
       inheritDefaultFallbacksForAgentStringModel: params.inheritDefaultFallbacksForAgentStringModel,
     });
+  const isSkillCollectionReview = params.job.declarationKey?.startsWith(
+    SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
+  );
   const fastModeStartedAtMs = Date.now();
   const fastModeAutoProgressState: FastModeAutoProgressState = {
     offAnnounced: false,
@@ -280,11 +280,13 @@ function createCronPromptExecutor(
         sessionKey: params.runSessionKey,
         preparation: { kind: "direct" },
         resolveRuntimeOverride: (provider) =>
-          resolveSessionRuntimeOverrideForProvider({
-            provider,
-            entry: params.cronSession.sessionEntry,
-            cfg: params.cfgWithAgentDefaults,
-          }),
+          isSkillCollectionReview
+            ? "openclaw"
+            : resolveSessionRuntimeOverrideForProvider({
+                provider,
+                entry: params.cronSession.sessionEntry,
+                cfg: params.cfgWithAgentDefaults,
+              }),
         resolveContextEngineHost: (provider, model, runtimeOverride) => {
           const { executionProvider, cliExecution } = resolveCandidateExecution(
             provider,
@@ -617,6 +619,9 @@ function createCronPromptExecutor(
           ).modelThinkingCapability,
           requestedRouteResolution: "resolved",
           modelFallbacksOverride: cronFallbacksOverride,
+          ...(isSkillCollectionReview
+            ? { agentHarnessId: "openclaw", modelSelectionLocked: true }
+            : {}),
           authProfileId: params.liveSelection.authProfileId,
           authProfileIdSource: params.liveSelection.authProfileId
             ? params.liveSelection.authProfileIdSource

@@ -24,6 +24,7 @@ import { createCronRunDiagnosticsFromError } from "../run-diagnostics.js";
 import { resolveCronScheduledToolPolicy } from "../scheduled-tool-policy.js";
 import { isDetachedCronSessionTarget } from "../session-target.js";
 import { resolveCronRunToolsAllow } from "../tools-allow.js";
+import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import {
   resolveCronModelSelection,
   resolveCronModelSelectionOwner,
@@ -345,7 +346,9 @@ export async function prepareCronRunContext(params: {
         };
       }
       const { provider, model, modelFallbacksOverride, runtimePluginCandidates } = preflight;
-      const effectiveAgentRuntime = resolveEffectiveAgentRuntime({
+      const effectiveAgentRuntime = input.job.declarationKey?.startsWith(
+        SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
+      ) ? "openclaw" : resolveEffectiveAgentRuntime({
         cfg: cfgWithAgentDefaults,
         provider,
         modelId: model,
@@ -393,7 +396,9 @@ export async function prepareCronRunContext(params: {
           workspaceDir,
           allowGatewaySubagentBinding: true,
           runtimePluginSelections: runtimePluginCandidates.map((candidate) => {
-            const runtime = resolveSessionRuntimeOverrideForProvider({
+            const runtime = input.job.declarationKey?.startsWith(
+              SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
+            ) ? "openclaw" : resolveSessionRuntimeOverrideForProvider({
               provider: candidate.provider,
               entry: cronSession.sessionEntry,
               cfg: cfgWithAgentDefaults,
