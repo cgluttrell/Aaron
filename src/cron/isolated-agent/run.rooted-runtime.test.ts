@@ -152,7 +152,7 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
     expect(runEmbeddedAgentMock).toHaveBeenCalledWith(expect.objectContaining({ skillsSnapshot }));
   });
 
-  it("runs a rooted review with a Claude CLI primary and returns its report", async () => {
+  it("runs a declared system review with a Claude CLI primary and returns its report", async () => {
     const helpers = await vi.importActual<typeof import("./helpers.js")>("./helpers.js");
     pickLastNonEmptyTextFromPayloadsMock.mockImplementation(
       helpers.pickLastNonEmptyTextFromPayloads,
@@ -180,9 +180,11 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
     }));
     const result = await runCronIsolatedAgentTurn(
       makeIsolatedAgentParamsFixture({
+        agentId: "cal",
         executionRoot,
         skillsSnapshot,
         job: {
+          declarationKey: "skill-collection-review:cal",
           payload: {
             kind: "agentTurn",
             message: SKILL_WORKSHOP_MAINTENANCE_PROMPT,
@@ -192,6 +194,7 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
         },
         cfg: {
           agents: {
+            list: [{ id: "cal" }],
             defaults: {
               model: "anthropic/claude-opus-4-6",
               models: { "anthropic/claude-opus-4-6": { agentRuntime: { id: "claude-cli" } } },

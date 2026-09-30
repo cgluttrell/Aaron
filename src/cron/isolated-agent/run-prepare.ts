@@ -39,6 +39,7 @@ import {
   resolveCronModelSelectionOwner,
   resolveCronThinkingSelection,
 } from "./model-selection.js";
+import { createCronCandidateExecutionResolver } from "./run-candidate-runtime.js";
 import { resolveCronCommandPromptPreflight } from "./run-command-preflight.js";
 import { resolveCronActiveRuntimeConfig, resolveCronAgentConfig } from "./run-config.js";
 import { buildCurrentConversationContextBlock } from "./run-current-context.js";
@@ -417,10 +418,18 @@ export async function prepareCronRunContext(params: {
       };
     }
     const { provider, model, modelFallbacksOverride, runtimePluginCandidates } = preflight;
-    const effectiveAgentRuntime = input.job.declarationKey?.startsWith(
+    const isSkillCollectionReview = input.job.declarationKey?.startsWith(
       SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
-    )
-      ? "openclaw"
+    );
+    const resolveCandidateExecution = createCronCandidateExecutionResolver({
+      cfgWithAgentDefaults,
+      agentId,
+      runSessionKey,
+      cronSession,
+      job: input.job,
+    });
+    const effectiveAgentRuntime = isSkillCollectionReview
+      ? resolveCandidateExecution(provider, model, undefined).runtime
       : resolveEffectiveAgentRuntime({
           cfg: cfgWithAgentDefaults,
           provider,
@@ -468,10 +477,9 @@ export async function prepareCronRunContext(params: {
         workspaceDir,
         allowGatewaySubagentBinding: true,
         runtimePluginSelections: runtimePluginCandidates.map((candidate) => {
-          const runtime = input.job.declarationKey?.startsWith(
-            SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
-          )
-            ? "openclaw"
+          const runtime = isSkillCollectionReview
+            ? resolveCandidateExecution(candidate.provider, candidate.model, undefined)
+                .sessionRuntimeOverride
             : resolveSessionRuntimeOverrideForProvider({
                 provider: candidate.provider,
                 entry: cronSession.sessionEntry,
