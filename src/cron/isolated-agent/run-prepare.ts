@@ -22,6 +22,7 @@ import { resolveCronJobEffectiveAgentId } from "../agent-id.js";
 import { createCronRunDiagnosticsFromError } from "../run-diagnostics.js";
 import { resolveCronScheduledToolPolicy } from "../scheduled-tool-policy.js";
 import { isDetachedCronSessionTarget } from "../session-target.js";
+import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import {
   resolveCronModelSelection,
   resolveCronModelSelectionOwner,
@@ -333,14 +334,18 @@ export async function prepareCronRunContext(params: {
       };
     }
     const { provider, model, modelFallbacksOverride, runtimePluginCandidates } = preflight;
-    const effectiveAgentRuntime = resolveEffectiveAgentRuntime({
-      cfg: cfgWithAgentDefaults,
-      provider,
-      modelId: model,
-      agentId: modelOwner.agentId,
-      sessionKey: agentSessionKey,
-      sessionEntry: cronSession.sessionEntry,
-    });
+    const effectiveAgentRuntime = input.job.declarationKey?.startsWith(
+      SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
+    )
+      ? "openclaw"
+      : resolveEffectiveAgentRuntime({
+          cfg: cfgWithAgentDefaults,
+          provider,
+          modelId: model,
+          agentId: modelOwner.agentId,
+          sessionKey: agentSessionKey,
+          sessionEntry: cronSession.sessionEntry,
+        });
     const thinkingSelection = await resolveCronThinkingSelection({
       cfg: cfgWithAgentDefaults,
       owner: modelOwner,
@@ -380,11 +385,15 @@ export async function prepareCronRunContext(params: {
         workspaceDir,
         allowGatewaySubagentBinding: true,
         runtimePluginSelections: runtimePluginCandidates.map((candidate) => {
-          const runtime = resolveSessionRuntimeOverrideForProvider({
-            provider: candidate.provider,
-            entry: cronSession.sessionEntry,
-            cfg: cfgWithAgentDefaults,
-          });
+          const runtime = input.job.declarationKey?.startsWith(
+            SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
+          )
+            ? "openclaw"
+            : resolveSessionRuntimeOverrideForProvider({
+                provider: candidate.provider,
+                entry: cronSession.sessionEntry,
+                cfg: cfgWithAgentDefaults,
+              });
           return runtime
             ? { provider: candidate.provider, modelId: candidate.model, runtime, agentId }
             : { provider: candidate.provider, modelId: candidate.model, agentId };
