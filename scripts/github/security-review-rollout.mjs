@@ -29,7 +29,15 @@ export async function securityReviewRollout({ api, owner, repo, pullRequest }) {
   if (rolloutPullRequest === undefined) {
     return { mode: "enforced" };
   }
-  const rollout = await api.request(`/repos/${owner}/${repo}/pulls/${rolloutPullRequest}`);
+  let rollout;
+  try {
+    rollout = await api.request(`/repos/${owner}/${repo}/pulls/${rolloutPullRequest}`);
+  } catch (error) {
+    if (error?.status === 404) {
+      return { mode: "inactive" };
+    }
+    throw error;
+  }
   if (
     rollout?.number !== rolloutPullRequest ||
     rollout.base?.ref !== "main" ||
