@@ -227,6 +227,48 @@ describe("Heartbeat event routing", () => {
     });
   });
 
+  it("keeps a same-facts WebChat exec completion user-visible without the MC key prefix", async () => {
+    await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
+      const sessionKey = "agent:main:main";
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: { workspace: tmpDir, heartbeat: { every: "5m", target: "last" } },
+        },
+        session: { store: storePath },
+      };
+      await seedSessionStore(storePath, sessionKey, {
+        sessionId: "webchat-no-route",
+        createdVia: "operator",
+        lastChannel: "webchat",
+        lastTo: "",
+      });
+      expect(readSessionStoreForTest(storePath)[sessionKey]).toMatchObject({
+        createdVia: "operator",
+        delivery: { kind: "internal" },
+      });
+      enqueueSystemEvent("Exec completed (webchat-command, code 0) :: visible result", {
+        sessionKey,
+      });
+      replySpy.mockResolvedValue({ text: "visible result" });
+
+      const result = await runHeartbeatOnce({
+        cfg,
+        agentId: "main",
+        sessionKey,
+        source: "exec-event",
+        intent: "event",
+        reason: "exec-event",
+        deps: { getReplyFromConfig: replySpy },
+      });
+
+      expect(result.status).toBe("ran");
+      expect(getFirstReplyContext(replySpy).Body).toContain(
+        "Please relay the command output to the user",
+      );
+      expect(getFirstReplyContext(replySpy).Body).not.toContain("user delivery is disabled");
+    });
+  });
+
   it("routes an MC worker exec completion to its own bound route instead of default Discord", async () => {
     await withTempHeartbeatSandbox(async ({ tmpDir, storePath, replySpy }) => {
       const sendDiscord = installDiscordSender();
@@ -339,7 +381,7 @@ describe("Heartbeat event routing", () => {
         source: "exec-event",
         intent: "event",
         reason: "exec-event",
-        tasks: [{ name: "report", prompt: "Send the scheduled report" }],
+        tasks: [{ jobId: "report-job", name: "report", prompt: "Send the scheduled report" }],
         deps: { getReplyFromConfig: replySpy },
       });
 
