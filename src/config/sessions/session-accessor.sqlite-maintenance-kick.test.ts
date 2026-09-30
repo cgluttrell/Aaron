@@ -6,6 +6,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred, withinTest } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import * as logging from "../../logging/logger.js";
+import { withCliProcessScope } from "../../cli/runtime-cleanup-scope.js";
 import {
   markGatewayRestartDraining,
   resetGatewayWorkAdmission,
@@ -242,6 +243,14 @@ it("resumes automatic maintenance after Gateway work admission resets", async ()
   );
   await vi.advanceTimersByTimeAsync(1_001);
   expect(loadSessionEntry({ sessionKey, storePath })?.archiveReason).toBe("age-retention");
+});
+
+it("does not start detached maintenance for an executable one-shot CLI write", async () => {
+  const { request } = createStore();
+  const dispatch = vi.mocked(reclamation.runSqliteSessionReclamation);
+  withCliProcessScope(() => kickSessionEntryMaintenanceAfterWrite(request));
+  await yieldToEventLoop();
+  expect(dispatch).not.toHaveBeenCalled();
 });
 
 it("does not construct or dispatch maintenance in warn mode", async () => {
