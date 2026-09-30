@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { hasCliProcessScope } from "../../cli/runtime-cleanup-scope.js";
 import { isDeepStrictEqual } from "node:util";
 import {
   assertExistingDatabaseIdentity,
@@ -93,7 +94,7 @@ export function kickSessionEntryMaintenanceAfterWrite(
     }
     return;
   }
-  if (params.skipMaintenance) {
+  if (params.skipMaintenance || hasCliProcessScope()) {
     return;
   }
   if (owner && isMaintenanceOwnerCurrent(databasePath, owner)) {
