@@ -68,6 +68,12 @@ vi.mock("../cron/delivery.js", async () => {
   };
 });
 
+// Cron routing assertions do not exercise host cgroup admission.
+vi.mock("../process/dispatch-pressure-guard.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../process/dispatch-pressure-guard.js")>()),
+  decideDispatchPressure: () => ({ status: "allow" as const, reason: "below_threshold" as const }),
+}));
+
 installGatewayTestHooks({ scope: "suite" });
 const CRON_WAIT_TIMEOUT_MS = 10_000;
 let cronSuiteTempRootPromise: Promise<string> | null = null;
