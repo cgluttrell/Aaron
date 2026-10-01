@@ -6,7 +6,10 @@ import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, vi } from "vitest";
 import { DEFAULT_CRON_MAX_CONCURRENT_RUNS } from "../../../src/config/cron-limits.js";
 import { clearSessionStoreCacheForTest } from "../../../src/config/sessions/store-writer-state.js";
-import { createRunningCronServiceState } from "../../../src/cron/service.test-harness.js";
+import {
+  allowDispatchPressureForTest,
+  createRunningCronServiceState,
+} from "../../../src/cron/service.test-harness.js";
 import { createCronServiceState, type CronServiceDeps } from "../../../src/cron/service/state.js";
 import type { CronJob, CronJobState } from "../../../src/cron/types.js";
 import { resetAgentEventsForTest } from "../../../src/infra/agent-events.js";
@@ -54,6 +57,7 @@ export function createCronRegressionState(
     log: noopLogger,
     enqueueSystemEvent: vi.fn(),
     requestHeartbeat: vi.fn(),
+    dispatchPressureGuard: allowDispatchPressureForTest,
     ...stateParams,
   });
   if (testAdmissionLimit !== undefined) {
