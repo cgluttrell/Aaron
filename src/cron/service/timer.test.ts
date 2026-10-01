@@ -3,8 +3,11 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
-import { setupCronServiceSuite, writeCronStoreSnapshot } from "../../cron/service.test-harness.js";
-import { createCronServiceState as createCronServiceStateBase } from "../../cron/service/state.js";
+import {
+  createNonPressureCronServiceState as createCronServiceState,
+  setupCronServiceSuite,
+  writeCronStoreSnapshot,
+} from "../../cron/service.test-harness.js";
 import { onTimer } from "../../cron/service/timer.test-support.js";
 import { loadCronStore } from "../../cron/store.js";
 import type { CronJob } from "../../cron/types.js";
@@ -25,12 +28,6 @@ import { executeJobCore } from "./timer-execution.js";
 const { logger, makeStorePath } = setupCronServiceSuite({
   prefix: "cron-service-timer-seam",
 });
-
-function createCronServiceState(
-  params: Parameters<typeof createCronServiceStateBase>[0],
-): ReturnType<typeof createCronServiceStateBase> {
-  return createCronServiceStateBase({ defaultAgentId: "main", ...params });
-}
 
 function createDueMainJob(params: { now: number; wakeMode: CronJob["wakeMode"] }): CronJob {
   return {
