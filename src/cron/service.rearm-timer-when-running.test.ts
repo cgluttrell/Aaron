@@ -1,7 +1,11 @@
 // Cron rearm tests cover timer rearming while scheduled jobs are already running.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
-import { createNoopLogger, createCronStoreHarness } from "./service.test-harness.js";
+import {
+  allowDispatchPressureForTest,
+  createNoopLogger,
+  createCronStoreHarness,
+} from "./service.test-harness.js";
 import { createCronServiceState } from "./service/state.js";
 import { onTimer } from "./service/timer.test-support.js";
 import { saveCronStore } from "./store.js";
@@ -69,6 +73,7 @@ describe("CronService - timer re-arm when running (#12025)", () => {
       enqueueSystemEvent: vi.fn(),
       requestHeartbeat: vi.fn(),
       runIsolatedAgentJob,
+      dispatchPressureGuard: allowDispatchPressureForTest,
     });
 
     let settled = false;

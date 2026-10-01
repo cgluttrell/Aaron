@@ -45,6 +45,13 @@ import { runQaGatewayFixture } from "./helpers/qa-gateway-cleanup.js";
 import { createScheduledMessageReadModel } from "./helpers/scheduled-message-read-model.js";
 import { useAutoCleanupTempDirTracker } from "./helpers/temp-dir.js";
 
+// The real Gateway here exercises scheduled message permissions and delivery;
+// cgroup admission has its own tests. Shared CI pressure must not skip this job.
+vi.mock("../src/process/dispatch-pressure-guard.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/process/dispatch-pressure-guard.js")>()),
+  decideDispatchPressure: () => ({ status: "allow", reason: "below_threshold" }),
+}));
+
 // Attached devices are outside these scheduled message journeys.
 vi.mock("../src/agents/node-exec-availability.js", () => ({
   loadNodeExecAvailability: async () => ({ cacheKey: "no-nodes", isAvailable: () => false }),
