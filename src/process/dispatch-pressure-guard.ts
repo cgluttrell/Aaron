@@ -57,7 +57,7 @@ export type DispatchPressureSample = {
   windowMs?: number;
 };
 
-export type DispatchPressureThreshold = {
+type DispatchPressureThreshold = {
   currentBytes?: number;
   workingSetBytes?: number;
   usageRatio?: number;
