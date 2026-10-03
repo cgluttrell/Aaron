@@ -29,6 +29,13 @@ import {
   resolveOpenAIDefaultBaseUrl,
 } from "./base-url.js";
 import {
+  readCodexReasoningLevels,
+  readCodexModelRows,
+  shouldIncludeCodexModelRow,
+  resolveCodexModelInput,
+  type OpenAILiveModelReaders,
+} from "./codex-model-rows.js";
+import {
   applyOpenAIConfig,
   OPENAI_CODEX_DEFAULT_MODEL,
   OPENAI_DEFAULT_MODEL,
@@ -68,13 +75,6 @@ import {
   OPENAI_DEFAULT_RUNTIME_CONTEXT_TOKENS,
 } from "./shared.js";
 import { resolveUnifiedOpenAIThinkingProfile } from "./thinking-policy.js";
-
-type OpenAILiveModelReaders = Pick<
-  typeof import("openclaw/plugin-sdk/provider-catalog-live-runtime"),
-  | "readLiveModelCatalogBooleanField"
-  | "readLiveModelCatalogPositiveSafeIntegerField"
-  | "readLiveModelCatalogStringField"
->;
 
 const PROVIDER_ID = "openai";
 
@@ -338,93 +338,6 @@ async function buildOpenAILiveProviderConfig(
   }
 }
 
-function readCodexModelStringArray(row: unknown, keys: readonly string[]): readonly string[] {
-  if (!row || typeof row !== "object" || Array.isArray(row)) {
-    return [];
-  }
-  const record = row as Record<string, unknown>;
-  for (const key of keys) {
-    const value = record[key];
-    if (Array.isArray(value)) {
-      return value.filter((entry): entry is string => typeof entry === "string");
-    }
-  }
-  return [];
-}
-
-function readCodexReasoningLevels(row: unknown): readonly string[] | undefined {
-  if (!row || typeof row !== "object" || Array.isArray(row)) {
-    return undefined;
-  }
-  const record = row as Record<string, unknown>;
-  const value = record.supported_reasoning_levels ?? record.supportedReasoningLevels;
-  if (!Array.isArray(value)) {
-    return undefined;
-  }
-  return value.flatMap((entry) => {
-    if (typeof entry === "string" && entry.trim().length > 0) {
-      return [entry.trim()];
-    }
-    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-      const effort = (entry as { effort?: unknown }).effort;
-      return typeof effort === "string" && effort.trim().length > 0 ? [effort.trim()] : [];
-    }
-    return [];
-  });
-}
-
-function readCodexModelRows(body: unknown): readonly unknown[] {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    throw new Error("OpenAI Codex model discovery response must be { models: [] }");
-  }
-  const models = (body as { models?: unknown }).models;
-  if (!Array.isArray(models)) {
-    throw new Error("OpenAI Codex model discovery response must be { models: [] }");
-  }
-  return models;
-}
-
-function shouldIncludeCodexModelRow(row: unknown, readers: OpenAILiveModelReaders): boolean {
-  const { readLiveModelCatalogStringField, readLiveModelCatalogBooleanField } = readers;
-  const visibility = normalizeLowercaseStringOrEmpty(
-    readLiveModelCatalogStringField(row, "visibility") ?? "",
-  );
-  if (visibility && visibility !== "list") {
-    return false;
-  }
-  const showInPicker =
-    readLiveModelCatalogBooleanField(row, "show_in_picker") ??
-    readLiveModelCatalogBooleanField(row, "showInPicker");
-  return showInPicker !== false;
-}
-
-function resolveCodexModelInput(
-  row: unknown,
-  fallback: ModelDefinitionConfig | undefined,
-): ModelDefinitionConfig["input"] {
-  const rawModalities = readCodexModelStringArray(row, ["input_modalities", "inputModalities"]);
-  if (rawModalities.length === 0) {
-    return fallback?.input ?? ["text", "image"];
-  }
-  const modalities = new Set(
-    rawModalities.map((modality) => normalizeLowercaseStringOrEmpty(modality)),
-  );
-  const input = new Set<ModelDefinitionConfig["input"][number]>();
-  if (modalities.has("text")) {
-    input.add("text");
-  }
-  if (modalities.has("image") || modalities.has("vision")) {
-    input.add("image");
-  }
-  if (modalities.has("audio")) {
-    input.add("audio");
-  }
-  if (modalities.has("video")) {
-    input.add("video");
-  }
-  return input.size > 0 ? [...input] : (fallback?.input ?? ["text", "image"]);
-}
-
 function normalizeOpenAICodexCatalogModel(model: ModelDefinitionConfig): ModelDefinitionConfig {
   const modelId = normalizeLowercaseStringOrEmpty(model.id);
   if (
@@ -516,7 +429,9 @@ function buildOpenAICodexModelFromLiveRow(
       : fallback?.compat;
   const thinkingLevelMap = {
     ...(reasoningLevels === undefined ? fallback?.thinkingLevelMap : {}),
-    ...(normalizedModelId.startsWith("gpt-5.6") ? { off: null } : {}),
+    ...(fallback?.thinkingLevelMap?.off === null || normalizedModelId.startsWith("gpt-5.6")
+      ? { off: null }
+      : {}),
     ...(reasoningLevels?.includes("xhigh") ? { xhigh: "xhigh" as const } : {}),
     ...(reasoningLevels?.includes("max") ? { max: "max" as const } : {}),
   };
