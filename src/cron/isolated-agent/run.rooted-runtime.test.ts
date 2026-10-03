@@ -1,17 +1,21 @@
 // Rooted cron reviews preserve their host-selected root and instructions across runtimes.
 import { describe, expect, it, vi } from "vitest";
+import { resolveModelCandidateChain } from "../../agents/model-fallback-candidates.js";
 import {
   runFallbackModelAttempt,
   runInitialModelFallbackAttempt,
   type TestModelFallbackRunnerParams,
 } from "../../agents/test-helpers/model-fallback-runner.test-support.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   SKILL_WORKSHOP_MAINTENANCE_PROMPT,
   SKILL_WORKSHOP_MAINTENANCE_TOOLS,
 } from "../../skills/workshop/maintenance-prompt.js";
+import { resolveSkillCollectionReviewMonitorSpecs } from "../skill-collection-review-monitor.js";
 import { makeIsolatedAgentParamsFixture } from "./job-fixtures.js";
 import { setupRunCronIsolatedAgentTurnSuite } from "./run.suite-helpers.js";
 import {
+  acquirePreparedModelRuntimeMock,
   isCliProviderMock,
   loadRunCronIsolatedAgentTurn,
   mockRunCronFallbackPassthrough,
@@ -46,6 +50,92 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
     expect(runEmbeddedAgentMock).not.toHaveBeenCalled();
   });
 
+  it("runs a system review on OpenClaw with its selected Codex-configured model and no fallback", async () => {
+    const cfg: OpenClawConfig = {
+      agents: {
+        defaults: { model: "anthropic/claude-sonnet-4-6" },
+        list: [
+          {
+            id: "main",
+            model: { primary: "openai/gpt-5.4", fallbacks: ["openai/gpt-5"] },
+            models: {
+              "openai/gpt-5.4": { agentRuntime: { id: "codex" } },
+              "openai/gpt-5": { agentRuntime: { id: "codex" } },
+            },
+          },
+        ],
+      },
+      skills: { workshop: { autonomous: { mode: "auto" } } },
+    };
+    const [spec] = resolveSkillCollectionReviewMonitorSpecs(cfg, []);
+    expect(spec?.input.enabled).toBe(true);
+    resolveEffectiveAgentRuntimeMock.mockReturnValue("codex");
+    runWithModelFallbackMock.mockImplementation(async (params: TestModelFallbackRunnerParams) => ({
+      result: await runInitialModelFallbackAttempt(params),
+      provider: params.provider,
+      model: params.model,
+      attempts: [],
+    }));
+
+    const result = await runCronIsolatedAgentTurn(
+      makeIsolatedAgentParamsFixture({
+        cfg,
+        executionRoot,
+        job: { ...spec!.input, id: "review-main", state: {} },
+      }),
+    );
+
+    expect(result.status).toBe("ok");
+    expect(runWithModelFallbackMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openai",
+        model: "gpt-5.4",
+        fallbacksOverride: [],
+      }),
+    );
+    expect(acquirePreparedModelRuntimeMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runtimePluginSelections: [
+          expect.objectContaining({
+            provider: "openai",
+            modelId: "gpt-5.4",
+            runtime: "openclaw",
+          }),
+        ],
+      }),
+      expect.anything(),
+    );
+    expect(runEmbeddedAgentMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "openai",
+        model: "gpt-5.4",
+        agentHarnessId: "openclaw",
+        agentHarnessRuntimeOverride: "openclaw",
+        modelSelectionLocked: true,
+        modelFallbacksOverride: [],
+      }),
+    );
+    expect(runCliAgentMock).not.toHaveBeenCalled();
+
+    // Resolve the actual fallback candidate chain from the runner's options.
+    // The configured Codex fallback must not become a second candidate.
+    const fallbackRequest = runWithModelFallbackMock.mock.calls[0]?.[0] as {
+      provider: string;
+      model: string;
+      fallbacksOverride?: string[];
+    };
+    expect(
+      resolveModelCandidateChain({
+        cfg,
+        agentId: "main",
+        provider: fallbackRequest.provider,
+        model: fallbackRequest.model,
+        requestedRouteResolution: "resolved",
+        fallbacksOverride: fallbackRequest.fallbacksOverride,
+      }).map(({ provider, model }) => `${provider}/${model}`),
+    ).toEqual(["openai/gpt-5.4"]);
+  });
+
   it.each([
     { prompt: "", skills: [] },
     { prompt: "Explicit safe instructions", skills: [{ name: "safe" }] },
@@ -63,7 +153,7 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
     expect(runEmbeddedAgentMock).toHaveBeenCalledWith(expect.objectContaining({ skillsSnapshot }));
   });
 
-  it("runs a rooted review with a Claude CLI primary and returns its report", async () => {
+  it("runs a declared system review with a Claude CLI primary and returns its report", async () => {
     const helpers = await vi.importActual<typeof import("./helpers.js")>("./helpers.js");
     pickLastNonEmptyTextFromPayloadsMock.mockImplementation(
       helpers.pickLastNonEmptyTextFromPayloads,
@@ -91,9 +181,11 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
     }));
     const result = await runCronIsolatedAgentTurn(
       makeIsolatedAgentParamsFixture({
+        agentId: "cal",
         executionRoot,
         skillsSnapshot,
         job: {
+          declarationKey: "skill-collection-review:cal",
           payload: {
             kind: "agentTurn",
             message: SKILL_WORKSHOP_MAINTENANCE_PROMPT,
@@ -103,6 +195,7 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
         },
         cfg: {
           agents: {
+            list: [{ id: "cal" }],
             defaults: {
               model: "anthropic/claude-opus-4-6",
               models: { "anthropic/claude-opus-4-6": { agentRuntime: { id: "claude-cli" } } },

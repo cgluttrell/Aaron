@@ -1,17 +1,22 @@
 import { resolveCliRuntimeExecutionProvider } from "../../agents/model-runtime-aliases.js";
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { supportsCronExecutionRoot } from "../execution-root-runtime.js";
+import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
+import type { CronJob } from "../types.js";
 import { isCliProvider } from "./run-execution.runtime.js";
-import type { CronRunExecutionParams } from "./run-execution.types.js";
+import type { MutableCronSession } from "./run-session-state.js";
 import { resolveEffectiveAgentRuntime } from "./run.runtime.js";
 
 /** Shares candidate execution policy between harness preparation and dispatch. */
-export function createCronCandidateExecutionResolver(
-  params: Pick<
-    CronRunExecutionParams,
-    "cfgWithAgentDefaults" | "agentId" | "runSessionKey" | "cronSession"
-  >,
-) {
+export function createCronCandidateExecutionResolver(params: {
+  cfgWithAgentDefaults: OpenClawConfig;
+  agentId: string;
+  runSessionKey: string;
+  cronSession: MutableCronSession;
+  job: CronJob;
+}) {
   return (provider: string, model: string, sessionRuntimeOverride: string | undefined) => {
-    const executionProvider = sessionRuntimeOverride
+    let executionProvider = sessionRuntimeOverride
       ? isCliProvider(sessionRuntimeOverride, params.cfgWithAgentDefaults)
         ? sessionRuntimeOverride
         : provider
@@ -21,7 +26,7 @@ export function createCronCandidateExecutionResolver(
           agentId: params.agentId,
           modelId: model,
         }) ?? provider);
-    const runtime =
+    let runtime =
       sessionRuntimeOverride ??
       resolveEffectiveAgentRuntime({
         cfg: params.cfgWithAgentDefaults,
@@ -31,10 +36,21 @@ export function createCronCandidateExecutionResolver(
         sessionKey: params.runSessionKey,
         sessionEntry: params.cronSession.sessionEntry,
       });
+    let cliExecution = isCliProvider(executionProvider, params.cfgWithAgentDefaults);
+    const rootedRuntimeOverride =
+      params.job.declarationKey?.startsWith(SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX) &&
+      !supportsCronExecutionRoot(runtime, cliExecution)
+        ? "openclaw"
+        : sessionRuntimeOverride;
+    if (rootedRuntimeOverride !== sessionRuntimeOverride) {
+      executionProvider = provider;
+      runtime = "openclaw";
+      cliExecution = false;
+    }
     return {
-      sessionRuntimeOverride,
+      sessionRuntimeOverride: rootedRuntimeOverride,
       executionProvider,
-      cliExecution: isCliProvider(executionProvider, params.cfgWithAgentDefaults),
+      cliExecution,
       runtime,
     };
   };

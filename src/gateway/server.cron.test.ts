@@ -78,6 +78,18 @@ vi.mock("../plugin-sdk/browser-maintenance.js", () => ({
   closeTrackedBrowserTabsForSessions: closeTrackedBrowserTabsForSessionsMock,
 }));
 
+// These cron routing tests must not depend on the test host's cgroup working set.
+vi.mock("../process/dispatch-pressure-guard.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../process/dispatch-pressure-guard.js")>();
+  return {
+    ...actual,
+    decideDispatchPressure: () => ({
+      status: "allow" as const,
+      reason: "below_threshold" as const,
+    }),
+  };
+});
+
 installGatewayTestHooks({ scope: "suite" });
 const CRON_WAIT_TIMEOUT_MS = 10_000;
 let cronSuiteTempRootPromise: Promise<string> | null = null;
@@ -1793,7 +1805,8 @@ describe("gateway server cron", () => {
       });
       expect(runRes.ok).toBe(true);
       expectEnqueuedRunPayload(runRes.payload);
-      await finished;
+      const finishedEvent = await finished;
+      expect(finishedEvent).toMatchObject({ status: "ok" });
       expect(cronIsolatedRun).toHaveBeenCalledTimes(1);
       const call = cronIsolatedRun.mock.calls.at(0)?.[0] as { sessionKey?: unknown } | undefined;
       expect(call?.sessionKey).toBe("agent:main:dingtalk:group:cid3tmd4xb19xjfk/wogxwy2a==");

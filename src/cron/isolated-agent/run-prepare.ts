@@ -32,12 +32,14 @@ import type { CronDeliveryPlan } from "../delivery-plan.js";
 import { createCronRunDiagnosticsFromError } from "../run-diagnostics.js";
 import { resolveCronScheduledToolPolicy } from "../scheduled-tool-policy.js";
 import { isDetachedCronSessionTarget } from "../session-target.js";
+import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import type { CronJob, CronRunDiagnostics } from "../types.js";
 import {
   resolveCronModelSelection,
   resolveCronModelSelectionOwner,
   resolveCronThinkingSelection,
 } from "./model-selection.js";
+import { createCronCandidateExecutionResolver } from "./run-candidate-runtime.js";
 import { resolveCronCommandPromptPreflight } from "./run-command-preflight.js";
 import { resolveCronActiveRuntimeConfig, resolveCronAgentConfig } from "./run-config.js";
 import { buildCurrentConversationContextBlock } from "./run-current-context.js";
@@ -416,14 +418,26 @@ export async function prepareCronRunContext(params: {
       };
     }
     const { provider, model, modelFallbacksOverride, runtimePluginCandidates } = preflight;
-    const effectiveAgentRuntime = resolveEffectiveAgentRuntime({
-      cfg: cfgWithAgentDefaults,
-      provider,
-      modelId: model,
-      agentId: modelOwner.agentId,
-      sessionKey: agentSessionKey,
-      sessionEntry: cronSession.sessionEntry,
+    const isSkillCollectionReview = input.job.declarationKey?.startsWith(
+      SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
+    );
+    const resolveCandidateExecution = createCronCandidateExecutionResolver({
+      cfgWithAgentDefaults,
+      agentId,
+      runSessionKey,
+      cronSession,
+      job: input.job,
     });
+    const effectiveAgentRuntime = isSkillCollectionReview
+      ? resolveCandidateExecution(provider, model, undefined).runtime
+      : resolveEffectiveAgentRuntime({
+          cfg: cfgWithAgentDefaults,
+          provider,
+          modelId: model,
+          agentId: modelOwner.agentId,
+          sessionKey: agentSessionKey,
+          sessionEntry: cronSession.sessionEntry,
+        });
     const thinkingSelection = await resolveCronThinkingSelection({
       cfg: cfgWithAgentDefaults,
       owner: modelOwner,
@@ -463,11 +477,14 @@ export async function prepareCronRunContext(params: {
         workspaceDir,
         allowGatewaySubagentBinding: true,
         runtimePluginSelections: runtimePluginCandidates.map((candidate) => {
-          const runtime = resolveSessionRuntimeOverrideForProvider({
-            provider: candidate.provider,
-            entry: cronSession.sessionEntry,
-            cfg: cfgWithAgentDefaults,
-          });
+          const runtime = isSkillCollectionReview
+            ? resolveCandidateExecution(candidate.provider, candidate.model, undefined)
+                .sessionRuntimeOverride
+            : resolveSessionRuntimeOverrideForProvider({
+                provider: candidate.provider,
+                entry: cronSession.sessionEntry,
+                cfg: cfgWithAgentDefaults,
+              });
           return runtime
             ? { provider: candidate.provider, modelId: candidate.model, runtime, agentId }
             : { provider: candidate.provider, modelId: candidate.model, agentId };
