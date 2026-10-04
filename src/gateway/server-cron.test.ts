@@ -1,5 +1,4 @@
-// Gateway cron tests cover isolated agent turns, heartbeat wakeups, completion
-// delivery, lifecycle cleanup, hook emission, and SSRF-guarded webhooks.
+// Gateway cron tests cover delivery, lifecycle, hooks, and guarded webhooks.
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -7,6 +6,7 @@ import { setImmediate as waitForImmediate } from "node:timers/promises";
 import { expectDefined } from "@openclaw/normalization-core";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
+import "./server-cron-non-pressure.test-support.js";
 import { createRequireRecord } from "../../test/helpers/record.js";
 import { AgentDeletionCommitUncertainError } from "../agents/agent-lifecycle-registry.js";
 import type { CliDeps } from "../cli/deps.js";
@@ -38,27 +38,12 @@ import {
   createGatewaySchedulerClock,
   createTestGatewayScheduler,
 } from "../test-utils/gateway-scheduler-clock.js";
+import type { RunCronIsolatedAgentTurnMock } from "./server-cron-non-pressure.test-support.js";
 import { registerGatewayCronContextTests } from "./server-cron.context.test-support.js";
 import {
   registerGatewayCronHandoffTests,
   registerGatewayCronReceiptTests,
 } from "./server-cron.receipts.test-support.js";
-
-// Run-state and hook assertions should not depend on the test host's cgroup pressure.
-vi.mock("../process/dispatch-pressure-guard.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../process/dispatch-pressure-guard.js")>();
-  return {
-    ...actual,
-    decideDispatchPressure: () => ({
-      status: "allow" as const,
-      reason: "below_threshold" as const,
-    }),
-  };
-});
-
-type RunCronIsolatedAgentTurnMock = (params: {
-  abortSignal?: AbortSignal;
-}) => Promise<{ status: "ok"; summary: string }>;
 
 const {
   enqueueSystemEventMock,
