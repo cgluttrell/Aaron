@@ -57,7 +57,7 @@ function toPackageFileSpec(fromDir: string, packagePath: string): string {
 
 function readWorkspacePackageVersions(): Map<string, string> {
   const packageVersions = new Map<string, string>();
-  for (const packageDir of ["packages/ai"]) {
+  for (const packageDir of ["packages/ai", "packages/session-url-contract"]) {
     const packageJsonPath = path.join(process.cwd(), packageDir, "package.json");
     const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as {
       name?: unknown;
@@ -127,15 +127,13 @@ function patchLocalOpenClawPackage(packagePath: string): string {
 
 function packLocalOpenClawPackage(): string {
   run("pnpm", ["build:plugin-sdk:strict-smoke"], process.cwd());
-  const rawPackOutput = runCapture(
+  const filename = runCapture(
     "npm",
-    ["pack", "--ignore-scripts", "--json", "--pack-destination", artifactRoot],
+    ["pack", "--ignore-scripts", "--silent", "--pack-destination", artifactRoot],
     process.cwd(),
-  );
-  const packEntries = JSON.parse(rawPackOutput) as Array<{ filename?: unknown }>;
-  const filename = packEntries[0]?.filename;
-  if (typeof filename !== "string" || filename.trim() === "") {
-    throw new Error(`npm pack did not report a package filename: ${rawPackOutput}`);
+  ).trim();
+  if (!filename || filename.includes("\n")) {
+    throw new Error(`npm pack did not report one package filename: ${filename}`);
   }
   return patchLocalOpenClawPackage(path.join(artifactRoot, filename));
 }
