@@ -4083,6 +4083,7 @@ export function packNodeTestGroups<Group>(
   orderedGroups: readonly Group[],
   canShareJob: (bin: readonly [Group, ...Group[]], group: Group) => boolean,
   allowGroupExchange = false,
+  preferLastAdmissibleBin = false,
 ): Array<[Group, ...Group[]]> {
   const bins: Array<[Group, ...Group[]]> = [];
   const admits = ([first, ...rest]: [Group, ...Group[]]) => {
@@ -4124,7 +4125,9 @@ export function packNodeTestGroups<Group>(
     return false;
   };
   for (const group of orderedGroups) {
-    const bin = bins.find((candidate) => canShareJob(candidate, group));
+    const bin = preferLastAdmissibleBin
+      ? bins.findLast((candidate) => canShareJob(candidate, group))
+      : bins.find((candidate) => canShareJob(candidate, group));
     if (bin) {
       bin.push(group);
     } else if (!allowGroupExchange || !exchange(group)) {
@@ -4912,7 +4915,13 @@ function createCompactNodeTestShardBundles(
         parallel,
       });
     };
-    const bins = packNodeTestGroups(anchorGroups, canShareCompactJob, true);
+    // Hybrid PR's larger inventory fits the same caps with reverse admission.
+    const bins = packNodeTestGroups(
+      anchorGroups,
+      canShareCompactJob,
+      true,
+      options.runnerBackend === "hybrid" && compactMode === "pull-request",
+    );
     if (options.runnerBackend === "github") {
       for (const bin of bins) {
         bin.sort((a, b) => runnerRank(b) - runnerRank(a));

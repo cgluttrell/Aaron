@@ -9,10 +9,12 @@ vi.mock("../logging/subsystem.js", () => ({
     error: vi.fn(),
   }),
 }));
-import {
-  decideDispatchPressure,
-  resetDispatchPressureGuardForTest,
-} from "./dispatch-pressure-guard.js";
+let decideDispatchPressure: typeof import("./dispatch-pressure-guard.js").decideDispatchPressure;
+
+async function resetGuardModule(): Promise<void> {
+  vi.resetModules();
+  ({ decideDispatchPressure } = await import("./dispatch-pressure-guard.js"));
+}
 
 function reader(files: Record<string, string>) {
   return (file: string) => {
@@ -25,9 +27,7 @@ function reader(files: Record<string, string>) {
 }
 
 describe("dispatch pressure guard", () => {
-  beforeEach(() => {
-    resetDispatchPressureGuardForTest();
-  });
+  beforeEach(resetGuardModule);
 
   it("defers when cgroup memory is above the safe usage threshold", () => {
     const decision = decideDispatchPressure(
@@ -163,8 +163,8 @@ describe("dispatch pressure guard", () => {
 });
 
 describe("dispatch pressure guard first-sample report (fork)", () => {
-  beforeEach(() => {
-    resetDispatchPressureGuardForTest();
+  beforeEach(async () => {
+    await resetGuardModule();
     logMocks.info.mockClear();
     logMocks.warn.mockClear();
   });

@@ -174,8 +174,7 @@ describe("cron service timer seam coverage", () => {
     }));
     const state = createCronServiceState({
       storePath,
-      cronEnabled: true,
-      log: logger,
+      scheduler: createTestGatewayScheduler(),
       nowMs: () => now,
       enqueueSystemEvent: vi.fn(),
       requestHeartbeat: vi.fn(),
@@ -211,8 +210,7 @@ describe("cron service timer seam coverage", () => {
     }));
     const state = createCronServiceState({
       storePath,
-      cronEnabled: true,
-      log: logger,
+      scheduler: createTestGatewayScheduler(),
       nowMs: () => now,
       enqueueSystemEvent: vi.fn(),
       requestHeartbeat: vi.fn(),
