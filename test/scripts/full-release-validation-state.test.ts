@@ -4,7 +4,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, assert, describe, expect, it } from "vitest";
+import { afterEach, assert, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildFullReleaseCandidateBinding,
   buildFullReleaseCandidateRequest,
@@ -1491,6 +1491,9 @@ describe("release child attempt composition", () => {
 });
 
 describe("release decision policy", () => {
+  // These synthetic child runs belong to upstream regardless of the CI checkout's repository.
+  beforeEach(() => vi.stubEnv("GITHUB_REPOSITORY", "openclaw/openclaw"));
+  afterEach(() => vi.unstubAllEnvs());
   const windowsJob = {
     name: "checks-windows-node-test-2",
     conclusion: "failure",
