@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DispatchPressureDecision } from "../../process/dispatch-pressure-guard.js";
-import { evaluateAgentRunDispatchPressure } from "./agent-run-admission-pressure.js";
+import { evaluateAgentRunDispatchPressure } from "./agent-run-admission-pressure-policy.js";
 
 const sample = {
   currentBytes: 7_000,

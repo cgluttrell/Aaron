@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { assertUpdateProposalContainsFullSkillBody } from "./apply-transition.js";
+import { assertUpdateProposalContainsFullSkillBody } from "./apply-transition-body-policy.js";
 
 describe("assertUpdateProposalContainsFullSkillBody (fork guard)", () => {
   it("allows a full replacement skill body on update", () => {

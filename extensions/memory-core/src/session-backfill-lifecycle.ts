@@ -43,7 +43,7 @@ export async function recordSessionBackfillRewindBatch(params: {
     return;
   }
   const key = createHash("sha256").update(JSON.stringify(params.candidates)).digest("hex");
-  await writeMemoryCoreWorkspaceEntry<SessionBackfillRewindBatch>({
+  await writeMemoryCoreWorkspaceEntry({
     namespace: SESSION_BACKFILL_REWIND_NAMESPACE,
     workspaceDir: params.workspaceDir,
     key,
@@ -55,7 +55,7 @@ export async function markSessionBackfillRewindBaseline(params: {
   workspaceDir: string;
   agentId: string;
 }): Promise<void> {
-  await writeMemoryCoreWorkspaceEntry<SessionBackfillBaseline>({
+  await writeMemoryCoreWorkspaceEntry({
     namespace: SESSION_BACKFILL_REWIND_NAMESPACE,
     workspaceDir: params.workspaceDir,
     key: `${SESSION_BACKFILL_BASELINE_KEY_PREFIX}${params.agentId}`,
