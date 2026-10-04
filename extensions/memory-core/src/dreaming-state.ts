@@ -22,7 +22,7 @@ export const SHORT_TERM_LOCK_NAMESPACE = "short-term-locks";
 // Namespace capacity for Dreaming workspace-keyed plugin-state rows.
 // At this cap the keyed store evicts oldest created_at first; see the skip path in
 // writeMemoryCoreWorkspaceEntries for the intentional no-refresh retention policy.
-export const DREAMING_WORKSPACE_STATE_MAX_ENTRIES = 50_000;
+const DREAMING_WORKSPACE_STATE_MAX_ENTRIES = 50_000;
 const WORKSPACE_STATE_YIELD_EVERY = 10;
 export const SHORT_TERM_LOCK_MAX_ENTRIES = 4_096;
 export const SESSION_SEEN_HASHES_PER_CHUNK = 512;

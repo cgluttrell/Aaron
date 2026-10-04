@@ -836,7 +836,11 @@ export function createHookRunner(
             (hook.handler as (event: unknown, ctx: unknown) => Promise<TResult | void>)(event, ctx),
           );
           // Fork patch T1565: claiming hooks with no timeoutMs fall back to the claiming default.
-          return await awaitHook(hook, promise, DEFAULT_CLAIMING_HOOK_TIMEOUT_MS_BY_HOOK[hook.hookName]);
+          return await awaitHook(
+            hook,
+            promise,
+            DEFAULT_CLAIMING_HOOK_TIMEOUT_MS_BY_HOOK[hook.hookName],
+          );
         };
         handlerResult = runHandler ? await runHandler(invokeHandler) : await invokeHandler();
       } catch (err) {
