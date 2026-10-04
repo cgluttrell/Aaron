@@ -44,9 +44,8 @@ import {
   readGatewayDedupeEntry,
   setGatewayDedupeEntries,
 } from "./agent-dedupe.js";
-import { canPrepareAgentSessionWorktree } from "./agent-handler-helpers.js";
-import { evaluatePreparedAgentRunDispatchPressure } from "./agent-run-admission-pressure.js";
 import { resolveAgentRunAdmissionModel } from "./agent-run-admission-model.js";
+import { evaluatePreparedAgentRunDispatchPressure } from "./agent-run-admission-pressure.js";
 import {
   createAgentRunAdmissionRevalidator,
   releaseFailedAgentRunAdmission,

@@ -57,7 +57,7 @@ export type DispatchPressureSample = {
   windowMs?: number;
 };
 
-export type DispatchPressureThreshold = {
+type DispatchPressureThreshold = {
   currentBytes?: number;
   workingSetBytes?: number;
   usageRatio?: number;
@@ -323,9 +323,4 @@ export function decideDispatchPressure(
     };
   }
   return thresholdDecision ?? { status: "allow", reason: "below_threshold", sample };
-}
-
-export function resetDispatchPressureGuardForTest(): void {
-  previousSample = undefined;
-  firstSampleReported = false;
 }
