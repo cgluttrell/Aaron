@@ -51,6 +51,7 @@ import { authorizeGatewaySessionCreation } from "../operator-role-policy.js";
 import { getGatewayProcessInstanceId } from "../process-instance.js";
 import { resolveOperatorSessionCreation } from "../session-creation-provenance.js";
 import { resolveRequestedSessionAgentId } from "../session-request-agent.js";
+import { isGatewayAdmin } from "../session-sharing-policy.js";
 import { loadGatewaySessionEntryReadOnly } from "../session-utils.js";
 import { assertActiveAgentRuntimeAuthority } from "./agent-runtime-authority.js";
 import {
@@ -96,7 +97,6 @@ import {
   cronJobVisibilityTarget,
 } from "./cron-visibility.js";
 import { resolveOperatorSessionCreation } from "./session-creation-provenance.js";
-import { isGatewayAdmin } from "../session-sharing-policy.js";
 import type { GatewayRequestHandlers } from "./types.js";
 import { assertValidParams } from "./validation.js";
 

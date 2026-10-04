@@ -155,7 +155,9 @@ export function prepareAgentRequestPreflight(params: {
     !isGatewayAdmin(params.client) &&
     !canUseInternalRuntimeHandoff
   ) {
-    return rejectInvalidRequest("dispatch pressure override is reserved for admin or backend callers.");
+    return rejectInvalidRequest(
+      "dispatch pressure override is reserved for admin or backend callers.",
+    );
   }
   const allowModelOverride =
     hasGatewayAdminScope(params.client) || params.client?.internal?.allowModelOverride === true;

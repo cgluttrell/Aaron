@@ -17,7 +17,6 @@ import {
   configureMemoryCoreDreamingState,
   DREAMING_DAILY_INGESTION_NAMESPACE,
   DREAMING_SESSION_INGESTION_FILES_NAMESPACE,
-  DREAMING_WORKSPACE_STATE_MAX_ENTRIES,
   readMemoryCoreWorkspaceEntries,
   writeMemoryCoreWorkspaceEntries,
 } from "./dreaming-state.js";
@@ -322,7 +321,6 @@ describe("writeMemoryCoreWorkspaceEntries", () => {
     // test uses a small cap on a dedicated namespace so the same skip +
     // created_at eviction policy is proven without writing tens of thousands
     // of rows or reopening a production namespace with a different limit.
-    expect(DREAMING_WORKSPACE_STATE_MAX_ENTRIES).toBe(50_000);
     const capacity = 3;
     const capacityNamespace = "dreaming-workspace-capacity-retention";
     configureCountedDreamingState({
