@@ -447,8 +447,8 @@ describe("publish model catalog v2", () => {
       return fd;
     });
     vi.spyOn(fs, "closeSync").mockImplementation((fd) => {
-      close(fd);
       descriptors.delete(fd);
+      close(fd);
     });
     vi.spyOn(fs, "fstatSync").mockImplementation((fd, options) => {
       const stat = fstat(fd, options);
