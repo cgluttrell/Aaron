@@ -4,8 +4,8 @@ import { DatabaseSync } from "node:sqlite";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
-import * as logging from "../../logging/logger.js";
 import { withCliProcessScope } from "../../cli/runtime-cleanup-scope.js";
+import * as logging from "../../logging/logger.js";
 import * as agentDatabase from "../../state/openclaw-agent-db.js";
 import {
   closeOpenClawAgentDatabaseByPath,
