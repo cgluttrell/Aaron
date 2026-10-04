@@ -1,4 +1,3 @@
-// Gateway cron integration tests cover RPC projection, authority, runs, and webhook delivery.
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +21,7 @@ import {
   createTestGatewayScheduler,
 } from "../test-utils/gateway-scheduler-clock.js";
 import { getGatewayProcessInstanceId } from "./process-instance.js";
+import { CRON_WAIT_TIMEOUT_MS } from "./server-cron-non-pressure.test-support.js";
 import type { GatewayCronState } from "./server-cron.js";
 import type { GatewayClient } from "./server-methods/types.js";
 import {
@@ -68,14 +68,7 @@ vi.mock("../cron/delivery.js", async () => {
   };
 });
 
-// Cron routing assertions do not exercise host cgroup admission.
-vi.mock("../process/dispatch-pressure-guard.js", async (importOriginal) => ({
-  ...(await importOriginal<typeof import("../process/dispatch-pressure-guard.js")>()),
-  decideDispatchPressure: () => ({ status: "allow" as const, reason: "below_threshold" as const }),
-}));
-
 installGatewayTestHooks({ scope: "suite" });
-const CRON_WAIT_TIMEOUT_MS = 10_000;
 let cronSuiteTempRootPromise: Promise<string> | null = null;
 let cronSuiteCaseId = 0;
 
