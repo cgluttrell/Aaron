@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { captureDiagnosticHeapSnapshot } from "../../logging/diagnostic-heap-snapshot.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { handleGatewayRequest } from "../server-methods.js";
@@ -91,6 +92,48 @@ afterEach(() => {
 });
 
 describe("diagnostics.heapSnapshot", () => {
+  it("refuses low headroom through the capture entry point but admits a small heap", async () => {
+    const signal = new AbortController().signal;
+    vi.mocked(process.memoryUsage).mockReturnValue({ ...memory, heapUsed: 2 * 1024 ** 3 });
+    const low = await captureDiagnosticHeapSnapshot({
+      signal,
+      hasAuthority: () => true,
+      readHeadroom: () => ({
+        hostAvailableBytes: 8 * 1024 ** 3,
+        cgroupWorkingSetBytes: 7 * 1024 ** 3,
+        cgroupLimitBytes: 8 * 1024 ** 3,
+      }),
+    });
+    expect(low).toEqual({
+      status: "unavailable",
+      reason: "insufficient-headroom",
+      cleanupFailed: false,
+    });
+    expect(native.write).not.toHaveBeenCalled();
+    expect(await fs.readdir(stateDir)).toEqual([]);
+
+    const hostLow = await captureDiagnosticHeapSnapshot({
+      signal,
+      hasAuthority: () => true,
+      readHeadroom: () => ({ hostAvailableBytes: 1024 ** 3 }),
+    });
+    expect(hostLow).toEqual(low);
+    expect(native.write).not.toHaveBeenCalled();
+
+    vi.mocked(process.memoryUsage).mockReturnValue({ ...memory, heapUsed: 1024 });
+    const admitted = await captureDiagnosticHeapSnapshot({
+      signal,
+      hasAuthority: () => true,
+      readHeadroom: () => ({
+        hostAvailableBytes: 2 * 1024 ** 3,
+        cgroupWorkingSetBytes: 1024 ** 3,
+        cgroupLimitBytes: 2 * 1024 ** 3,
+      }),
+    });
+    expect(admitted.status).toBe("complete");
+    expect(native.write).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     { scopes: [] },
     { scopes: ["operator.read"] },
