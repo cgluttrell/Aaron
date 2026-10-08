@@ -313,9 +313,16 @@ permissions and returns `path`, `sizeBytes`, `heapUsedBefore`, `heapUsedAfter`
 over the WebSocket or enter the diagnostics export. Worker isolates are excluded.
 
 **Take snapshots in a quiet window.** A 3 GB heap snapshot can block the main
-thread for tens of seconds. V8 may need roughly twice the heap's memory while
-capturing; sufficient memory and disk headroom remain the operator's responsibility.
-The RPC refuses heaps above 6 GiB, overlapping captures, and another capture within
+thread for tens of seconds. [Node's heap-snapshot guidance](https://nodejs.org/en/learn/diagnostics/memory/using-heap-snapshot)
+says building a snapshot can double the heap size. The RPC conservatively budgets
+twice that possible **increment** (2 × `heapUsed`) plus a 512 MiB reserve and refuses
+when this estimate exceeds either host `MemAvailable`
+or bounded cgroup headroom (`memory.max` minus working set). The working set
+subtracts reclaimable `file` cache from `memory.current`; it does not use systemd
+`MemoryCurrent`. The refusal reason is `insufficient-headroom`. This is a point-in-time
+admission check, not a reservation; concurrent growth can still exhaust memory.
+Sufficient disk space remains the operator's responsibility.
+The RPC also refuses heaps above 6 GiB, overlapping captures, and another capture within
 60 seconds of a native attempt finishing. These admission guards do not impose a
 hard duration, output-size, or memory limit: synchronous `writeHeapSnapshot()`
 cannot be interrupted by a timeout, disconnection, or shutdown once started.
