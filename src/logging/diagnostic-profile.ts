@@ -15,6 +15,7 @@ let cleanupUncertain = false;
 type FailureReason =
   | "cooldown"
   | "heap-too-large"
+  | "insufficient-headroom"
   | "busy"
   | "unsupported"
   | "conflict"

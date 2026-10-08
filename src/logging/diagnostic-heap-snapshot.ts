@@ -1,11 +1,15 @@
+import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { writeHeapSnapshot } from "node:v8";
 import { resolveStateDir } from "../config/state-dir.js";
+import { readCgroupMemorySample } from "../process/dispatch-pressure-guard.js";
 import type { DiagnosticProfileOutcome } from "./diagnostic-profile.js";
 import { createSubsystemLogger } from "./subsystem.js";
 
 const MAX_HEAP_BYTES = 6 * 1024 ** 3;
+const HEADROOM_RESERVE_BYTES = 512 * 1024 ** 2;
 const COOLDOWN_MS = 60_000;
 const log = createSubsystemLogger("gateway").child("diagnostics/heap-snapshot");
 let capturing = false;
@@ -19,14 +23,58 @@ type HeapSnapshotResult = {
   elapsedMs: number;
 };
 
+type MemoryHeadroom = {
+  hostAvailableBytes: number;
+  cgroupWorkingSetBytes?: number;
+  cgroupLimitBytes?: number;
+};
+
+function readMemoryHeadroom(): MemoryHeadroom {
+  // MemAvailable accounts for reclaimable host cache; free memory alone does not.
+  const available = (() => {
+    try {
+      const match = /^MemAvailable:\s+(\d+)\s+kB$/mu.exec(readFileSync("/proc/meminfo", "utf8"));
+      return match ? Number(match[1]) * 1024 : os.freemem();
+    } catch {
+      return os.freemem();
+    }
+  })();
+  const cgroup = readCgroupMemorySample();
+  return {
+    hostAvailableBytes: available,
+    cgroupWorkingSetBytes: cgroup?.workingSetBytes,
+    cgroupLimitBytes: cgroup?.maxBytes,
+  };
+}
+
+function hasSnapshotHeadroom(heapUsed: number, reading: MemoryHeadroom): boolean {
+  // Node documents that constructing a snapshot can double the heap size (about
+  // one heap of extra memory). Budget twice that increment plus a reserve for
+  // concurrent Gateway work and estimation error.
+  const required = 2 * heapUsed + HEADROOM_RESERVE_BYTES;
+  const cgroupAvailable =
+    reading.cgroupLimitBytes === undefined || reading.cgroupWorkingSetBytes === undefined
+      ? Infinity
+      : Math.max(0, reading.cgroupLimitBytes - reading.cgroupWorkingSetBytes);
+  return required <= Math.min(reading.hostAvailableBytes, cgroupAvailable);
+}
+
 /** Owns opt-in main-isolate snapshots; native capture cannot be interrupted. */
 export async function captureDiagnosticHeapSnapshot(options: {
   reason?: string;
   signal: AbortSignal;
   hasAuthority: () => boolean;
+  /** Test seam for a memory reading; RPC callers always use the process reading. */
+  readHeadroom?: () => MemoryHeadroom;
 }): Promise<DiagnosticProfileOutcome<HeapSnapshotResult>> {
   const unavailable = (
-    reason: "busy" | "cooldown" | "heap-too-large" | "cancelled" | "unsupported",
+    reason:
+      | "busy"
+      | "cooldown"
+      | "heap-too-large"
+      | "insufficient-headroom"
+      | "cancelled"
+      | "unsupported",
   ) => ({ status: "unavailable", reason, cleanupFailed: false }) as const;
   const active = () => !options.signal.aborted && options.hasAuthority();
   if (!active()) {
@@ -41,8 +89,12 @@ export async function captureDiagnosticHeapSnapshot(options: {
   if (performance.now() < nextCaptureAt) {
     return unavailable("cooldown");
   }
-  if (process.memoryUsage().heapUsed > MAX_HEAP_BYTES) {
+  const heapUsed = process.memoryUsage().heapUsed;
+  if (heapUsed > MAX_HEAP_BYTES) {
     return unavailable("heap-too-large");
+  }
+  if (!hasSnapshotHeadroom(heapUsed, (options.readHeadroom ?? readMemoryHeadroom)())) {
+    return unavailable("insufficient-headroom");
   }
   capturing = true;
   let ownedPath: string | undefined;
@@ -65,6 +117,11 @@ export async function captureDiagnosticHeapSnapshot(options: {
       await fs.unlink(filename);
       ownedPath = undefined;
       return unavailable(active() ? "heap-too-large" : "cancelled");
+    }
+    if (!hasSnapshotHeadroom(heapUsedBefore, (options.readHeadroom ?? readMemoryHeadroom)())) {
+      await fs.unlink(filename);
+      ownedPath = undefined;
+      return unavailable("insufficient-headroom");
     }
     log.warn("Writing heap snapshot: the main thread will block until V8 finishes", {
       heapUsedBefore,
