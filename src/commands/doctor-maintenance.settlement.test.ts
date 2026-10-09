@@ -35,6 +35,7 @@ it.each([false, true])(
       foreign.exec("INSERT INTO evidence VALUES (99)");
       foreign.close();
     }
+    const admitted = readUpdateDatabaseGenerations([pathname, missing]);
     const maintenance = await beginDoctorMaintenance({
       root: null,
       options: { repair: true, nonInteractive: true },
@@ -49,6 +50,7 @@ it.each([false, true])(
     const receipt = maintenance!.databaseWrites;
     expect(receipt).toEqual({
       unchanged: !changed,
+      fromGenerations: admitted,
       generations: readUpdateDatabaseGenerations([pathname, missing]),
     });
     expect(receipt?.generations[pathname]).not.toBe(databaseGenerations[pathname]);
@@ -135,6 +137,7 @@ it.each([
       expect(boundary.restart).toHaveBeenCalledOnce();
       expect(maintenance?.databaseWrites).toEqual({
         unchanged: true,
+        fromGenerations: databaseGenerations,
         generations: databaseGenerations,
       });
       return;
@@ -153,7 +156,7 @@ it.each([
 );
 
 it.each([false, true])(
-  "settles failed repair before restoration (data at risk=%s)",
+  "settles failed repair before restoring the Gateway (data at risk=%s)",
   async (unsafe) => {
     const maintenance = await begin();
     const failure = unsafe
@@ -161,15 +164,30 @@ it.each([false, true])(
       : new Error("diagnostic failed");
     try {
       await maintenance!.finish(undefined, undefined, failure);
-      expect(boundary.restart).toHaveBeenCalledTimes(unsafe ? 0 : 1);
-      expect(boundary.health).toHaveBeenCalledTimes(unsafe ? 0 : 1);
+      expect(boundary.restart).toHaveBeenCalledOnce();
+      expect(boundary.health).toHaveBeenCalledOnce();
       expect(boundary.close).toHaveBeenCalledOnce();
-      expect(boundary.resume).toHaveBeenCalledTimes(unsafe ? 0 : 1);
+      expect(boundary.resume).toHaveBeenCalledOnce();
     } finally {
       await maintenance?.release();
     }
   },
 );
+
+it("retains state custody when the resource scope cannot close", async () => {
+  const cleanupFailure = new Error("persistent resource cleanup failure");
+  boundary.close.mockRejectedValue(cleanupFailure);
+  const maintenance = await begin();
+
+  await expect(maintenance!.finish({})).rejects.toThrow(
+    "Doctor maintenance resource cleanup failed",
+  );
+  expect(boundary.close).toHaveBeenCalledTimes(2);
+  expect(boundary.release).not.toHaveBeenCalled();
+  expect(boundary.restart).not.toHaveBeenCalled();
+  expect(boundary.health).not.toHaveBeenCalled();
+  expect(maintenance!.databaseWrites).toBeUndefined();
+});
 
 it.each([false, true])(
   "checks same-installation policy before restoring Doctor's Gateway (repair activated=%s)",
@@ -222,7 +240,7 @@ it("releases its acquired process owner without deferring a one-shot authority r
   });
   await expect(begin(assertCurrent)).rejects.toBe(refused);
   expect(boundary.release).toHaveBeenCalledOnce();
-  expect(boundary.ownerAssert).not.toHaveBeenCalled();
+  expect(boundary.ownerAssert).toHaveBeenCalledOnce();
   expect(boundary.restart).not.toHaveBeenCalled();
   expect(boundary.stop).toHaveBeenCalledOnce();
 });
@@ -474,7 +492,10 @@ it("restores a service after state ownership fails without retaining a partial m
         release: () => {
           heldLeases--;
         },
-        assertCurrent: boundary.ownerAssert,
+        assertCurrent: (assertPolicy?: () => void) => {
+          boundary.ownerAssert();
+          assertPolicy?.();
+        },
         run<T>(operation: () => T): T {
           boundary.ownerAssert();
           return operation();
@@ -523,7 +544,10 @@ it.each(["acquired", "native-revoked", "install-drift"] as const)(
         release: () => {
           gatewayHeld = false;
         },
-        assertCurrent: boundary.ownerAssert,
+        assertCurrent: (assertPolicy?: () => void) => {
+          boundary.ownerAssert();
+          assertPolicy?.();
+        },
         run<T>(operation: () => T): T {
           boundary.ownerAssert();
           return operation();

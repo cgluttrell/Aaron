@@ -180,12 +180,16 @@ beforeEach(() => {
   boundary.admission.mockReturnValue({ kind: "recovery", runs: [] });
   boundary.gatewayAcquire.mockImplementation(() => ({
     release: boundary.release,
-    assertCurrent: boundary.ownerAssert,
+    assertCurrent: (assertPolicy?: () => void) => {
+      boundary.ownerAssert();
+      assertPolicy?.();
+    },
     run<T>(operation: () => T): T {
       boundary.ownerAssert();
       return operation();
     },
   }));
+  boundary.ownerAssert.mockImplementation((assertPolicy?: () => void) => assertPolicy?.());
   vi.stubEnv("OPENCLAW_PROFILE", "default");
   vi.stubEnv("OPENCLAW_STATE_DIR", "/synthetic/doctor-state");
   vi.stubEnv("OPENCLAW_CONFIG_PATH", "/synthetic/doctor-state/openclaw.json");

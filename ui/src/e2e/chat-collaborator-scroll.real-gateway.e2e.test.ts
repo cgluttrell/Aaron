@@ -50,7 +50,7 @@ const proof: Record<string, unknown> = {
   captures: "separate full browser views; no transcript/footer compositing",
 };
 const suite = createControlUiE2eSuite({
-  name: "Real Gateway sender-local collaborator scroll",
+  name: "Real Gateway collaborator scroll",
   startServerBeforeBrowser: true,
   async startServer() {
     artifactDir = createControlUiE2eArtifactDir("collaborator-scroll-real-gateway");
@@ -299,8 +299,24 @@ async function wheel(page: Page, delta: number) {
   await waitForChatScrollIdle(page);
 }
 
+async function waitForChatFollow(page: Page, renderedText: string, message: string) {
+  // Measure only after the streamed growth renders; smooth follow can outlast the
+  // default one-second poll on loaded CI hosts.
+  await expect
+    .poll(() => page.locator(".chat-pane-cache__pane--active .chat-thread").textContent(), {
+      message,
+      timeout: 15_000,
+    })
+    .toContain(renderedText);
+  await expect
+    .poll(() => chatThreadDistanceFromBottom(page), { message, timeout: 15_000 })
+    .toBeLessThanOrEqual(8);
+  await waitForChatScrollIdle(page);
+  expect(await chatThreadDistanceFromBottom(page), message).toBeLessThanOrEqual(8);
+}
+
 suite.define(() => {
-  it("only follows local submissions, preserving remote-send anchors through queue, stream, and persistence", async (context) => {
+  it("preserves reader intent through remote queue, stream, and persistence", async (context) => {
     await suite.runScenario(context, {
       retainedState: () => instance.stateDir,
       run: async () => {
@@ -474,10 +490,11 @@ suite.define(() => {
                     ),
                   )
                   .toBe(true);
-                await waitForChatScrollIdle(reader);
-                await expect
-                  .poll(() => chatThreadDistanceFromBottom(reader))
-                  .toBeLessThanOrEqual(8);
+                await waitForChatFollow(
+                  reader,
+                  mode + " paragraph 14.",
+                  mode + ": own submit follows its assistant stream",
+                );
                 if (mode.startsWith("reading")) {
                   await wheel(reader, -420);
                 }
@@ -528,15 +545,21 @@ suite.define(() => {
                       current: latest,
                     }),
                   );
-                  expect
-                    .soft(
-                      Math.abs((latest.anchor ?? Infinity) - before.anchor!),
-                      mode + ": " + stage + " anchor",
-                    )
-                    .toBeLessThanOrEqual(1);
-                  expect
-                    .soft(Math.abs(latest.top - before.top), mode + ": " + stage + " scrollTop")
-                    .toBeLessThanOrEqual(1);
+                  if (mode.startsWith("reading")) {
+                    expect
+                      .soft(
+                        Math.abs((latest.anchor ?? Infinity) - before.anchor!),
+                        mode + ": " + stage + " anchor",
+                      )
+                      .toBeLessThanOrEqual(1);
+                    expect
+                      .soft(Math.abs(latest.top - before.top), mode + ": " + stage + " scrollTop")
+                      .toBeLessThanOrEqual(1);
+                  } else {
+                    expect
+                      .soft(latest.distance, mode + ": " + stage + " follows")
+                      .toBeLessThanOrEqual(8);
+                  }
                 };
                 await checkpoint("real-pending-input");
                 await turn.append(paragraphs(mode + " continuing", 3));
@@ -603,9 +626,11 @@ suite.define(() => {
                   samples,
                   maxDrift,
                 });
-                expect
-                  .soft(maxDrift, mode + ": every animation frame retains the reading anchor")
-                  .toBeLessThanOrEqual(1);
+                if (mode.startsWith("reading")) {
+                  expect
+                    .soft(maxDrift, mode + ": every animation frame retains the reading anchor")
+                    .toBeLessThanOrEqual(1);
+                }
                 await capture("03-" + mode + "-after-remote");
                 // A deliberate local submission from real wheel scrollback must resume follow.
                 await wheel(reader, -420);
@@ -617,13 +642,11 @@ suite.define(() => {
                   .toBeLessThanOrEqual(8);
                 await expect.poll(provider.requests).toBe(local.index);
                 await local.append(paragraphs("local-resume-" + mode, 3));
-                await waitForChatScrollIdle(reader);
-                expect
-                  .soft(
-                    await chatThreadDistanceFromBottom(reader),
-                    "local submit follows its assistant stream",
-                  )
-                  .toBeLessThanOrEqual(8);
+                await waitForChatFollow(
+                  reader,
+                  "local-resume-" + mode + " paragraph 3.",
+                  mode + ": local submit follows its assistant stream",
+                );
                 await local.finish();
                 for (const page of pages) {
                   await page

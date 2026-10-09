@@ -16,7 +16,6 @@ import process from "node:process";
 import { pathToFileURL } from "node:url";
 import { promisify, stripVTControlCharacters } from "node:util";
 import { validateArtifactProducerRun } from "./full-release-artifacts.mjs";
-import { loadFlakeClassifications } from "./full-release-flake-classification.mjs";
 import {
   publicationAdmissionContract,
   publicationSourceContract,
@@ -26,9 +25,9 @@ import {
 import {
   classifyReleaseGhTransportError,
   composeReleaseChildAttemptEvidence,
+  filterReleaseAttemptEvidenceJobs,
   isReleaseGhArtifactMissingError,
   MAX_RELEASE_ARTIFACT_BYTES,
-  WINDOWS_NODE_CI_ADVISORY,
   planReleaseChildRerun,
   releaseChildSpec,
   releaseChildSpecs,
@@ -808,17 +807,6 @@ export async function inspectContinuation(plan, client, options = {}) {
         runId: child.runId,
         status: run.status,
       };
-      if (!active && child.key === "normalCi" && run.conclusion !== "success") {
-        Object.assign(
-          policyChild,
-          await client.loadFlakeClassifications({
-            child: policyChild,
-            parentRunId: plan.parentRunId,
-            parentRunAttempt: plan.parentRunAttempt,
-            targetSha: plan.targetSha,
-          }),
-        );
-      }
       const passed = !active && terminalPolicyPass(policyChild);
       return {
         compositeJobsSha256: evidence.compositeJobsSha256,
@@ -871,7 +859,7 @@ export function createClient(repository, dependencies = {}) {
   const attemptJobs =
     dependencies.getAttemptJobs ??
     ((runId, runAttempt, options) =>
-      readJobs(`actions/runs/${runId}/attempts/${runAttempt}/jobs?per_page=100`, options));
+      readJobs(`actions/runs/${runId}/attempts/${runAttempt}/jobs?per_page=25`, options));
   const verify = async (runId, plan, operationDeadline, expectedRunAttempts) => {
     const sourceSha = plan.trustedWorkflow?.sha;
     return execute(
@@ -907,9 +895,6 @@ export function createClient(repository, dependencies = {}) {
   };
   return {
     repository,
-    loadFlakeClassifications(request) {
-      return loadFlakeClassifications({ ...request, repo: repository });
-    },
     getReleaseEvidenceClient() {
       releaseEvidenceClient ??= createReleaseEvidenceClient(repository);
       return releaseEvidenceClient;
@@ -924,7 +909,7 @@ export function createClient(repository, dependencies = {}) {
       return apiJson(`actions/runs/${runId}/attempts/${runAttempt}`, options);
     },
     getParentJobs: (runId, options) =>
-      readJobs(`actions/runs/${runId}/jobs?filter=all&per_page=100`, options),
+      readJobs(`actions/runs/${runId}/jobs?filter=all&per_page=25`, options),
     async getJobLog(jobId, options) {
       // Octopool's gh shim refuses log bodies with terminal escape sequences even off a TTY;
       // real gh ignores the flag off-TTY, so the controller works with either binary.
@@ -1426,10 +1411,8 @@ function reportChildRerun(child, rerun, log) {
 function duplicateJobNames(jobs) {
   const seen = new Set();
   const duplicates = new Set();
-  for (const job of jobs) {
-    if (!(job.status === "completed" && job.conclusion === "skipped")) {
-      (seen.has(job.name) ? duplicates : seen).add(job.name);
-    }
+  for (const job of filterReleaseAttemptEvidenceJobs(jobs)) {
+    (seen.has(job.name) ? duplicates : seen).add(job.name);
   }
   return [...duplicates].toSorted((left, right) => left.localeCompare(right));
 }
@@ -2420,14 +2403,9 @@ function failedJobEvent(owner, job, attempt) {
   }
   const labels = Array.isArray(job.labels) && job.labels.length > 0 ? job.labels.join(",") : "none";
   const runner = job.runner_name ? ` / ${job.runner_name}` : "";
-  const advisory =
-    owner === WINDOWS_NODE_CI_ADVISORY.child &&
-    WINDOWS_NODE_CI_ADVISORY.jobNamePattern.test(job.name)
-      ? ` [advisory ${WINDOWS_NODE_CI_ADVISORY.id}]`
-      : "";
   return [
     `job:${job.id}`,
-    `${owner} job "${job.name}" ${job.conclusion}${advisory} (attempt ${job.run_attempt ?? attempt}; runner ${labels}${runner})`,
+    `${owner} job "${job.name}" ${job.conclusion} (attempt ${job.run_attempt ?? attempt}; runner ${labels}${runner})`,
     job.html_url,
   ];
 }
@@ -2548,7 +2526,7 @@ async function pollRelease(state, client, pending, readOptions) {
         const final =
           (attempt < current || done) &&
           jobs.length > 0 &&
-          jobs.every((job) => job.status === "completed");
+          filterReleaseAttemptEvidenceJobs(jobs).every((job) => job.status === "completed");
         scansComplete &&= final;
         for (const job of jobs) {
           const failure = failedJobEvent(child.key, job, attempt);

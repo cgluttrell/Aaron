@@ -364,7 +364,12 @@ if (kind === "signal") { process.stderr.write(refusal + " fixture\\n"); process.
 if (kind === "held-unrelated") await waitForControl(controlUrl + "/wait");
 if (kind === "unrelated" || kind === "held-unrelated") { process.stderr.write("unrelated startup failure\\n"); process.exit(1); }
 const server = createServer(async (req, res) => {
-  if (req.url === "/readyz" && kind === "held-ready") await waitForControl(controlUrl + "/wait");
+  if (req.url === "/startupz") {
+    if (kind === "held-ready") await waitForControl(controlUrl + "/wait");
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, status: "started" }));
+    return;
+  }
   res.writeHead(req.url === "/readyz" ? 200 : 404, { "content-type": "application/json" });
   res.end(JSON.stringify({ ready: req.url === "/readyz" && kind !== "never-ready" }));
 });
@@ -858,17 +863,14 @@ describe("openclaw test instance", () => {
     }
   });
 
-  it.each([0, 1])(
+  it.for([0, 1])(
     "keeps claimed port offset %i unavailable while its child starts",
-    async (offset) => {
+    async (offset, { signal }) => {
       const control = await createGatewayControl();
-      const { instance, tracePath } = await createFakeGateway(
-        "held-unrelated",
-        10_000,
-        1_500,
-        control,
-      );
-      const starting = trackOperation(instance.startGateway());
+      const { instance } = await createFakeGateway("held-unrelated", 10_000, 1_500, control, {
+        signal,
+      });
+      const starting = startGatewayForPortLifecycle(instance, signal);
       await Promise.race([control.reached, starting]);
       await drainFileLockStateForTest();
       resetFileLockStateForTest();
@@ -887,10 +889,10 @@ describe("openclaw test instance", () => {
           return candidate;
         } },
       });
-      const { createOpenClawTestInstance } = await import(${JSON.stringify(new URL("./openclaw-test-instance.ts", import.meta.url).href)});
-      const fixture = await createOpenClawTestInstance({ name: "port-claim-contender", cwd: ${JSON.stringify(path.dirname(tracePath))} });
-      try { console.log(JSON.stringify({ pid: process.pid, port: fixture.port, attempted, tempRoot: await realpath(tmpdir()) })); }
-      finally { await fixture.cleanup(); }
+      const { acquireTestPortBlock } = await import(${JSON.stringify(new URL("../../src/test-utils/port-claims.ts", import.meta.url).href)});
+      const claim = await acquireTestPortBlock({ offsets: [0, 1] });
+      try { console.log(JSON.stringify({ pid: process.pid, port: claim.port, attempted, tempRoot: await realpath(tmpdir()) })); }
+      finally { await claim.release(); }
     `;
       const runContender = async (source: string) => {
         const args = [
@@ -977,6 +979,7 @@ describe("openclaw test instance", () => {
           instance.port + offset,
           instance.port + (1 - offset),
         ]);
+        expect(instance.child).toMatchObject({ exitCode: null, signalCode: null });
         control.unblock();
         await Promise.allSettled([starting]);
         await instance.cleanup();
@@ -2278,7 +2281,17 @@ describe("openclaw test instance", () => {
       .mockResolvedValueOnce(
         new Response('{"ready":false,"failing":["startup-sidecars"]}', { status: 503 }),
       )
-      .mockResolvedValueOnce(new Response('{"ready":true,"failing":[]}', { status: 200 }));
+      .mockResolvedValueOnce(
+        new Response('{"ready":true,"failing":[],"uptimeMs":60000}', { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response('{"ready":true,"failing":[],"uptimeMs":0}', { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response('{"ok":false,"status":"starting"}', { status: 503 }))
+      .mockResolvedValueOnce(
+        new Response('{"ready":true,"failing":[],"uptimeMs":0}', { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response('{"ok":true,"status":"started"}', { status: 200 }));
 
     const record = vi.fn<(diagnostic: GatewayReadinessDiagnostic) => void>();
     await expect(
@@ -2296,13 +2309,31 @@ describe("openclaw test instance", () => {
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({
         outcome: "ready",
-        lastProbe: expect.objectContaining({ attempt: 2, status: 200, ready: true }),
-        lastFailedResponse: expect.objectContaining({ attempt: 1, status: 503, ready: false }),
+        probe: "GET /readyz",
+        settlementProbe: "GET /startupz",
+        lastProbe: expect.objectContaining({
+          attempt: 4,
+          status: 200,
+          ready: true,
+          endpoint: "/startupz",
+          startupStatus: "started",
+        }),
+        lastFailedResponse: expect.objectContaining({
+          attempt: 3,
+          status: 503,
+          ready: true,
+        }),
       }),
     );
 
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(fetchImpl.mock.calls[0]?.[0]).toBe("http://127.0.0.1:12345/readyz");
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      "http://127.0.0.1:12345/readyz",
+      "http://127.0.0.1:12345/readyz",
+      "http://127.0.0.1:12345/readyz",
+      "http://127.0.0.1:12345/startupz",
+      "http://127.0.0.1:12345/readyz",
+      "http://127.0.0.1:12345/startupz",
+    ]);
   });
 
   it("bounds not-ready diagnostics without exposing response details", async () => {

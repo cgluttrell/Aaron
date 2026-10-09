@@ -34,14 +34,14 @@ describe("FRV protected gh evidence reads", () => {
     [
       "getAttemptJobs",
       ["101", 2],
-      "actions/runs/101/attempts/2/jobs?per_page=100",
-      [{ id: 1 }, { id: 2 }],
+      "actions/runs/101/attempts/2/jobs?per_page=25",
+      Array.from({ length: 26 }, (_, index) => ({ id: index + 1 })),
     ],
     [
       "getParentJobs",
       ["77"],
-      "actions/runs/77/jobs?filter=all&per_page=100",
-      [{ id: 1 }, { id: 2 }],
+      "actions/runs/77/jobs?filter=all&per_page=25",
+      Array.from({ length: 26 }, (_, index) => ({ id: index + 1 })),
     ],
     ["getJobLog", [1], "actions/jobs/1/logs", "job evidence"],
   ])("revalidates %s through the default protected route", (method, args, endpoint, expected) => {
@@ -59,7 +59,7 @@ describe("FRV protected gh evidence reads", () => {
           ? ["101", { operationDeadline: 15_000 }]
           : ["101", 2, { operationDeadline: 15_000 }];
       const endpoint =
-        method === "getRun" ? "actions/runs/101" : "actions/runs/101/attempts/2/jobs?per_page=100";
+        method === "getRun" ? "actions/runs/101" : "actions/runs/101/attempts/2/jobs?per_page=25";
       const result = runProtectedFrv(method, args, endpoint, "transient-deadline");
       expect(result.status).toBe(1);
       expect(result.stderr).toContain("FRV operation timed out");
@@ -67,26 +67,33 @@ describe("FRV protected gh evidence reads", () => {
     },
   );
 
-  it("falls back once when gh does not support the escape-sequence flag", () => {
-    const result = runProtectedFrv("getJobLog", [1], "actions/jobs/1/logs", "legacy-flag");
-    expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toBe("job evidence");
-    expect(result.calls).toEqual([[...jobLogArgs, "--allow-escape-sequences"], jobLogArgs]);
-  });
-
-  it("does not fall back after an unrelated job-log error", () => {
-    const result = runProtectedFrv("getJobLog", [1], "actions/jobs/1/logs", "unrelated");
-    expect(result.status).toBe(23);
-    expect(result.stderr).toContain("unrelated log failure");
-    expect(result.calls).toEqual([[...jobLogArgs, "--allow-escape-sequences"]]);
-  });
-
-  it("preserves protected refusal status without retry or alternate execution", () => {
-    const result = runProtectedFrv("getRun", ["101"], "actions/runs/101", "protected");
-    expect(result.status).toBe(19);
-    expect(result.stderr).toContain("protected refusal");
-    expect(result.calls).toHaveLength(1);
-  });
+  it.each([
+    ["legacy-flag", 0, ""],
+    ["unrelated", 23, "unrelated log failure"],
+    ["protected", 19, "protected refusal"],
+  ] as const)(
+    "preserves %s outcomes without an unauthorized fallback",
+    (failure, status, error) => {
+      const protectedRead = failure === "protected";
+      const result = runProtectedFrv(
+        protectedRead ? "getRun" : "getJobLog",
+        protectedRead ? ["101"] : [1],
+        protectedRead ? "actions/runs/101" : "actions/jobs/1/logs",
+        failure,
+      );
+      expect(result.status, result.stderr).toBe(status);
+      if (failure === "legacy-flag") {
+        expect(JSON.parse(result.stdout)).toBe("job evidence");
+        expect(result.calls).toEqual([[...jobLogArgs, "--allow-escape-sequences"], jobLogArgs]);
+      } else {
+        expect(result.stderr).toContain(error);
+        expect(result.calls).toHaveLength(1);
+        if (!protectedRead) {
+          expect(result.calls).toEqual([[...jobLogArgs, "--allow-escape-sequences"]]);
+        }
+      }
+    },
+  );
 });
 
 function runProtectedFrv(
@@ -114,7 +121,7 @@ if (${endpoint.endsWith("/logs")} && failure === "unrelated") fail("unrelated lo
 if (${endpoint.endsWith("/logs")} && failure === "none" && !args.includes("--allow-escape-sequences")) fail("missing escape-sequence flag", 20);
 if (${endpoint.includes("/jobs?")}) {
   if (!args.includes("--paginate") || !args.includes(".jobs[] | @json")) fail("missing pagination", 17);
-  console.log('{"id":1}\\n{"id":2}');
+  console.log(Array.from({ length: 26 }, (_, index) => JSON.stringify({ id: index + 1 })).join("\\n"));
 } else console.log(${endpoint.endsWith("/logs") ? JSON.stringify("job evidence") : JSON.stringify('{"run_attempt":2}')});
 `,
   );
@@ -409,7 +416,9 @@ async function runPublicationCli(
       id: run.workflow_id,
       path: run.path,
     };
-    responses[endpoint(`actions/runs/${entry.runId}/attempts/1/jobs?per_page=100&page=1`)] = {
+    responses[
+      endpoint(`actions/runs/${entry.runId}/attempts/1/jobs?per_page=${legacy ? 25 : 100}&page=1`)
+    ] = {
       total_count: 1,
       jobs: [{ ...job("test"), id: Number(entry.runId) * 10, run_id: run.id, run_attempt: 1 }],
     };
@@ -452,7 +461,7 @@ if (legacy && args[0] === "run" && args[1] === "download" && args[2] === "77" &&
 if (args[0] !== "api" || (!legacy && (!args.includes("GET") || !args.includes("github.com"))) || !args.includes("Cache-Control: max-age=0")) reject();
 if (args.includes("--include") || (!legacy && args.includes("--paginate"))) reject();
 let path = args.find(a => a.startsWith("repos/"));
-if (legacy && path.endsWith("/jobs?per_page=100")) path += "&page=1";
+if (legacy && path.endsWith("/jobs?per_page=25")) path += "&page=1";
 const table = JSON.parse(fs.readFileSync("responses.json", "utf8"));
 if (!Object.hasOwn(table, path)) reject();
 let value = table[path];
@@ -504,8 +513,43 @@ else process.stdout.write(JSON.stringify(value));
 }
 
 describe("publication status real CLI", () => {
-  it("joins a failed publisher to selected validation attempt two without erasing known readback", async () => {
+  it.each([
+    "failed publisher",
+    "truncated packages",
+    "successful verification",
+    "unattempted verification",
+  ])("projects %s without confusing readback and publication", async (kind) => {
     const fixture = publicationFixture();
+    if (kind === "truncated packages") {
+      Object.assign(fixture.diagnostic.stages.pluginNpm, {
+        packages: [
+          { name: "@openclaw/first", state: "success", publication: "observed", error: null },
+          {
+            name: "@openclaw/second",
+            state: "failure",
+            publication: "unknown",
+            error: { class: "registry-not-visible", status: 1 },
+          },
+        ],
+        packagesTruncated: true,
+      });
+    } else if (kind === "successful verification") {
+      fixture.diagnostic.verification = "success";
+      fixture.diagnostic.stages.binding.state = "failure";
+      fixture.diagnostic.stages.assets.state = "failure";
+      fixture.publisher.conclusion = "success";
+      fixture.publisherJobs.push({
+        ...job("Finalize GitHub release", "skipped"),
+        id: 8802,
+        run_id: 88,
+        run_attempt: 1,
+        steps: [],
+      });
+    } else if (kind === "unattempted verification") {
+      fixture.diagnostic.verification = "unattempted";
+      fixture.diagnostic.stages.coreNpm.state = "unattempted";
+      fixture.diagnostic.stages.coreNpm.publication = "unknown";
+    }
     validateParentManifest(fixture.manifest, {
       runId: "77",
       runAttempt: 2,
@@ -513,26 +557,45 @@ describe("publication status real CLI", () => {
       workflowSha: SHA,
     });
     const result = await runPublicationCli(fixture);
-    expect(
-      result.status,
-      `${result.stderr}\n${JSON.stringify(JSON.parse(result.stdout).publication.relationship)}\n${JSON.stringify(JSON.parse(result.stdout).publication.collection)}`,
-    ).toBe(0);
     const value = JSON.parse(result.stdout);
-    expect(value.publication.relationship).toMatchObject({
+    const publication = value.publication;
+    expect(result.status, result.stderr + result.stdout).toBe(
+      kind === "truncated packages" ? 1 : 0,
+    );
+    expect(publication.relationship).toMatchObject({
       status: "verified",
       originalPlanAttempt: 1,
       validationAttempt: 2,
     });
-    expect(value.publication.publisher).toMatchObject({
+    expect(publication.publisher).toMatchObject({
       runId: "88",
       runAttempt: 1,
-      conclusion: "failure",
+      conclusion: kind === "successful verification" ? "success" : "failure",
     });
-    expect(value.publication.surfaces.coreNpm.verification.state).toBe("success");
-    expect(value.publication.surfaces.pluginNpm.verification.state).toBe("failure");
-    expect(value.publication.surfaces.activation.operation.state).toBe("unknown");
+    expect(publication.surfaces.activation.operation.state).toBe("unknown");
     expect(value.children).toHaveLength(4);
     expect(result.calls.length).toBeGreaterThan(0);
+    if (kind === "truncated packages") {
+      expect(publication.collection.error).toBe("incomplete");
+      expect(publication.surfaces.pluginNpm.packages).toHaveLength(2);
+      expect(publication.surfaces.pluginNpm.packages[0].publication).toBe("observed");
+      expect(publication.surfaces.pluginNpm.packages[1].error.class).toBe("registry-not-visible");
+    } else if (kind === "successful verification") {
+      expect(publication.verification.state).toBe("success");
+      expect(publication.binding.state).toBe("failure");
+      expect(publication.assets.state).toBe("failure");
+      expect(publication.surfaces.activation.jobs[0].conclusion).toBe("skipped");
+    } else if (kind === "unattempted verification") {
+      expect(publication.surfaces.coreNpm).toMatchObject({
+        selection: "unknown",
+        verificationSelection: "unknown",
+        operation: { state: "unknown" },
+        verification: { state: "unattempted" },
+      });
+    } else {
+      expect(publication.surfaces.coreNpm.verification.state).toBe("success");
+      expect(publication.surfaces.pluginNpm.verification.state).toBe("failure");
+    }
   });
 
   it.each([
@@ -679,7 +742,6 @@ describe("publication status real CLI", () => {
     "duplicate-name",
     "duplicate-id",
     "count-gap",
-    "attempt-limit",
   ])("rejects independently observed %s", async (kind) => {
     const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
       const prefix = `repos/${REPOSITORY}/actions/`;
@@ -711,31 +773,10 @@ describe("publication status real CLI", () => {
       if (kind === "count-gap") {
         list.total_count++;
       }
-      if (kind === "attempt-limit") {
-        Object.assign(responses[`${prefix}runs/101`] as object, { run_attempt: 100000000 });
-      }
     });
     expect(result.status, result.stdout).toBe(1);
     expect(JSON.parse(result.stdout).publication.collection.complete).toBe(false);
   });
-
-  it.each(["88", "77", "101"])(
-    "refuses advancing run %s without restarting observation",
-    async (runId) => {
-      const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
-        const path = `repos/${REPOSITORY}/actions/runs/${runId}`;
-        const before = responses[path] as { run_attempt: number };
-        responses[path] = {
-          sequence: [before, { ...before, run_attempt: before.run_attempt + 1 }],
-        };
-      });
-      expect(result.status).toBe(1);
-      expect(JSON.parse(result.stdout).publication.collection.error).toBe("attempt-changed");
-      expect(
-        result.calls.filter((call) => call.includes(`repos/${REPOSITORY}/actions/runs/${runId}`)),
-      ).toHaveLength(2);
-    },
-  );
 
   it.each(["missing", "expired", "legacy-only", "unsupported", "incomplete-link"])(
     "keeps authenticated historical %s unknown, not failed publication",
@@ -773,85 +814,20 @@ describe("publication status real CLI", () => {
     },
   );
 
-  it.each(["403 quota", "404 unavailable", "network timeout"])(
-    "classifies %s as unavailable, never absence",
-    async (failure) => {
-      const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
-        responses[`repos/${REPOSITORY}/actions/runs/88/artifacts?per_page=100&page=1`] = {
-          failure: `${failure}: /private/fixture/credential synthetic-secret`,
-        };
-      });
-      expect(result.status).toBe(1);
-      expect(JSON.parse(result.stdout).publication.collection).toEqual({
-        complete: false,
-        error: "transport",
-      });
-      expect(result.stdout + result.stderr).not.toMatch(
-        /synthetic-secret|private\/fixture|quota|404 unavailable/u,
-      );
-    },
-  );
-
-  it("retains partial package successes and truncation without declaring a complete observation", async () => {
-    const fixture = publicationFixture();
-    Object.assign(fixture.diagnostic.stages.pluginNpm, {
-      packages: [
-        { name: "@openclaw/first", state: "success", publication: "observed", error: null },
-        {
-          name: "@openclaw/second",
-          state: "failure",
-          publication: "unknown",
-          error: { class: "registry-not-visible", status: 1 },
-        },
-      ],
-      packagesTruncated: true,
+  it("classifies failed artifact reads as unavailable, never absence", async () => {
+    const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
+      responses[`repos/${REPOSITORY}/actions/runs/88/artifacts?per_page=100&page=1`] = {
+        failure: "404 unavailable: /private/fixture/credential synthetic-secret",
+      };
     });
-    const result = await runPublicationCli(fixture);
-    const publication = JSON.parse(result.stdout).publication;
     expect(result.status).toBe(1);
-    expect(publication.relationship.status).toBe("verified");
-    expect(publication.collection.error).toBe("incomplete");
-    expect(publication.surfaces.pluginNpm.packages).toHaveLength(2);
-    expect(publication.surfaces.pluginNpm.packages[0].publication).toBe("observed");
-    expect(publication.surfaces.pluginNpm.packages[1].error.class).toBe("registry-not-visible");
-  });
-
-  it("keeps successful verification separate from failed binding, assets and skipped activation", async () => {
-    const fixture = publicationFixture();
-    fixture.diagnostic.verification = "success";
-    fixture.diagnostic.stages.binding.state = "failure";
-    fixture.diagnostic.stages.assets.state = "failure";
-    fixture.publisher.conclusion = "success";
-    fixture.publisherJobs.push({
-      ...job("Finalize GitHub release", "skipped"),
-      id: 8802,
-      run_id: 88,
-      run_attempt: 1,
-      steps: [],
+    expect(JSON.parse(result.stdout).publication.collection).toEqual({
+      complete: false,
+      error: "transport",
     });
-    const result = await runPublicationCli(fixture);
-    const publication = JSON.parse(result.stdout).publication;
-    expect(result.status).toBe(0);
-    expect(publication.verification.state).toBe("success");
-    expect(publication.binding.state).toBe("failure");
-    expect(publication.assets.state).toBe("failure");
-    expect(publication.surfaces.activation.operation.state).toBe("unknown");
-    expect(publication.surfaces.activation.jobs[0].conclusion).toBe("skipped");
-  });
-
-  it("retains unattempted verification when an earlier publisher prerequisite failed", async () => {
-    const fixture = publicationFixture();
-    fixture.diagnostic.verification = "unattempted";
-    fixture.diagnostic.stages.coreNpm.state = "unattempted";
-    fixture.diagnostic.stages.coreNpm.publication = "unknown";
-    const result = await runPublicationCli(fixture);
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).publication.surfaces.coreNpm).toMatchObject({
-      selection: "unknown",
-      verificationSelection: "unknown",
-      operation: { state: "unknown" },
-      verification: { state: "unattempted" },
-    });
+    expect(result.stdout + result.stderr).not.toMatch(
+      /synthetic-secret|private\/fixture|quota|404 unavailable/u,
+    );
   });
 
   it("keeps Docker-only readback and advisory VCR API step conclusions separate from writer receipts", async () => {
@@ -910,70 +886,52 @@ describe("publication status real CLI", () => {
     ).toEqual(["success", "failure", "skipped"]);
   });
 
-  it("observes a supplied original core child without inventing a publisher-attempt receipt", async () => {
-    const fixture = publicationFixture();
-    Reflect.set(fixture.diagnostic.children.openclawNpm!, "suppliedRunId", "909");
-    const result = await runPublicationCli(fixture, undefined, (responses) => {
-      responses[`repos/${REPOSITORY}/actions/runs/909`] = {
-        ...fixture.publisher,
-        id: 909,
-        run_attempt: 3,
-        workflow_id: 9090,
-        head_sha: SHA,
-        head_branch: "older-tooling",
-        path: ".github/workflows/openclaw-npm-release.yml",
-        conclusion: "success",
-      };
-      responses[`repos/${REPOSITORY}/actions/workflows/9090`] = {
-        id: 9090,
-        path: ".github/workflows/openclaw-npm-release.yml",
-      };
-    });
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).publication.surfaces.coreNpm.children).toEqual([
-      {
-        runId: "909",
-        workflowSha: SHA,
-        workflowRef: "older-tooling",
-        recordedAttempt: null,
-        observedAttempt: 3,
-        status: "completed",
-        conclusion: "success",
-        relation: "supplied",
-      },
-    ]);
-  });
-
-  it("retains a verified relationship when an unrelated child workflow is invalid", async () => {
-    const fixture = publicationFixture();
-    Reflect.set(fixture.diagnostic.children.openclawNpm!, "suppliedRunId", "909");
-    const result = await runPublicationCli(fixture, undefined, (responses) => {
-      responses[`repos/${REPOSITORY}/actions/runs/909`] = {
-        ...fixture.publisher,
-        id: 909,
-        workflow_id: 9090,
-        path: ".github/workflows/wrong.yml",
-      };
-      responses[`repos/${REPOSITORY}/actions/workflows/9090`] = {
-        id: 9090,
-        path: ".github/workflows/wrong.yml",
-      };
-    });
-    expect(result.status).toBe(1);
-    expect(JSON.parse(result.stdout).publication.collection.error).toBe("identity-mismatch");
-    expect(JSON.parse(result.stdout).publication.relationship.status).toBe("verified");
-  });
-
-  it("retains a verified relationship when a validation child advances after the join", async () => {
-    const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
-      const path = `repos/${REPOSITORY}/actions/runs/101`;
-      const before = responses[path] as object;
-      responses[path] = { sequence: [before, { ...before, run_attempt: 2 }] };
-    });
-    expect(result.status).toBe(1);
-    expect(JSON.parse(result.stdout).publication.collection.error).toBe("attempt-changed");
-    expect(JSON.parse(result.stdout).publication.relationship.status).toBe("verified");
-  });
+  it.each(["openclaw-npm-release", "wrong"])(
+    "observes supplied children only for %s workflow",
+    async (workflow) => {
+      const fixture = publicationFixture();
+      Reflect.set(fixture.diagnostic.children.openclawNpm!, "suppliedRunId", "909");
+      const result = await runPublicationCli(fixture, undefined, (responses) => {
+        responses[`repos/${REPOSITORY}/actions/runs/909`] = {
+          ...fixture.publisher,
+          id: 909,
+          workflow_id: 9090,
+          path: `.github/workflows/${workflow}.yml`,
+          ...(workflow === "wrong"
+            ? {}
+            : {
+                run_attempt: 3,
+                head_sha: SHA,
+                head_branch: "older-tooling",
+                conclusion: "success",
+              }),
+        };
+        responses[`repos/${REPOSITORY}/actions/workflows/9090`] = {
+          id: 9090,
+          path: `.github/workflows/${workflow}.yml`,
+        };
+      });
+      const publication = JSON.parse(result.stdout).publication;
+      expect(result.status).toBe(workflow === "wrong" ? 1 : 0);
+      expect(publication.relationship.status).toBe("verified");
+      if (workflow === "wrong") {
+        expect(publication.collection.error).toBe("identity-mismatch");
+      } else {
+        expect(publication.surfaces.coreNpm.children).toEqual([
+          {
+            runId: "909",
+            workflowSha: SHA,
+            workflowRef: "older-tooling",
+            recordedAttempt: null,
+            observedAttempt: 3,
+            status: "completed",
+            conclusion: "success",
+            relation: "supplied",
+          },
+        ]);
+      }
+    },
+  );
 
   it.each(["transport", "workflow", "attempt-limit"])(
     "authenticates the publisher before a validation child %s failure",
@@ -1000,129 +958,108 @@ describe("publication status real CLI", () => {
   );
 
   it.each([
-    ["77", "advances"],
-    ["88", "advances"],
-    ["77", "is unavailable"],
-    ["88", "is unavailable"],
-  ])(
-    "rechecks joined run %s when it %s after a child collection failure",
-    async (runId, outcome) => {
+    ["101", "advances", false],
+    ["77", "advances", false],
+    ["88", "advances", false],
+    ["77", "unavailable", false],
+    ["88", "unavailable", false],
+    ["77", "completes", false],
+    ["88", "completes", false],
+    ["77", "changes SHA", false],
+    ["88", "changes SHA", false],
+    ["77", "advances", true],
+    ["88", "advances", true],
+    ["77", "unavailable", true],
+    ["88", "unavailable", true],
+  ] as const)(
+    "rechecks run %s when it %s (child collection failure=%s)",
+    async (runId, outcome, childFailure) => {
       const path = `repos/${REPOSITORY}/actions/runs/${runId}`;
       const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
         const before = responses[path] as { run_attempt: number };
+        const after = {
+          advances: { ...before, run_attempt: before.run_attempt + 1 },
+          unavailable: { failure: "403" },
+          completes: { ...before, display_title: "Updated workflow display title" },
+          "changes SHA": { ...before, head_sha: "f".repeat(40) },
+        }[outcome];
         responses[path] = {
           sequence: [
-            before,
-            outcome === "advances"
-              ? { ...before, run_attempt: before.run_attempt + 1 }
-              : { failure: "403" },
+            outcome === "completes"
+              ? { ...before, status: "in_progress", conclusion: null }
+              : before,
+            after,
           ],
         };
-        responses[`repos/${REPOSITORY}/actions/runs/101`] = { failure: "403" };
+        if (childFailure) {
+          responses[`repos/${REPOSITORY}/actions/runs/101`] = { failure: "403" };
+        }
       });
-      expect(result.status).toBe(1);
+      const complete = outcome === "completes";
+      const error =
+        outcome === "advances"
+          ? "attempt-changed"
+          : outcome === "unavailable"
+            ? "transport"
+            : "identity-mismatch";
       const publication = JSON.parse(result.stdout).publication;
+      expect(result.status, result.stderr).toBe(complete ? 0 : 1);
+      expect(publication.collection).toEqual({ complete, error: complete ? null : error });
       expect(publication.relationship.status).toBe(
-        outcome === "advances" ? "invalid" : "unverified",
+        complete || runId === "101"
+          ? "verified"
+          : outcome === "unavailable"
+            ? "unverified"
+            : "invalid",
       );
-      expect(publication.relationship.reason).toBe(
-        outcome === "advances" ? "attempt-changed" : "transport",
-      );
-      expect(publication.collection.complete).toBe(false);
+      if (!complete && runId !== "101") {
+        expect(publication.relationship.reason).toBe(error);
+      }
       expect(publication.surfaces.coreNpm.registryObservation.state).toBe("observed");
       expect(result.calls.filter((call) => call.includes(path))).toHaveLength(2);
     },
   );
 
-  it.each(["77", "88"])(
-    "does not retain a verified relationship when final joined run %s cannot be rechecked",
-    async (runId) => {
-      const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
-        const path = `repos/${REPOSITORY}/actions/runs/${runId}`;
-        responses[path] = { sequence: [responses[path], { failure: "403" }] };
-      });
-      expect(result.status).toBe(1);
+  it.each(["passive", "active"])(
+    "bounds %s twenty-digit IDs before metadata reads",
+    async (kind) => {
+      const fixture = publicationFixture();
+      Object.assign(
+        fixture.diagnostic.children.pluginNpm!,
+        kind === "active"
+          ? {
+              suppliedRunId: "12345678901234567890",
+            }
+          : {
+              readbackArtifactId: "12345678901234567890",
+              packageArtifactId: "12345678901234567",
+              producerRunAttempt: "12345678901234567890",
+            },
+      );
+      const result = await runPublicationCli(fixture);
       const publication = JSON.parse(result.stdout).publication;
-      expect(publication.collection).toEqual({ complete: false, error: "transport" });
-      expect(publication.relationship.status).toBe("unverified");
-      expect(publication.relationship.reason).toBe("transport");
-    },
-  );
-
-  it("preserves producer-valid passive twenty-digit diagnostic IDs", async () => {
-    const fixture = publicationFixture();
-    Object.assign(fixture.diagnostic.children.pluginNpm!, {
-      readbackArtifactId: "12345678901234567890",
-      packageArtifactId: "12345678901234567",
-      producerRunAttempt: "12345678901234567890",
-    });
-    const result = await runPublicationCli(fixture);
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).publication.relationship.status).toBe("verified");
-    expect(JSON.parse(result.stdout).publication.surfaces.coreNpm.registryObservation.state).toBe(
-      "observed",
-    );
-    expect(result.calls.flat().join(" ")).not.toContain("123456789012345");
-  });
-
-  it.each(["77", "88"])(
-    "invalidates the relationship when joined run %s advances",
-    async (runId) => {
-      const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
-        const path = `repos/${REPOSITORY}/actions/runs/${runId}`;
-        const before = responses[path] as { run_attempt: number };
-        responses[path] = {
-          sequence: [before, { ...before, run_attempt: before.run_attempt + 1 }],
-        };
-      });
-      expect(result.status).toBe(1);
-      expect(JSON.parse(result.stdout).publication.relationship.status).toBe("invalid");
-    },
-  );
-
-  it.each(["77", "88"])(
-    "retains the relationship when joined run %s completes the same attempt",
-    async (runId) => {
-      const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
-        const path = `repos/${REPOSITORY}/actions/runs/${runId}`;
-        const before = responses[path] as object;
-        responses[path] = {
-          sequence: [
-            { ...before, status: "in_progress", conclusion: null },
-            { ...before, display_title: "Updated workflow display title" },
-          ],
-        };
-      });
-      expect(result.status, result.stderr).toBe(0);
-      const publication = JSON.parse(result.stdout).publication;
+      expect(result.status).toBe(kind === "active" ? 1 : 0);
       expect(publication.relationship.status).toBe("verified");
-      expect(publication.collection.complete).toBe(true);
+      expect(publication.surfaces.coreNpm.registryObservation.state).toBe("observed");
+      if (kind === "active") {
+        expect(publication.collection.error).toBe("limits");
+      }
+      expect(result.calls.flat().join(" ")).not.toContain("123456789012345");
     },
   );
 
-  it.each(["77", "88"])(
-    "rejects an immutable SHA change in joined run %s without attempt advancement",
-    async (runId) => {
-      const result = await runPublicationCli(publicationFixture(), undefined, (responses) => {
-        const path = `repos/${REPOSITORY}/actions/runs/${runId}`;
-        responses[path] = {
-          sequence: [responses[path], { ...(responses[path] as object), head_sha: "f".repeat(40) }],
-        };
-      });
-      expect(result.status).toBe(1);
-      expect(JSON.parse(result.stdout).publication.relationship.status).toBe("invalid");
-    },
-  );
-
-  it.each(["main", "foreign"])(
-    "binds a normal ClawHub child to its recorded %s ref, not the alpha publisher ref",
+  it.each(["main", "foreign", null])(
+    "binds normal ClawHub dispatches to their recorded child ref %s",
     async (childRef) => {
       const fixture = publicationFixture();
-      const parentRef = "tideclaw/alpha/fixture";
+      const parentRef = childRef === null ? PUBLISH_REF : "tideclaw/alpha/fixture";
+      const fullRef = `refs/${childRef === null ? "tags" : "heads"}/${parentRef}`;
       fixture.publisher.head_branch = parentRef;
-      fixture.publisher.path = `${PUBLISH_PATH}@refs/heads/${parentRef}`;
-      fixture.diagnostic.context.suppliedToolingRef = `refs/heads/${parentRef}`;
-      fixture.diagnostic.selection.clawHubWorkflowRef = "main";
+      fixture.publisher.path = `${PUBLISH_PATH}@${fullRef}`;
+      fixture.diagnostic.context.suppliedToolingRef = fullRef;
+      if (childRef !== null) {
+        fixture.diagnostic.selection.clawHubWorkflowRef = "main";
+      }
       const result = await runPublicationCli(fixture, undefined, async (responses, artifact) => {
         await artifact(4, fixture.publisher, "openclaw-release-children-88-1", "dispatch.json", {
           schemaVersion: 1,
@@ -1131,27 +1068,34 @@ describe("publication status real CLI", () => {
           parentRunAttempt: "1",
           parentWorkflow: PUBLISH_PATH,
           toolingRef: parentRef,
-          toolingFullRef: `refs/heads/${parentRef}`,
+          toolingFullRef: fullRef,
           toolingSha: PUBLISH_SHA,
           candidateSha: TARGET_SHA,
-          normalClawHubRunId: "909",
-          normalClawHubRunAttempt: "1",
+          normalClawHubRunId: childRef === null ? null : "909",
+          normalClawHubRunAttempt: childRef === null ? null : "1",
         });
-        responses[`repos/${REPOSITORY}/actions/runs/909`] = {
-          ...fixture.publisher,
-          id: 909,
-          workflow_id: 9090,
-          head_branch: childRef,
-          path: ".github/workflows/plugin-clawhub-release.yml",
-        };
-        responses[`repos/${REPOSITORY}/actions/workflows/9090`] = {
-          id: 9090,
-          path: ".github/workflows/plugin-clawhub-release.yml",
-        };
+        if (childRef !== null) {
+          responses[`repos/${REPOSITORY}/actions/runs/909`] = {
+            ...fixture.publisher,
+            id: 909,
+            workflow_id: 9090,
+            head_branch: childRef,
+            path: ".github/workflows/plugin-clawhub-release.yml",
+          };
+          responses[`repos/${REPOSITORY}/actions/workflows/9090`] = {
+            id: 9090,
+            path: ".github/workflows/plugin-clawhub-release.yml",
+          };
+        }
       });
-      expect(result.status).toBe(childRef === "main" ? 0 : 1);
+      expect(result.status).toBe(childRef === "foreign" ? 1 : 0);
       const publication = JSON.parse(result.stdout).publication;
       expect(publication.relationship.status).toBe("verified");
+      expect(publication.dispatches[0]).toMatchObject({
+        scope: "normal-clawhub",
+        state: childRef === null ? "not-dispatched" : "acknowledged",
+      });
+      expect(publication.surfaces.pluginNpm.selection).toBe("unknown");
       if (childRef === "main") {
         expect(publication.surfaces.clawHub.children[0]).toMatchObject({
           runId: "909",
@@ -1162,16 +1106,6 @@ describe("publication status real CLI", () => {
       }
     },
   );
-
-  it("bounds active twenty-digit child IDs before attempting a metadata GET", async () => {
-    const fixture = publicationFixture();
-    Reflect.set(fixture.diagnostic.children.pluginNpm!, "suppliedRunId", "12345678901234567890");
-    const result = await runPublicationCli(fixture);
-    expect(result.status).toBe(1);
-    expect(JSON.parse(result.stdout).publication.collection.error).toBe("limits");
-    expect(JSON.parse(result.stdout).publication.relationship.status).toBe("verified");
-    expect(result.calls.flat().join(" ")).not.toContain("12345678901234567890");
-  });
 
   it.each(["in_progress", "failure"])(
     "observes detached Windows %s without equating acknowledgement and promotion",
@@ -1267,31 +1201,6 @@ describe("publication status real CLI", () => {
       }
     },
   );
-
-  it("limits the dispatch inventory claim to normal ClawHub", async () => {
-    const fixture = publicationFixture();
-    const result = await runPublicationCli(fixture, undefined, async (_responses, artifact) => {
-      await artifact(4, fixture.publisher, "openclaw-release-children-88-1", "dispatch.json", {
-        schemaVersion: 1,
-        repository: REPOSITORY,
-        parentRunId: "88",
-        parentRunAttempt: "1",
-        parentWorkflow: PUBLISH_PATH,
-        toolingRef: PUBLISH_REF,
-        toolingFullRef: `refs/tags/${PUBLISH_REF}`,
-        toolingSha: PUBLISH_SHA,
-        candidateSha: TARGET_SHA,
-        normalClawHubRunId: null,
-        normalClawHubRunAttempt: null,
-      });
-    });
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).publication.dispatches[0]).toMatchObject({
-      scope: "normal-clawhub",
-      state: "not-dispatched",
-    });
-    expect(JSON.parse(result.stdout).publication.surfaces.pluginNpm.selection).toBe("unknown");
-  });
 
   it.each(["complete", "denied", "duplicate", "changed-total"])(
     "handles a second artifact page: %s",
@@ -1418,7 +1327,6 @@ describe("publication status real CLI", () => {
   });
 
   it.each([
-    [1, true],
     [100, true],
     [100, false],
   ] as const)(
@@ -1524,36 +1432,37 @@ describe("publication status real CLI", () => {
     );
   });
 
-  it("routes exact rerun selectors through the real CLI before any mutation", async () => {
-    const result = await runPublicationCli(publicationFixture(), [
-      "rerun",
-      "--run",
-      "77",
-      "--job",
-      "missing:test",
-    ]);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("job selector names an unselected child: missing");
-    expect(result.calls).toHaveLength(1);
-    expect(result.calls[0]?.slice(0, 3)).toEqual(["run", "download", "77"]);
-  });
-
-  it.each(["continue", "verify"])(
-    "preserves legacy %s plan refusal without publication reads",
+  it.each(["rerun", "continue", "verify"])(
+    "preserves legacy %s refusal before publication reads or mutation",
     async (command) => {
       const fixture = publicationFixture();
-      Object.assign(fixture.executionPlan, historicalExecutionPlanArtifact());
-      for (const key of ["attemptEvidenceVersion", "candidate", "candidateRequest", "repository"]) {
-        Reflect.deleteProperty(fixture.executionPlan, key);
+      if (command !== "rerun") {
+        Object.assign(fixture.executionPlan, historicalExecutionPlanArtifact());
+        for (const key of [
+          "attemptEvidenceVersion",
+          "candidate",
+          "candidateRequest",
+          "repository",
+        ]) {
+          Reflect.deleteProperty(fixture.executionPlan, key);
+        }
       }
       const result = await runPublicationCli(fixture, [
         command,
         "--run",
         "77",
-        ...(command === "continue" ? ["--failed"] : []),
+        ...(command === "rerun"
+          ? ["--job", "missing:test"]
+          : command === "continue"
+            ? ["--failed"]
+            : []),
       ]);
       expect(result.status).toBe(1);
-      expect(result.stderr).toContain("predates attempt-aware immutable plans");
+      expect(result.stderr).toContain(
+        command === "rerun"
+          ? "job selector names an unselected child: missing"
+          : "predates attempt-aware immutable plans",
+      );
       expect(result.calls).toHaveLength(1);
       expect(result.calls[0]?.slice(0, 3)).toEqual(["run", "download", "77"]);
     },

@@ -28,6 +28,8 @@ const repositoryScriptEntries = [
   "scripts/ci-production-audit.mjs!",
   // tsdown builds this private macOS app worker protocol entry by path.
   "src/node-host/mac-worker-entry.ts!",
+  // Retained beta updaters import these stable private dist entries after package replacement.
+  "src/plugins/plugin-lifecycle-lease.ts!",
   // CI imports this selector from its trusted harness inside an inline Node script.
   ".github/actions/git-owner/test-prerequisites.mjs!",
   // The frozen Node compatibility action invokes this exact-candidate repair by path.
@@ -399,6 +401,8 @@ const rootEntries = [
   "scripts/openclaw-cross-os-release-checks.ts!",
   "scripts/release-plan-producer-core.mts!",
   "scripts/release-plan-producer.mts!",
+  // The producer verifies committed bytes, then launches this module through node -e.
+  "scripts/lib/release-plan-child-runner.mjs!",
   "scripts/full-release-publication-observations.mts!",
   "scripts/release-verify-publish.ts!",
   // Spawned by the agent concurrency benchmark; no static import edge exists.
@@ -666,6 +670,9 @@ const config = {
     // Declaration companions describe executable JavaScript modules; they are not standalone roots.
     "scripts/**/*.d.{mts,ts}",
     "**/live-*.ts",
+    // This worker-thread proof entry is loaded from its test with new URL(),
+    // which Knip cannot discover as a static import.
+    "src/worker/repro-worker-connection-closing-window.ts",
     "src/shared/text/assistant-visible-text.ts",
     bundledPluginFile("telegram", "src/draft-chunking.ts"),
   ],

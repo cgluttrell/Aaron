@@ -95,6 +95,12 @@ without the capability marker fall back to installed checks, as do
 Admission selection is CLI-only: `--admission auto` is the default, and there is
 no environment-variable override.
 
+Windows candidates accept lease identities from the `2026.9.6` updater even
+when NTFS file IDs exceed JavaScript's exact numeric range. After validating
+the handoff, the candidate retains exact file and parent-directory identities;
+later replacement still stops the update. Lease read failures report their
+underlying cause instead of a parent-binding mismatch.
+
 Managed-service inspection is best effort. If the service manager is unavailable,
 including Linux hosts without systemd, the update continues and records a warning.
 It leaves unverified service definitions unchanged and skips their automatic
@@ -210,6 +216,23 @@ contains this fix. Installing a newer candidate cannot change that first hop.
 Pending package-publication recovery in either the CLI or selected service
 installation blocks writable preparation. Follow the package recovery command
 reported by the update before retrying; Doctor does not clear those artifacts.
+
+If a pnpm-owned install fails with `IO error: not a terminal`, the installed
+updater may be triggering an interactive pnpm build-approval prompt while
+capturing its output. A newer candidate cannot repair that first update.
+Follow the [manual package-manager procedure](/install/updating/update-methods#alternative-manual-npm-pnpm-or-bun),
+preserving the owning account, prefix, and state/configuration. Back up and stop
+the Gateway through its actual owner before replacing the package. For the
+installation step in a POSIX shell, supply noninteractive input:
+
+```bash
+pnpm add -g --allow-build=openclaw openclaw@VERSION </dev/null
+```
+
+Replace `VERSION` with a release containing this fix. Then run Doctor and restart
+through the same owner as described in the manual procedure. Updates driven by
+the fixed version supply noninteractive input to pnpm themselves. The recovery
+command permits OpenClaw's own install scripts without approving additional dependencies.
 
 The installed 2026.9.4 updater can refuse with `managed-service-preflight` before
 the target code runs. To reach a release containing this repair, use the
@@ -360,9 +383,12 @@ require registry requests.
 
 This metadata check does not reserve downloads. Plugin-only download, install,
 or load failures remain actionable warnings after an otherwise successful core
-update. Candidate rehearsal also reports a plugin source parse failure as a warning
-with the plugin ID, source path, and parser error, then continues checking other
-plugin entries. Valid ESM plugins can use `import.meta` during dependency inspection.
+update. Snapshot inventory runs from the staged candidate package, so it uses
+the target version's plugin inspector. Snapshot inventory and candidate Doctor
+share plugin source inspection. An unparseable entry produces a warning with the
+plugin ID, source path, and parser error while its files are copied unchanged and
+other entries are checked.
+Valid ESM plugins can use `import.meta` during dependency inspection.
 The updater preserves recorded choices and retains the previous plugin
 payload where possible. Follow the reported `openclaw plugins update <id>` command for a
 failed install or update, or `openclaw doctor --fix` for a load problem. Invalid

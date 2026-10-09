@@ -55,10 +55,10 @@ import {
 import {
   applyClaudeRequestContract,
   buildAnthropicClaudeCodeIdentity,
+  defaultsClaudeAdaptiveThinking,
   prepareClaudeNoPrefillRequestContext,
   resolveAnthropicThinkingEffort,
   resolveClaudeOpus5ModelIdentity,
-  resolveClaudeSonnet5ModelIdentity,
   resolveClaudeSonnet55ModelIdentity,
   requiresClaudeAdaptiveThinking,
   supportsClaudeAdaptiveThinking,
@@ -348,7 +348,7 @@ export const streamSimpleAnthropic: StreamFunction<
         ? "low"
         : "high"
       : options?.reasoning;
-  if (resolveClaudeOpus5ModelIdentity(model) || resolveClaudeSonnet5ModelIdentity(model)) {
+  if (defaultsClaudeAdaptiveThinking(model)) {
     return streamAnthropic(model, context, {
       ...base,
       thinkingEnabled: true,

@@ -4,7 +4,10 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
-import { classifyReleaseSnapshot } from "../../scripts/full-release-validation-policy.mjs";
+import {
+  classifyReleaseSnapshot,
+  releaseChildSpec,
+} from "../../scripts/full-release-validation-policy.mjs";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
@@ -13,13 +16,15 @@ const SHA = "a".repeat(40);
 const TARGET = "b".repeat(40);
 const PUBLISHER = "Seal full release child evidence / Seal child receipt";
 
-function fixture() {
+function fixture(role = "normalCi") {
+  const spec = releaseChildSpec(role);
+  const workflowSha = TARGET;
   const job = (id: number, name: string, conclusion: string | null = "success") => ({
     id,
     name,
     run_id: 101,
     run_attempt: 1,
-    head_sha: SHA,
+    head_sha: workflowSha,
     status: conclusion === null ? "in_progress" : "completed",
     conclusion,
     started_at: "2026-09-23T00:00:00Z",
@@ -32,10 +37,10 @@ function fixture() {
       id: 101,
       run_attempt: 1,
       event: "workflow_dispatch",
-      path: ".github/workflows/ci.yml@refs/heads/main",
-      display_title: "CI full-release-validation-77-1-ci",
+      path: `.github/workflows/${spec.workflow}@refs/heads/main`,
+      display_title: `${spec.displayName} full-release-validation-77-1${spec.suffix}`,
       head_branch: "main",
-      head_sha: SHA,
+      head_sha: workflowSha,
       status: "in_progress",
       conclusion: null,
       repository: { full_name: "openclaw/openclaw" },
@@ -43,13 +48,15 @@ function fixture() {
       actor: { login: "github-actions[bot]" },
       triggering_actor: { login: "github-actions[bot]" },
     },
-    lineage: { status: "ahead", merge_base_commit: { sha: SHA } },
     jobs,
     attempts: [jobs],
+    role,
   };
 }
 
 function seal(data = fixture(), runAttempt = 1) {
+  const role = data.role;
+  const spec = releaseChildSpec(role);
   const root = tempDirs.make("frv-child-receipt-");
   const bin = join(root, "bin");
   mkdirSync(bin);
@@ -62,7 +69,7 @@ function seal(data = fixture(), runAttempt = 1) {
     event,
     JSON.stringify({
       inputs: {
-        dispatch_id: "full-release-validation-77-1-ci",
+        dispatch_id: `full-release-validation-77-1${spec.suffix}`,
         target_ref: TARGET,
         release_scope: "full",
       },
@@ -77,12 +84,14 @@ const fixture = JSON.parse(fs.readFileSync(process.env.FRV_FIXTURE, "utf8"));
 const endpoint = process.argv.find((arg) => arg.startsWith("repos/"));
 if (endpoint === "repos/openclaw/openclaw/actions/runs/101") {
   process.stdout.write(JSON.stringify(fixture.run));
-} else if (endpoint === "repos/openclaw/openclaw/compare/${SHA}...main?per_page=1") {
-  process.stdout.write(JSON.stringify(fixture.lineage));
 } else if (endpoint.startsWith("repos/openclaw/openclaw/actions/runs/101/attempts/")) {
   const attempt = Number(endpoint.split("/").at(-2));
   const jobs = fixture.attempts[attempt - 1];
-  process.stdout.write(JSON.stringify([{total_count: jobs.length, jobs}]));
+  const pageSize = Number(new URL(endpoint, "https://example.invalid").searchParams.get("per_page"));
+  if (pageSize > 25) { console.error("HTTP 502: fixture rejects oversized job pages"); process.exit(1); }
+  const pages = [];
+  for (let offset = 0; offset < jobs.length; offset += pageSize) pages.push({ total_count: jobs.length, jobs: jobs.slice(offset, offset + pageSize) });
+  process.stdout.write(JSON.stringify(pages));
 } else {
   throw new Error("Unexpected evidence read: " + endpoint);
 }
@@ -98,7 +107,7 @@ if (endpoint === "repos/openclaw/openclaw/actions/runs/101") {
       OPENCLAW_GH_BIN: gh,
       GH_TOKEN: "synthetic-test-token",
       FRV_FIXTURE: fixturePath,
-      FRV_CHILD_ROLE: "normalCi",
+      FRV_CHILD_ROLE: role,
       FRV_CHILD_TARGET_SHA: TARGET,
       FRV_CHILD_EVIDENCE_PATH: receipt,
       GITHUB_EVENT_PATH: event,
@@ -106,7 +115,7 @@ if (endpoint === "repos/openclaw/openclaw/actions/runs/101") {
       GITHUB_REPOSITORY: "openclaw/openclaw",
       GITHUB_RUN_ID: "101",
       GITHUB_RUN_ATTEMPT: String(runAttempt),
-      GITHUB_SHA: SHA,
+      GITHUB_SHA: data.run.head_sha,
       GITHUB_REF_NAME: "main",
     },
   });
@@ -207,7 +216,7 @@ describe("full release child evidence producer", () => {
       effectiveRunAttempt: 1,
       role: "normalCi",
       targetSha: TARGET,
-      workflowSha: SHA,
+      workflowSha: TARGET,
       workloadConclusion: "success",
       inputs: { release_scope: "full", target_ref: TARGET },
       publisher: { jobId: "3", jobName: PUBLISHER },
@@ -222,6 +231,19 @@ describe("full release child evidence producer", () => {
       `artifact_name=full-release-child-evidence-${TARGET}-normalCi-101-1\n`,
     );
   });
+
+  it.each(["pluginPrereleaseIndependent", "releaseChecksCandidate"])(
+    "seals %s evidence at the exact target SHA",
+    (role) => {
+      const { result, receipt } = seal(fixture(role));
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(receipt, "utf8"))).toMatchObject({
+        role,
+        targetSha: TARGET,
+        workflowSha: TARGET,
+      });
+    },
+  );
 
   it("records a failed predecessor instead of sealing green evidence", () => {
     const data = fixture();
@@ -263,11 +285,53 @@ describe("full release child evidence producer", () => {
     ]);
   });
 
+  it.each([2000, 2001])("preserves the 2000-job inventory bound at %s jobs", (count) => {
+    const data = fixture();
+    while (data.jobs.length < count) {
+      data.jobs.push({
+        ...data.jobs[0]!,
+        id: data.jobs.length + 1,
+        name: `workload ${data.jobs.length}`,
+      });
+    }
+    const { result, receipt } = seal(data);
+    if (count === 2000) {
+      expect(result.status, result.stderr).toBe(0);
+      expect(JSON.parse(readFileSync(receipt, "utf8")).jobs).toHaveLength(count - 1);
+    } else {
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("job inventory is incomplete");
+    }
+  });
+
+  it("ignores populated runnerless queued copies of completed predecessor jobs", () => {
+    const data = fixture();
+    const completed = data.jobs[1]!;
+    const ghost = {
+      ...completed,
+      id: 4,
+      status: "queued",
+      conclusion: null,
+      runner_id: null,
+      runner_name: null,
+      steps: [{ name: "mirrored test", status: "completed", conclusion: "success" }],
+    };
+    data.jobs.push(ghost);
+    const { result, receipt } = seal(data);
+    expect(result.status, result.stderr).toBe(0);
+    const evidence = JSON.parse(readFileSync(receipt, "utf8"));
+    expect(evidence.workloadConclusion).toBe("success");
+    expect(
+      evidence.jobs.filter((entry: { name: string }) => entry.name === "node tests"),
+    ).toHaveLength(1);
+  });
+
   it.each([2, 3])(
     "recovers publisher-only attempt %s while carrying earlier workload evidence",
     (runAttempt) => {
       const data = fixture();
       data.run.run_attempt = runAttempt;
+      data.run.status = "queued";
       data.run.triggering_actor.login = "release-maintainer";
       data.jobs[2]!.status = "completed";
       data.jobs[2]!.conclusion = "failure";
@@ -304,16 +368,23 @@ describe("full release child evidence producer", () => {
 
   it.each([
     {
-      name: "workflow outside main ancestry",
+      name: "workflow SHA different from the target",
       mutate: (data: ReturnType<typeof fixture>) => {
-        data.lineage.status = "diverged";
+        data.run.head_sha = SHA;
       },
-      error: "not a main ancestor",
+      error: "does not match the target SHA",
     },
     {
       name: "stale run attempt",
       mutate: (data: ReturnType<typeof fixture>) => {
         data.run.run_attempt = 2;
+      },
+      error: "current active workflow attempt",
+    },
+    {
+      name: "completed aggregate run with an active publisher",
+      mutate: (data: ReturnType<typeof fixture>) => {
+        data.run.status = "completed";
       },
       error: "current active workflow attempt",
     },

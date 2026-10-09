@@ -347,6 +347,11 @@ The macOS Periphery configuration retains the native SwiftPM backend because
 Periphery 3.8 reads its `.build/debug/index/store` layout. Native test
 crashes emit noninteractive Swift backtraces, without register dumps.
 
+The shared macOS scan lets Periphery own the clean build and index selection.
+Both shared consumer jobs preserve their result and status artifacts, then exit
+with the scanner's status. A scanner crash therefore fails its producer so a
+failed-job rerun rebuilds that consumer instead of reusing its failed report.
+
 Ordinary Markdown and MDX pages under `docs/`, plus root `README.md`, retain
 their separate `check-docs` coverage beside precise pull-request Node tests.
 Page deletions and renames preserve this targeting. Explicit Node owners for
@@ -402,8 +407,8 @@ Main, including hourly `validation_tier=main` dispatches, prepares its smoke tar
 JavaScript, plugin assets, Control UI, metadata, and public SDK declarations;
 the canonical packer still runs its complete tarball integrity check. The
 scheduler consumes that tarball through `OPENCLAW_CURRENT_PACKAGE_TGZ` without
-rebuilding it. Full-tier manual and release CI retain the declaration-complete full
-package build.
+rebuilding it. Full Release Validation children use the same smoke package;
+ordinary full-tier manual CI retains the declaration-complete full package build.
 
 Ordinary canonical manual CI retains the survivor and adds
 `cron-mcp-cleanup`, `fleet-cache`, `mcp-channels`, `mcp-code-mode-gateway`, and
@@ -412,8 +417,10 @@ child in `full`, `npm-beta`, and `npm-stable` scopes. Frozen targets
 must declare the Docker seed capability; targets without `resolveDockerSeedLanes`
 retain the survivor fallback. CI loads the target's Docker tier planner directly.
 
-The scheduler retains one 16-class Blacksmith runner on eligible main pushes
-and its existing serial main/manual lane admission. Pull requests and their
+The scheduler retains one 16-class Blacksmith runner on eligible main pushes.
+Full Release Validation children also use that class when no release runner group
+is configured; hosted outage overrides and retries retain hosted recovery.
+Main, release, and ordinary manual CI retain serial weighted admission. Pull requests and their
 exact-head fallback dispatches do not select this proof. Installed-driver
 upgrade coverage remains required on every admitted canonical main run and
 ordinary manual/release CI; the existing infrastructure timeout stays unchanged.

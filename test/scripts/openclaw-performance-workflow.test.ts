@@ -840,6 +840,13 @@ describe("OpenClaw performance workflow", () => {
     expect(baseline.if).toBeUndefined();
     expect(baseline.env?.CLAWGRIT_REPORTS_TOKEN).toBeUndefined();
     expect(baseline.env?.GH_TOKEN).toBe("${{ github.token }}");
+    expect(baseline.env?.QUALIFICATION_DISPATCH).toBe(
+      "${{ startsWith(inputs.dispatch_id, 'full-release-validation-') }}",
+    );
+    expect(run).toContain("advisory-not-compared");
+    expect(run.indexOf('os.environ.get("QUALIFICATION_DISPATCH")')).toBeLessThan(
+      run.indexOf('fetch(reports, "main"'),
+    );
     expect(run).toContain('remote = "https://github.com/openclaw/clawgrit-reports.git"');
     expect(run).toContain(
       'fetch(reports, "main", blobless=True, max_attempts=3, retry_failures=True)',
@@ -1352,7 +1359,7 @@ printf '%s\\n' \
     const expectedReleaseEntries = matrixEntries.map((entry) => entry.expected_release_entries);
 
     expect(includeFilters).toEqual([
-      "scenario:fresh-install,scenario:gateway-performance,scenario:bundled-plugin-startup,scenario:agent-cold-warm-message",
+      "scenario:fresh-install,scenario:bundled-plugin-startup",
       "scenario:fresh-install,scenario:gateway-performance,scenario:agent-cold-warm-message",
       "scenario:agent-cold-warm-message",
     ]);
@@ -1365,7 +1372,7 @@ printf '%s\\n' \
     expect(runKova.run).toContain('--include "$INCLUDE_FILTERS"');
     expect(runKova.run).not.toContain("for filter in $INCLUDE_FILTERS");
     expect(expectedReleaseEntries).toEqual([
-      "fresh-install:fresh,fresh-install:onboarded-user,bundled-plugin-startup:fresh,agent-cold-warm-message:mock-openai-provider,gateway-performance:many-bundled-plugins",
+      "fresh-install:fresh,fresh-install:onboarded-user,bundled-plugin-startup:fresh",
       "fresh-install:fresh,fresh-install:onboarded-user,agent-cold-warm-message:mock-openai-provider,gateway-performance:many-bundled-plugins",
       "agent-cold-warm-message:mock-openai-provider",
     ]);

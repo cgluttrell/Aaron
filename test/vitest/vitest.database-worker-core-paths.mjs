@@ -1,5 +1,6 @@
 // These consumers need the host-owned SQLite broker, which runs in forked processes.
 export const databaseWorkerCoreTestFiles = [
+  "src/agents/embedded-agent-runner/run-orchestrator.rooted-proof.test.ts",
   "src/infra/update-run-reconciliation.worker.test.ts",
   "src/infra/update-run-interruption.worker.test.ts",
   "src/channels/turn/durable-delivery.reload.test.ts",
@@ -389,6 +390,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/agents/agent-lifecycle-registry.test.ts",
   "src/agents/mcp-config-mutation.test.ts",
   "src/agents/mcp-oauth.test.ts",
+  "src/agents/mcp-oauth-redirect.test.ts",
   "src/agents/mcp-oauth-refresh.test.ts",
   "src/agents/mcp-oauth-requesters.test.ts",
   "src/cli/mcp-cli.oauth-integration.test.ts",

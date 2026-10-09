@@ -44,13 +44,24 @@ describe("scripts/test-live-shard", () => {
       "src/gateway/gateway-codex-harness.live.test.ts",
       "test/gateway-subagent-restart.live.test.ts",
     ];
-    for (const version of ["2026.9.7", "2026.9.8"]) {
+    for (const version of ["2026.9.7", "2026.9.8", "2026.9.9"]) {
       expect(withoutReleaseWaivedLiveFiles(files, version)).toEqual([
         "src/gateway/gateway-codex-harness.live.test.ts",
       ]);
     }
-    expect(withoutReleaseWaivedLiveFiles(files, "2026.9.9")).toEqual(files);
+    expect(withoutReleaseWaivedLiveFiles(files, "2026.9.10")).toEqual(files);
     expect(withoutReleaseWaivedLiveFiles(files, undefined)).toEqual(files);
+  });
+
+  it("omits only the Gemini switch probe for 2026.9.9, retaining provider coverage", () => {
+    const files = [
+      "src/agents/google-gemini-switch.live.test.ts",
+      "src/gateway/gateway-models.profiles.live.test.ts",
+      "src/agents/minimax.live.test.ts",
+    ];
+    expect(withoutReleaseWaivedLiveFiles(files, "2026.9.9")).toEqual(files.slice(1));
+    expect(withoutReleaseWaivedLiveFiles(files, "2026.9.8")).toEqual(files);
+    expect(withoutReleaseWaivedLiveFiles(files, "2026.10.1")).toEqual(files);
   });
 
   it("discovers live tests without scanning source roots in-process", () => {
@@ -561,6 +572,50 @@ describe("scripts/test-live-shard", () => {
     expect(
       validateLiveShardReportPayload(passingPayload, expectedFiles, process.cwd(), {
         OPENCLAW_LIVE_GPT_LIVE: "1",
+      }),
+    ).toEqual({ ok: true });
+  });
+
+  it.each([
+    [
+      "extensions/llama-cpp/src/external-server/llama-server.live.test.ts",
+      { LLAMA_SERVER_LIVE_URL: "http://127.0.0.1:8080" },
+    ],
+    ["extensions/meta/meta.live.test.ts", { MODEL_API_KEY: "synthetic-model-key" }],
+    [
+      "extensions/mistral/mistral.live.test.ts",
+      { ELEVENLABS_API_KEY: "synthetic-elevenlabs-key", MISTRAL_API_KEY: "synthetic-mistral-key" },
+    ],
+  ])("requires nonempty live prerequisites before enforcing pass evidence for %s", (file, env) => {
+    const passingFile = "src/agents/openai-reasoning-compat.live.test.ts";
+    const payload = {
+      numPassedTests: 1,
+      numTotalTests: 2,
+      testResults: [
+        {
+          name: path.join(process.cwd(), passingFile),
+          assertionResults: [{ status: "passed" }],
+        },
+        {
+          name: path.join(process.cwd(), file),
+          assertionResults: [{ status: "skipped" }],
+        },
+      ],
+    };
+    const expectedFiles = [passingFile, file];
+
+    expect(validateLiveShardReportPayload(payload, expectedFiles, process.cwd(), {})).toEqual({
+      ok: true,
+    });
+    expect(validateLiveShardReportPayload(payload, expectedFiles, process.cwd(), env)).toEqual({
+      ok: false,
+      reason: `Vitest report selected live test files had no passing assertions: ${file}`,
+    });
+    const firstEnvName = Object.keys(env)[0];
+    expect(
+      validateLiveShardReportPayload(payload, expectedFiles, process.cwd(), {
+        ...env,
+        ...(firstEnvName ? { [firstEnvName]: "" } : {}),
       }),
     ).toEqual({ ok: true });
   });

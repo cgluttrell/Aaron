@@ -14,6 +14,7 @@ import { isUpdateDoctorLintPass } from "../commands/doctor/shared/update-phase.j
 import { ConfigWritePostCommitError } from "../config/io.write-errors.js";
 import { resolveConfigPath, resolveStateDir } from "../config/paths.js";
 import { formatUpdateDoctorConfigChange } from "../infra/update-doctor-config.js";
+import { retainUpdateDoctorProcesses } from "../infra/update-doctor-process-custody.js";
 import {
   captureUpdateDoctorConfigWrites,
   DoctorMaintenanceRefusalError,
@@ -31,6 +32,7 @@ import { createUpdateFailureFact } from "../infra/update-failure-facts.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { withPluginLoadDiagnostics } from "../plugins/load-diagnostics.js";
 import type { PluginDiagnostic } from "../plugins/manifest-types.js";
+import { withCommandProcessScope } from "../process/exec-spawn.js";
 import { createNonExitingRuntime, type RuntimeEnv } from "../runtime.js";
 import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { UpdateSchemaRefusalError } from "../state/openclaw-update-schema-refusal.js";
@@ -57,46 +59,53 @@ export async function runDoctorHealthFlow(
   writeAuthority?: UpdateDoctorWriteAuthority,
   databasePreflight?: DoctorDatabasePreflight,
 ) {
-  let preparedPreflight = databasePreflight;
-  if (process.env.OPENCLAW_UPDATE_IN_PROGRESS === "1" && !writeAuthority?.postCoreSchemaRepair) {
-    const { guardUpdateDoctorSchemaUpgrade, rehearseDeferredUpdateDoctorSchema } =
-      await import("../commands/doctor-update-schema-guard.js");
-    preparedPreflight =
-      (await guardUpdateDoctorSchemaUpgrade({
-        schemas: preparedPreflight,
-        runtime,
-        json: options.json,
-      })) ?? preparedPreflight;
-    if (preparedPreflight?.updateSchemaRehearsal) {
-      await rehearseDeferredUpdateDoctorSchema(preparedPreflight, runtime);
-      return;
-    }
-  }
-  const resultPath = process.env[UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV]?.trim();
-  return withPluginLoadDiagnostics((diagnostics) =>
-    resultPath
-      ? captureUpdateDoctorConfigWrites(
-          resolveConfigPath(),
-          (capture) =>
-            runDoctorHealthFlowWithResult(
-              runtime,
-              options,
-              preparedPreflight,
-              diagnostics,
-              { resultPath, capture },
-              writeAuthority,
-            ),
-          writeAuthority,
-        )
-      : runDoctorHealthFlowWithResult(
-          runtime,
-          options,
-          preparedPreflight,
-          diagnostics,
-          undefined,
-          writeAuthority,
-        ),
+  using custody = await retainUpdateDoctorProcesses(
+    writeAuthority?.assertCurrent,
+    writeAuthority?.commandAuthority,
   );
+  const run = async () => {
+    let preparedPreflight = databasePreflight;
+    if (process.env.OPENCLAW_UPDATE_IN_PROGRESS === "1" && !writeAuthority?.postCoreSchemaRepair) {
+      const { guardUpdateDoctorSchemaUpgrade, rehearseDeferredUpdateDoctorSchema } =
+        await import("../commands/doctor-update-schema-guard.js");
+      preparedPreflight =
+        (await guardUpdateDoctorSchemaUpgrade({
+          schemas: preparedPreflight,
+          runtime,
+          json: options.json,
+        })) ?? preparedPreflight;
+      if (preparedPreflight?.updateSchemaRehearsal) {
+        await rehearseDeferredUpdateDoctorSchema(preparedPreflight, runtime);
+        return;
+      }
+    }
+    const resultPath = process.env[UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV]?.trim();
+    return withPluginLoadDiagnostics((diagnostics) =>
+      resultPath
+        ? captureUpdateDoctorConfigWrites(
+            resolveConfigPath(),
+            (capture) =>
+              runDoctorHealthFlowWithResult(
+                runtime,
+                options,
+                preparedPreflight,
+                diagnostics,
+                { resultPath, capture },
+                writeAuthority,
+              ),
+            writeAuthority,
+          )
+        : runDoctorHealthFlowWithResult(
+            runtime,
+            options,
+            preparedPreflight,
+            diagnostics,
+            undefined,
+            writeAuthority,
+          ),
+    );
+  };
+  return await (custody ? withCommandProcessScope(run, undefined, custody) : run());
 }
 
 async function runDoctorHealthFlowWithResult(
@@ -132,6 +141,7 @@ async function runDoctorHealthFlowWithResult(
   let maintenance: Awaited<
     ReturnType<typeof import("../commands/doctor-maintenance.js").beginDoctorMaintenance>
   >;
+  let preparedArchiveDiscovery: DoctorDatabasePreflight["agentDatabaseMigrationDiscovery"];
   let exitCode: number | undefined;
   let healthContext: DoctorHealthFlowContext | undefined;
   let doctorResult: UpdatePostInstallDoctorResult = { status: "error" };
@@ -161,6 +171,25 @@ async function runDoctorHealthFlowWithResult(
     return true;
   };
   try {
+    if (options.repair === true || options.yes === true) {
+      try {
+        const { prepareDoctorDatabasePreflight } =
+          await import("../commands/doctor-database-preflight.js");
+        preparedArchiveDiscovery = (databasePreflight ?? (await prepareDoctorDatabasePreflight()))
+          .agentDatabaseMigrationDiscovery;
+        if (preparedArchiveDiscovery) {
+          const { prepareCanonicalTranscriptArchiveMigrations } =
+            await import("../infra/state-migrations.transcript-directives-archives.js");
+          await prepareCanonicalTranscriptArchiveMigrations(preparedArchiveDiscovery);
+        }
+      } catch (error) {
+        // Offline admission still owns repairable schema and discovery failures.
+        effectiveRuntime.log(`Archive verification preparation deferred: ${String(error)}`);
+      }
+      const { waitForCliSignalExit } = await import("../cli/signal-exit-barrier.js");
+      // Keep an accepted signal during preparation ahead of service custody.
+      await waitForCliSignalExit();
+    }
     const { beginDoctorMaintenance } = await import("../commands/doctor-maintenance.js");
     maintenance = await beginDoctorMaintenance({
       options,
@@ -205,6 +234,12 @@ async function runDoctorHealthFlowWithResult(
         databasePreflight && !refreshRecoveryInventory
           ? databasePreflight
           : await prepareDoctorDatabasePreflight();
+      if (preparedArchiveDiscovery && !schemas.agentDatabaseMigrationDiscovery) {
+        schemas = {
+          ...schemas,
+          agentDatabaseMigrationDiscovery: preparedArchiveDiscovery,
+        };
+      }
       const { recordAgentDatabaseAdmissions } =
         await import("../state/agent-database-admission.js");
       // Repair owns fresh file decisions until its migration graph finishes.
@@ -249,8 +284,30 @@ async function runDoctorHealthFlowWithResult(
         }
         const { backupDoctorMigrationDatabases } =
           await import("../commands/doctor-migration-backup.js");
+        const { createOpenClawAgentDatabasePathMatcher } =
+          await import("../state/openclaw-agent-db.paths.js");
+        const { normalizeAgentId } = await import("../routing/session-key.js");
+        const samePath = createOpenClawAgentDatabasePathMatcher();
+        const discovery = schemas.agentDatabaseMigrationDiscovery?.discovery;
+        const databasePaths = discovery?.targets
+          .filter(
+            (database) =>
+              !schemas.agentRefusals?.some(
+                (refusal) =>
+                  normalizeAgentId(refusal.agentId) === normalizeAgentId(database.agentId) &&
+                  refusal.paths.some((pathname) => samePath(pathname, database.path)),
+              ) &&
+              !schemas.indeterminate.some(
+                (failure) =>
+                  failure.kind === "agent" &&
+                  (failure.path === database.path ||
+                    discovery.sourceIdentities.get(failure.path)?.realPath === database.realPath),
+              ),
+          )
+          .map((database) => database.path);
         const backups = await backupDoctorMigrationDatabases({
           env: process.env,
+          databasePaths: databasePaths ?? [],
           pendingDatabasePaths: schemas.pendingMigrations?.map((database) => database.path) ?? [],
           verifiedSnapshots,
         });

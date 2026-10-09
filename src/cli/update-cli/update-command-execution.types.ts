@@ -9,6 +9,13 @@ import type { StagedPackageInstallUpdate } from "./update-command-package.js";
 import type { ManagedServiceRootRedirect } from "./update-command-service-context-types.js";
 import type { UpdateCommandRecoveryState } from "./update-command-service.js";
 
+export type UpdateCommandExecutionGuards = {
+  onStateHandoff: () => void;
+  admitExecutor: (acquired: UpdateRecoveryFence) => void;
+  assertCurrent: (phase?: "restore") => void;
+  assertBoundChildCurrent: () => void;
+};
+
 export type MutableUpdateExecutionParams = {
   root: string;
   installKind: "git" | "package" | "unknown";
@@ -37,6 +44,7 @@ export type MutableUpdateExecutionParams = {
   invocationCwd?: string;
   legacyConfigPlan?: LegacyConfigUpdatePlan;
   recoveryState: UpdateCommandRecoveryState;
+  executionGuards?: UpdateCommandExecutionGuards;
   prepareMutableUpdate: (
     env: NodeJS.ProcessEnv | undefined,
     activationTimeoutMs: number | undefined,

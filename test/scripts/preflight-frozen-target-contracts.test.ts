@@ -1,4 +1,4 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
   copyFileSync,
   cpSync,
@@ -14,7 +14,10 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { expandUpdateFirstHopCompatLanes } from "../../scripts/lib/update-first-hop-lanes.mjs";
+import {
+  UPDATE_FIRST_HOP_MISSING_LOAD_PATH_LANE,
+  expandUpdateFirstHopCompatLanes,
+} from "../../scripts/lib/update-first-hop-lanes.mjs";
 import { useAutoCleanupTempDirTracker } from "../helpers/temp-dir.js";
 
 const temps = useAutoCleanupTempDirTracker(afterEach);
@@ -22,6 +25,9 @@ const repo = resolve(".");
 const entrypoint = "scripts/preflight-frozen-target-contracts.mjs";
 const closure = [
   entrypoint,
+  "scripts/lib/frozen-target-workflow-request.mjs",
+  "scripts/lib/release-upgrade-baseline.mjs",
+  "scripts/lib/canonical-json.mjs",
   "scripts/lib/docker-e2e-plan.mts",
   "scripts/lib/docker-e2e-scenarios.mts",
   "scripts/lib/official-external-channel-catalog.json",
@@ -65,6 +71,13 @@ function commit(root: string, excluded: string[] = []) {
   git("add", "--", ".", ...excluded.map((path) => `:(exclude)${path}`));
   git("commit", "-qm", "fixture");
   return { root, sha: git("rev-parse", "HEAD"), git };
+}
+
+function expectRejected(result: SpawnSyncReturns<string>, error?: string) {
+  expect(result.status, result.stderr).toBe(1);
+  if (error) {
+    expect(result.stderr).toContain(error);
+  }
 }
 
 function fixture(
@@ -537,7 +550,15 @@ describe("frozen admission upgrade Docker aliases", () => {
     const result = f.run({ docker: { lanes: requestedLanes } });
     expect(result.status, result.stderr).toBe(0);
     const record = JSON.parse(result.stdout);
-    expect(record.docker).toEqual({ lanes: requestedLanes, omitted: [], status: "ADMITTED" });
+    const omitted =
+      lane === "update-first-hop-compat" ? [UPDATE_FIRST_HOP_MISSING_LOAD_PATH_LANE] : [];
+    expect(record.docker).toEqual({
+      lanes: requestedLanes
+        .filter((requested) => !omitted.includes(requested))
+        .toSorted((a, b) => a.localeCompare(b)),
+      omitted,
+      status: "ADMITTED",
+    });
     expect(record.selection.consumers).toEqual(lane === "plugins-offline" ? ["plugins"] : []);
     expect(record.contracts.map((contract: { consumer: string }) => contract.consumer)).toEqual(
       record.selection.consumers,
@@ -552,11 +573,12 @@ describe("frozen admission bootstrap repairs", () => {
 
   it.each([
     reader,
+    "scripts/lib/frozen-target-workflow-request.mjs",
+    "scripts/lib/release-upgrade-baseline.mjs",
+    "scripts/lib/release-version.mjs",
+    "scripts/lib/canonical-json.mjs",
     "scripts/lib/docker-e2e-scenarios.mts",
-    "scripts/lib/record-shared.mjs",
     shell,
-    "scripts/lib/trusted-native-typescript.mjs",
-    "scripts/lib/native-typescript.mts",
   ])("rejects dirty executable %s before any dependent code runs at unchanged HEAD", (path) => {
     const f = fixture({ "src/config/zod-schema.ts": "lastRunAt:" });
     const sentinel = join(f.root, "dependent-code-executed");
@@ -567,11 +589,9 @@ describe("frozen admission bootstrap repairs", () => {
         : `\n(await import("node:fs")).writeFileSync(${JSON.stringify(sentinel)}, "executed");\n`;
     writeFileSync(file, readFileSync(file, "utf8") + payload);
     expect(f.tooling.git("rev-parse", "HEAD")).toBe(f.tooling.sha);
-    const result = f.run({ consumers: ["onboard"] });
+    const result = f.run({ consumers: [] });
     expect(existsSync(sentinel), result.stderr).toBe(false);
-    expect(result.status, result.stderr).toBe(1);
-    expect(result.stderr).toContain(`tooling closure does not match committed source: ${path}`);
-    expect(result.stdout).toBe("");
+    expectRejected(result, `tooling closure does not match committed source: ${path}`);
   });
 
   it.each([

@@ -137,7 +137,6 @@ const realGatewayFiles = [
   "profile-page.real-gateway",
   "provider-browser-login.real-gateway",
   "quota-reset-status.real-gateway",
-  "session-pr-reader-lifetime.real-gateway",
   "session-progress-hovercard.real-gateway",
   "session-roster-request-rate.real-gateway",
   "usage-sessions-owner-attribution",
@@ -649,13 +648,6 @@ describe("Control UI E2E resource ownership", () => {
         {
           file: "ui/src/e2e/provider-browser-login.real-gateway.e2e.test.ts",
           project: "ui-e2e-serial-standalone",
-          phase: 1,
-          workers: 1,
-          fileParallelism: false,
-        },
-        {
-          file: "ui/src/e2e/session-pr-reader-lifetime.real-gateway.e2e.test.ts",
-          project: "ui-e2e-serial",
           phase: 1,
           workers: 1,
           fileParallelism: false,

@@ -842,6 +842,7 @@ src/infra/update-failure-facts.ts
 src/infra/update-failure-public-identifiers.ts
 src/infra/update-managed-service-handoff-boot.ts
 src/infra/update-managed-service-handoff-cancellation.ts
+src/infra/update-managed-service-handoff-children.ts
 src/infra/update-managed-service-handoff-cleanup.ts
 src/infra/update-managed-service-handoff-database.ts
 src/infra/update-managed-service-handoff-lease.ts
@@ -1369,6 +1370,7 @@ src/state/openclaw-state-lease-worker-storage.ts
 src/state/openclaw-state-lease-worker.ts
 src/state/openclaw-state-lease.ts
 src/state/openclaw-state-ownership.ts
+src/state/openclaw-state-ownership-worker.ts
 src/state/openclaw-state-read-error.ts
 src/state/openclaw-state-read-scope.ts
 src/state/openclaw-state-read-worker.ts

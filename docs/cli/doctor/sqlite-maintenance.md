@@ -89,11 +89,26 @@ registry. Configured session stores and retained legacy databases are also check
 If a configured database still needs a schema migration after `--fix`, Doctor reports
 its path and exits non-zero instead of printing `Doctor complete`.
 
+Before an agent schema migration, Doctor checks database integrity in a read-only
+child process. Long checks print a progress line every 10 seconds with the database
+size, elapsed time, and current phase. Ctrl+C or SIGTERM records the interruption,
+cancels the inspection, and waits for admitted repairs and cleanup before exiting.
+An interrupted check does not authorize the next schema migration; rerun Doctor
+to finish. Pre-migration backups remain available.
+
 `openclaw doctor --session-sqlite <mode>` provides targeted inspection,
 import, validation, and SQLite maintenance. Legacy `sessions.json` files are
 migration sources. Hot transcript JSONL files are imported and archived after
 successful import; archive-tier JSONL files remain support artifacts, not
 runtime fallbacks.
+
+Older V2 migration receipts can record completed index moves without file identity.
+Doctor compares a surviving archive with the current `sessions.json`: different
+content imports as a new legacy index. If the archive is identical or missing,
+Doctor imports history while preserving current SQLite session metadata. It does
+not invent identity fields in the old receipt or delete its archive. The current
+index follows normal verification and archival after import. This repair runs in
+Doctor before runtime readiness, including during upgrades.
 
 When a plugin migration is deferred, the verified import receipt also captures
 unreferenced JSONL inputs. Completing the plugin migration archives those originals

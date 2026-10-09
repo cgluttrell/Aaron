@@ -1582,7 +1582,6 @@ const RELEASE_ONLY_UI_TEST_FILES = new Set([
   "ui/src/e2e/desktop-resize.real-gateway.e2e.test.ts",
   "extensions/qa-lab/src/control-ui-automation-management.real-gateway.e2e.test.ts",
   "ui/src/e2e/quota-reset-status.real-gateway.e2e.test.ts",
-  "ui/src/e2e/session-pr-reader-lifetime.real-gateway.e2e.test.ts",
   "ui/src/e2e/chat-collaborator-scroll.real-gateway.e2e.test.ts",
   "ui/src/e2e/mcp-app-conformance.e2e.test.ts",
   "ui/src/e2e/usage-sessions-owner-attribution.e2e.test.ts",
@@ -3380,6 +3379,15 @@ export function createNodeTestShardBundles(
   ).toSorted(compareFullNodeTestAdmissionOrder);
 }
 
+// Unfitted whole rows observed at 41-61 hosted minutes (FRV 37557136793,
+// 37623751955; core-runtime-config was cancelled at the 60-minute cap). Splitting
+// them would exceed the full manual manifest budget, so give them job headroom.
+const LONG_UNFITTED_RELEASE_SHARDS = new Set([
+  "agentic-cli-process",
+  "agentic-control-plane-agent-chat",
+  "core-runtime-config",
+]);
+
 // Full release jobs include setup and can execute both runtimes. Keep their
 // measured walls separate from compact test-group spans and reserve eight minutes
 // of the 20-minute objective for changes in setup and cold-run overhead.
@@ -3436,6 +3444,9 @@ function splitHostedReleaseShard(shard: NodeTestShard): NodeTestShard[] {
         ...shard,
         timing_key: original.timingKeys[0]!,
         ...(seconds === 0 ? {} : { predictedSeconds: seconds }),
+        ...(LONG_UNFITTED_RELEASE_SHARDS.has(shard.shardName) && seconds === 0
+          ? { timeoutMinutes: Math.max(shard.timeoutMinutes ?? 60, 90) }
+          : {}),
       },
     ];
   }

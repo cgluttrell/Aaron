@@ -243,12 +243,12 @@ describe("scripts/lib/plugin-npm-security-scan.mts", () => {
       "release/2026.9.6",
       "release/2026.9.7",
       "release/2026.9.8",
+      "release/2026.9.9",
     ]) {
       expect(resolveReviewedSourceLayout(current, context)?.id, context).toBe("current");
     }
     expect(resolveReviewedSourceLayout(frozenLegacy, "release/2026.9.1")).toBeUndefined();
     expect(resolveReviewedSourceLayout(current, "release/2099.1.1")).toBeUndefined();
-    expect(resolveReviewedSourceLayout(current, "release/2026.9.9")).toBeUndefined();
     expect(resolveReviewedSourceLayout(frozenLegacy)).toBeUndefined();
     expect(resolveReviewedSourceLayout(frozenLegacy, "extended-stable/2026.6.33")?.id).toBe(
       "extended-stable-2026.6.33",
@@ -830,6 +830,7 @@ describe("scripts/lib/plugin-npm-security-scan.mts", () => {
       const packageName = "@openclaw/llama-cpp-provider";
       const hardwareKey = `${packageName}:dangerous-exec:src/hardware.ts`;
       const installerKey = `${packageName}:dangerous-exec:src/llama-server-install.ts`;
+      const vcRuntimeKey = `${packageName}:dangerous-exec:src/llama-server-vc-runtime.ts`;
       const probe =
         'import { execFile } from "node:child_process";\nexecFile("/usr/bin/vm_stat", []);\n';
       const artifact = writePluginArtifact({
@@ -837,6 +838,7 @@ describe("scripts/lib/plugin-npm-security-scan.mts", () => {
         files: {
           "src/hardware.ts": probe + (count === 2 ? 'execFile("/bin/df", ["-P", "/tmp"]);\n' : ""),
           "src/llama-server-install.ts": probe,
+          "src/llama-server-vc-runtime.ts": probe,
         },
         packageName,
       });
@@ -846,6 +848,7 @@ describe("scripts/lib/plugin-npm-security-scan.mts", () => {
       expect(current.packageResults[0]?.reviewedCriticalFindings).toEqual([
         ...Array.from({ length: count }, () => hardwareKey),
         installerKey,
+        vcRuntimeKey,
       ]);
       const currentReport = buildPluginNpmSecurityScanReport({
         candidateSha: CANDIDATE_SHA,
@@ -865,9 +868,12 @@ describe("scripts/lib/plugin-npm-security-scan.mts", () => {
       const frozen = await scanPublishablePluginPackages([artifact.artifact], "release/2026.9.1");
       expect(frozen.scanErrors).toEqual([]);
       expect(frozen.packageResults[0]?.reviewedCriticalFindings).toEqual([installerKey]);
-      expect(frozen.packageResults[0]?.unexpectedCriticalFindings).toHaveLength(count);
+      expect(frozen.packageResults[0]?.unexpectedCriticalFindings).toHaveLength(count + 1);
       expect(frozen.packageResults[0]?.unexpectedCriticalFindings).toEqual(
-        expect.arrayContaining([{ line: 2, path: "src/hardware.ts", ruleId: "dangerous-exec" }]),
+        expect.arrayContaining([
+          { line: 2, path: "src/hardware.ts", ruleId: "dangerous-exec" },
+          { line: 2, path: "src/llama-server-vc-runtime.ts", ruleId: "dangerous-exec" },
+        ]),
       );
     },
   );

@@ -1,6 +1,6 @@
 {
   "name": "openclaw",
-  "version": "2026.9.8",
+  "version": "2026.9.9",
   "openclaw": {
     "updateAdmissionProtocol": 1,
     "schemaVersions": {
@@ -1710,7 +1710,7 @@
     "channels:catalog:gen": "node scripts/write-official-channel-catalog.mjs --write",
     "changed:lanes": "node scripts/changed-lanes.mjs",
     "check": "node --import ./scripts/tsx.mjs scripts/check.mts",
-    "check:architecture": "pnpm check:import-cycles && pnpm check:madge-import-cycles && pnpm check:deprecated-api-usage && pnpm check:wrapper-shadowing && pnpm check:deprecated-jsdoc && pnpm db:kysely:check && pnpm lint:kysely && pnpm check:database-first-legacy-stores",
+    "check:architecture": "pnpm db:kysely:gen && pnpm check:import-cycles && pnpm check:madge-import-cycles && pnpm check:deprecated-api-usage && pnpm check:wrapper-shadowing && pnpm check:deprecated-jsdoc && pnpm db:kysely:check && pnpm lint:kysely && pnpm check:database-first-legacy-stores",
     "check:assertion-safety": "node --import ./scripts/tsx.mjs scripts/check-assertion-safety-ratchet.mts",
     "check:base-config-schema": "node --import ./scripts/tsx.mjs scripts/generate-base-config-schema.ts --check",
     "check:bundled-channel-config-metadata": "node --import ./scripts/tsx.mjs scripts/generate-bundled-channel-config-metadata.ts --check",
@@ -2268,7 +2268,7 @@
     "@homebridge/ciao": "1.3.12",
     "@lydell/node-pty": "1.2.0-beta.15",
     "@mistralai/mistralai": "2.7.0",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/sdk": "1.31.0",
     "@mozilla/readability": "0.6.0",
     "@openclaw/ai": "workspace:*",
     "@openclaw/fs-safe": "0.21.1",

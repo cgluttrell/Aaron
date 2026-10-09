@@ -1082,6 +1082,7 @@ function assertConfiguredPluginState(params: { installPath?: string } = {}): voi
 
 function assertConfig(params: {
   acceptedIntents: string[];
+  baselineVersion?: string;
   config: unknown;
   scenario: string;
   stage?: "baseline" | "survival";
@@ -1094,6 +1095,7 @@ function assertConfig(params: {
     writeJson(configPath, params.config);
     writeJson(coveragePath, {
       acceptedIntents: params.acceptedIntents,
+      baselineVersion: params.baselineVersion,
     });
 
     execFileSync(testNodeExecPath, [ASSERTIONS_PATH, "assert-config"], {
@@ -1713,22 +1715,38 @@ process.stdout.write(sessionDir + "\\n");
     },
   );
 
-  it("requires the authored Tool Search config to migrate without disabling it", () => {
-    const run = (toolSearch: unknown, stage: "baseline" | "survival" = "survival") =>
-      assertConfig({
-        acceptedIntents: ["tool-search"],
-        config: { tools: { toolSearch } },
-        scenario: "base",
-        stage,
-      });
-    expect(() => run({ mode: "code", codeTimeoutMs: 5000 }, "baseline")).not.toThrow();
-    expect(() => run({ mode: "tools" })).not.toThrow();
-    expect(() => run({ mode: "code", codeTimeoutMs: 5000 })).toThrow(/Tool Search mode/);
-    expect(() => run({ mode: "tools", codeTimeoutMs: 5000 })).toThrow(/legacy timeout/);
-    expect(() => run({ mode: "tools", enabled: false })).toThrow(/disabled/);
-    expect(() => run(undefined)).toThrow(/Tool Search mode/);
-    expect(() => assertConfig({ acceptedIntents: [], config: {}, scenario: "base" })).not.toThrow();
-  });
+  it.each([
+    { baselineVersion: undefined, legacy: true },
+    { baselineVersion: "2026.9.6", legacy: true },
+    { baselineVersion: "2026.9.7", legacy: false },
+  ])(
+    "preserves Tool Search from baseline $baselineVersion without disabling it",
+    ({ baselineVersion, legacy }) => {
+      const run = (toolSearch: unknown, stage: "baseline" | "survival" = "survival") =>
+        assertConfig({
+          acceptedIntents: ["tool-search"],
+          baselineVersion,
+          config: { tools: { toolSearch } },
+          scenario: "base",
+          stage,
+        });
+      const baselineValue = legacy ? { mode: "code", codeTimeoutMs: 5000 } : { mode: "tools" };
+      const wrongBaselineValue = legacy ? { mode: "tools" } : { mode: "code", codeTimeoutMs: 5000 };
+      expect(() => run(baselineValue, "baseline")).not.toThrow();
+      expect(() => run(wrongBaselineValue, "baseline")).toThrow(/Tool Search mode/);
+      expect(() => run({ mode: "tools", codeTimeoutMs: 5000 }, "baseline")).toThrow(
+        legacy ? /Tool Search mode/ : /legacy timeout/,
+      );
+      expect(() => run({ mode: "tools" })).not.toThrow();
+      expect(() => run({ mode: "code", codeTimeoutMs: 5000 })).toThrow(/Tool Search mode/);
+      expect(() => run({ mode: "tools", codeTimeoutMs: 5000 })).toThrow(/legacy timeout/);
+      expect(() => run({ mode: "tools", enabled: false })).toThrow(/disabled/);
+      expect(() => run(undefined)).toThrow(/Tool Search mode/);
+      expect(() =>
+        assertConfig({ acceptedIntents: [], config: {}, scenario: "base" }),
+      ).not.toThrow();
+    },
+  );
 
   it("requires password auth for the mobile pairing reconnect scenario", () => {
     expect(() =>
@@ -2055,14 +2073,64 @@ process.stdout.write(sessionDir + "\\n");
         runSessionStateAssertion(
           (migratedStateDir) => {
             writeMigratedSessionState(migratedStateDir);
-            const db = new DatabaseSync(
+            const agentDb = new DatabaseSync(
               join(migratedStateDir, "agents", "main", "agent", "openclaw-agent.sqlite"),
             );
             try {
-              db.prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?").run(
-                JSON.stringify({ acp: saved }),
-                "agent:main:slack:channel:cupgrade",
-              );
+              agentDb
+                .prepare("UPDATE session_nodes SET entry_json = ? WHERE session_key = ?")
+                .run(
+                  JSON.stringify({ acp: { backend: "stale-inline" } }),
+                  "agent:main:slack:channel:cupgrade",
+                );
+            } finally {
+              agentDb.close();
+            }
+            const stateDbDir = join(migratedStateDir, "state");
+            mkdirSync(stateDbDir, { recursive: true });
+            const db = new DatabaseSync(join(stateDbDir, "openclaw.sqlite"));
+            try {
+              db.exec(`
+                CREATE TABLE acp_sessions (
+                  session_key TEXT NOT NULL PRIMARY KEY,
+                  session_id TEXT,
+                  backend TEXT NOT NULL,
+                  agent TEXT NOT NULL,
+                  runtime_session_name TEXT NOT NULL,
+                  identity_json TEXT,
+                  mode TEXT NOT NULL,
+                  runtime_options_json TEXT,
+                  cwd TEXT,
+                  state TEXT NOT NULL,
+                  last_activity_at INTEGER NOT NULL,
+                  last_error TEXT,
+                  updated_at INTEGER NOT NULL
+                ) STRICT;
+              `);
+              if (saved && typeof saved === "object") {
+                const value = saved as Record<string, unknown>;
+                db.prepare(
+                  `INSERT INTO acp_sessions (
+                    session_key, session_id, backend, agent, runtime_session_name,
+                    identity_json, mode, runtime_options_json, cwd, state,
+                    last_activity_at, last_error, updated_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+                ).run(
+                  "fixture-acp-row",
+                  "upgrade-group-session",
+                  String(value.backend),
+                  String(value.agent),
+                  String(value.runtimeSessionName),
+                  JSON.stringify(value.identity ?? null),
+                  String(value.mode),
+                  JSON.stringify(value.runtimeOptions ?? null),
+                  typeof value.cwd === "string" ? value.cwd : null,
+                  String(value.state),
+                  Number(value.lastActivityAt),
+                  typeof value.lastError === "string" ? value.lastError : null,
+                  1710000000000,
+                );
+              }
             } finally {
               db.close();
             }

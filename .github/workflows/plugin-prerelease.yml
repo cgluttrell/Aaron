@@ -51,6 +51,11 @@ on:
         required: false
         default: "[]"
         type: string
+      qualification_baselines_json:
+        description: Captured exact upgrade and survivor baselines from the qualification request
+        required: false
+        default: ""
+        type: string
       dispatch_id:
         description: Optional parent workflow dispatch identifier
         required: false
@@ -123,6 +128,8 @@ jobs:
       run_plugin_prerelease_inspector: ${{ steps.manifest.outputs.run_plugin_prerelease_inspector }}
       run_plugin_prerelease_docker: ${{ steps.manifest.outputs.run_plugin_prerelease_docker }}
       plugin_prerelease_docker_lanes: ${{ steps.manifest.outputs.plugin_prerelease_docker_lanes }}
+      upgrade_baseline: ${{ steps.qualification_baselines.outputs.baseline }}
+      upgrade_baselines: ${{ steps.qualification_baselines.outputs.baselines }}
     steps:
       - name: Validate phase inputs
         env:
@@ -192,9 +199,28 @@ jobs:
         with:
           ref: ${{ github.workflow_sha }}
           path: .frv-tooling
-          sparse-checkout: scripts/frv-test-exclusions.mjs
+          sparse-checkout: |
+            scripts/frv-test-exclusions.mjs
+            scripts/lib/release-upgrade-baseline.mjs
+            scripts/lib/release-version.mjs
+            scripts/lib/canonical-json.mjs
           sparse-checkout-cone-mode: false
           persist-credentials: false
+
+      - name: Validate captured qualification baselines
+        id: qualification_baselines
+        env:
+          QUALIFICATION_BASELINES_JSON: ${{ inputs.qualification_baselines_json }}
+          TARGET_CONTEXT_REF: ${{ inputs.target_context_ref }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$QUALIFICATION_BASELINES_JSON" ]]; then exit 0; fi
+          captured="$(node .frv-tooling/scripts/lib/release-upgrade-baseline.mjs \
+            --candidate-version "$(node -p 'require("./package.json").version')" \
+            --target-context-ref "$TARGET_CONTEXT_REF" \
+            --qualification-baselines-json "$QUALIFICATION_BASELINES_JSON")"
+          printf 'baseline=%s\n' "$(jq -er .upgradeBaseline <<< "$captured")" >> "$GITHUB_OUTPUT"
+          printf 'baselines=%s\n' "$(jq -er '.upgradeSurvivorBaselines | join(" ")' <<< "$captured")" >> "$GITHUB_OUTPUT"
 
       - name: Validate frozen-target Node exclusions
         id: node_test_exclusions
@@ -299,9 +325,19 @@ jobs:
             });
             const batchedExtensionIds = new Set(allExtensionShards.flatMap((shard) => shard.extensionIds));
             const hasJobSplitter = typeof planner.splitExtensionTestJobTargets === "function";
-            const telegramPlanGroups = hasJobSplitter
-              ? planner.createExtensionTestShards({ extensionIds: ["telegram"], shardCount: 1 })
-                  .flatMap((shard) => shard.planGroups)
+            // Codex alone took 36-60 min on hosted release runners (FRV 36644909314 timed out),
+            // so it gets file-bounded jobs like Telegram instead of one batch job.
+            const fileSplitExtensionIds = ["telegram", "codex"].filter((id) => batchedExtensionIds.has(id));
+            const fileSplitPlanGroups = hasJobSplitter
+              ? await Promise.all(fileSplitExtensionIds.map(async (extensionId) => {
+                  const planGroups = planner.createExtensionTestShards({ extensionIds: [extensionId], shardCount: 1 })
+                    .flatMap((shard) => shard.planGroups);
+                  // Telegram rows keep their historical Node-only runtime.
+                  const runtime = extensionId === "telegram"
+                    ? {}
+                    : await resolveExtensionRuntime({ planGroups, fullReleaseValidation, vitestArgs: extensionVitestArgs });
+                  return planGroups.map((group) => ({ ...group, family: extensionId, runtime }));
+                })).then((groups) => groups.flat())
               : [];
             const sourcePlanGroups = new Map();
             if (hasJobSplitter) {
@@ -329,7 +365,7 @@ jobs:
             const genericExtensionIds = hasJobSplitter
               ? allExtensionShards
                   .flatMap((shard) => shard.extensionIds)
-                  .filter((extensionId) => extensionId !== "telegram")
+                  .filter((extensionId) => !fileSplitExtensionIds.includes(extensionId))
               : [];
             const batchShards = await Promise.all((
               hasJobSplitter
@@ -366,7 +402,7 @@ jobs:
             })));
             const telegramShards = [];
             for (const group of [
-              ...telegramPlanGroups.map((group) => ({ ...group, family: "telegram" })),
+              ...fileSplitPlanGroups,
               ...[...sourcePlanGroups.values()].map((group) => ({ ...group, family: "source" })),
             ]) {
               const vitestConfig = (await import(`./${group.config}`)).default;
@@ -401,6 +437,7 @@ jobs:
                   runner: "blacksmith-8vcpu-ubuntu-2404",
                   shard_index: planner.DEFAULT_EXTENSION_TEST_SHARD_COUNT + index + 1,
                   task: "extension-file-shard",
+                  ...group.runtime,
                 });
               }
             }
@@ -836,14 +873,14 @@ jobs:
               node .frv-tooling/scripts/frv-test-exclusions.mjs run -- pnpm test:extensions:batch "$OPENCLAW_EXTENSION_BATCH" "${exclusion_options[@]}" -- "${exclude_args[@]}"
               ;;
             extension-file-shard)
-              include_file="${RUNNER_TEMP}/telegram-test-include-${GITHUB_JOB}.json"
+              include_file="${RUNNER_TEMP}/extension-test-include-${GITHUB_JOB}.json"
               trap 'rm -f -- "$include_file"' EXIT
               INCLUDE_FILE="$include_file" node --input-type=module <<'EOF'
               import { writeFileSync } from "node:fs";
 
               const patterns = JSON.parse(process.env.OPENCLAW_EXTENSION_INCLUDE_PATTERNS_JSON);
               if (!Array.isArray(patterns) || patterns.length === 0) {
-                throw new Error("Invalid Telegram extension file shard");
+                throw new Error("Invalid extension file shard");
               }
               writeFileSync(process.env.INCLUDE_FILE, JSON.stringify(patterns), "utf8");
           EOF
@@ -1061,6 +1098,8 @@ jobs:
       allow_frozen_target_scenario_omissions: ${{ inputs.allow_frozen_target_scenario_omissions }}
       include_live_suites: false
       live_models_only: false
+      published_upgrade_survivor_baseline: ${{ needs.preflight.outputs.upgrade_baseline || 'openclaw@latest' }}
+      published_upgrade_survivor_baselines: ${{ needs.preflight.outputs.upgrade_baselines }}
       shared_image_artifact_namespace: plugin-prerelease
       package_artifact_name: ${{ fromJSON(inputs.candidate_artifact_json || '{}').packageArtifactName || '' }}
       package_artifact_id: ${{ fromJSON(inputs.candidate_artifact_json || '{}').packageArtifactId || '' }}

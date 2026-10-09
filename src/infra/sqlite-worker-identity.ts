@@ -2,12 +2,36 @@ import { realpathSync, statSync, type BigIntStats } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import { hasErrnoCode } from "./errno.js";
+import { normalizeWindowsPathPreservingCase } from "./path-guards.js";
 
 export type DatabasePathIdentity = Readonly<{
   key: string;
   canonicalPath: string;
   birthtime?: string;
 }>;
+
+/** Native SQLite namespaces are filesystem locators, not distinct database owners. */
+export function normalizeDatabasePath(location: string): string {
+  const normalized =
+    process.platform === "win32" ? normalizeWindowsPathPreservingCase(location) : location;
+  // Preserve other path dialects and device namespaces that do not normalize to a drive or UNC.
+  return process.platform === "win32" && !/^(?:[a-z]:[\\/]|[\\/]{2})/iu.test(normalized)
+    ? location
+    : normalized;
+}
+
+// The physical host policy stays fixed across every admission in this process.
+const useDatabaseBirthtime = process.platform !== "linux";
+
+export function databaseFileIdentityKey(file: Pick<BigIntStats, "dev" | "ino">): string {
+  return `${file.dev}:${file.ino}`;
+}
+
+export function readDatabaseIdentityBirthtime(file: BigIntStats): string {
+  // Node does not expose Linux STATX_BTIME availability and can substitute ctime.
+  // Keep the unknown creation-time value stable across ordinary database writes.
+  return useDatabaseBirthtime ? file.birthtimeNs.toString() : "0";
+}
 
 function existingIdentity(
   file: BigIntStats,
@@ -20,14 +44,14 @@ function existingIdentity(
   if (
     file.dev !== canonicalFile.dev ||
     file.ino !== canonicalFile.ino ||
-    file.birthtimeNs !== canonicalFile.birthtimeNs
+    readDatabaseIdentityBirthtime(file) !== readDatabaseIdentityBirthtime(canonicalFile)
   ) {
     throw new Error("SQLite database pathname changed during admission");
   }
   return {
-    key: `file:${file.dev}:${file.ino}`,
-    canonicalPath,
-    birthtime: file.birthtimeNs.toString(),
+    key: `file:${databaseFileIdentityKey(file)}`,
+    canonicalPath: normalizeDatabasePath(canonicalPath),
+    birthtime: readDatabaseIdentityBirthtime(file),
   };
 }
 
@@ -55,7 +79,9 @@ export function inspectDatabasePathIdentitySync(
   let ancestor = resolvedPath;
   while (true) {
     try {
-      const canonicalPath = path.join(realpathSync.native(ancestor), ...missing);
+      const canonicalPath = normalizeDatabasePath(
+        path.join(realpathSync.native(ancestor), ...missing),
+      );
       return { key: `path:${canonicalPath}`, canonicalPath };
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT")) {
@@ -116,7 +142,7 @@ export async function readDatabasePathIdentity(
   let ancestor = databasePath;
   while (true) {
     try {
-      const canonicalPath = path.join(await realpath(ancestor), ...missing);
+      const canonicalPath = normalizeDatabasePath(path.join(await realpath(ancestor), ...missing));
       return { key: `path:${canonicalPath}`, canonicalPath };
     } catch (error) {
       if (!hasErrnoCode(error, "ENOENT")) {
@@ -141,7 +167,7 @@ export function assertExistingDatabaseIdentity(
   if (
     !file.isFile() ||
     `file:${file.dev}:${file.ino}` !== expected ||
-    (expectedBirthtime !== undefined && file.birthtimeNs.toString() !== expectedBirthtime)
+    (expectedBirthtime !== undefined && readDatabaseIdentityBirthtime(file) !== expectedBirthtime)
   ) {
     throw new Error("SQLite database file identity changed before existing-only open");
   }

@@ -87,18 +87,12 @@ function verificationWithAdvisories(verification: string, manifest: unknown) {
   if (manifest === undefined) {
     return normalizeTail(verification);
   }
-  const escape = (value: string) => value.replace(/[\\`*_{}[\]()<>!#|]/gu, "\\$&");
-  const lines = validateReleaseManifestAdvisoryJobs(manifest).map((job) => {
-    const detail =
-      job.class === "recorded-flake" ? `; ${escape(job.reason)}; tracking: ${job.trackingUrl}` : "";
-    return `${ADVISORY_LINE_PREFIX}${job.class}): ${escape(job.child)} / ${escape(job.job)} (${job.conclusion}): ${job.url}${detail}`;
-  });
-  const proof = normalizeTail(verification)
+  validateReleaseManifestAdvisoryJobs(manifest);
+  return normalizeTail(verification)
     .split("\n")
     .filter((line) => !line.startsWith(ADVISORY_LINE_PREFIX))
     .join("\n")
     .trimEnd();
-  return lines.length > 0 ? [proof || RELEASE_VERIFICATION_HEADING, ...lines].join("\n") : proof;
 }
 
 function extendedStableReleaseNotice({
@@ -574,6 +568,9 @@ function main() {
     : changelogPath
       ? readFileSync(changelogPath, "utf8")
       : fail("release notes source was not validated");
+  const validationManifest: unknown = options.validationManifest
+    ? JSON.parse(readFileSync(options.validationManifest, "utf8"))
+    : undefined;
   const target = {
     changelog,
     version,
@@ -581,9 +578,7 @@ function main() {
     repository,
     regularStableVersion: options.regularStableVersion,
     contributionRecordPath: source?.recordPath ?? undefined,
-    validationManifest: options.validationManifest
-      ? JSON.parse(readFileSync(options.validationManifest, "utf8"))
-      : undefined,
+    validationManifest,
   };
   if (options.verifyBody) {
     const result = verifyGithubReleaseNotes({

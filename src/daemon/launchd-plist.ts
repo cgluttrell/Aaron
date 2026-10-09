@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import { asOptionalRecord, isStringRecord } from "@openclaw/normalization-core/record-coerce";
 import { hasErrnoCode } from "../infra/errno.js";
 import { LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS } from "../infra/gateway-shutdown-budget.js";
+import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import { runExec } from "../process/exec.js";
 import type {
   GatewayServiceCommandConfig,
@@ -308,9 +309,14 @@ export async function readLaunchAgentProgramArgumentsFromFile(
       ...(Object.keys(environmentValueSources).length > 0 ? { environmentValueSources } : {}),
       sourcePath: plistPath,
     };
-  } catch {
+  } catch (error) {
+    if (hasCommandProcessCleanupError(error)) {
+      throw error;
+    }
     if (options?.requireEffective) {
-      throw new Error("Effective LaunchAgent service command could not be inspected.");
+      throw new Error("Effective LaunchAgent service command could not be inspected.", {
+        cause: error,
+      });
     }
     return null;
   }

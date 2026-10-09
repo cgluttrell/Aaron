@@ -39,6 +39,44 @@ function withJsonFixture<T>(name: string, contents: unknown, fn: (file: string) 
   }
 }
 
+type BaselineFixture = {
+  args?: Record<string, string | undefined>;
+  releases?: string[];
+  versions?: string[];
+  tags?: Record<string, string | undefined>;
+};
+
+function resolveFixture({ args = {}, releases, versions, tags }: BaselineFixture) {
+  return withJsonFixture("fixture.json", null, (file) => {
+    const params = new Map<string, string>();
+    for (const [key, value] of Object.entries(args)) {
+      if (value !== undefined) {
+        params.set(key, value);
+      }
+    }
+    for (const [key, value] of [
+      [
+        "releases-json",
+        releases?.map((version, index) => ({
+          tagName: `v${version}`,
+          publishedAt: new Date(Date.UTC(2026, 8, 30 - index)).toISOString(),
+          isPrerelease: version.includes("-beta."),
+        })),
+      ],
+      ["npm-versions-json", versions],
+      ["npm-dist-tags-json", tags],
+    ] as const) {
+      if (value === undefined) {
+        continue;
+      }
+      const metadata = path.join(path.dirname(file), `${key}.json`);
+      writeFileSync(metadata, JSON.stringify(value));
+      params.set(key, metadata);
+    }
+    return resolveBaselines(params);
+  });
+}
+
 describe("scripts/resolve-upgrade-survivor-baselines", () => {
   it.each([false, true])(
     "discovers all release pages before publishing baselines (API failure: %s)",
@@ -237,8 +275,8 @@ const fs = require("node:fs");
 const file = process.env.FIXTURE_NPM_CALLS;
 fs.appendFileSync(file, JSON.stringify(process.argv.slice(2)) + "\\n");
 console.log(JSON.stringify(process.argv[4] === "dist-tags"
-  ? [{ latest: "2026.8.1", "extended-stable": "2026.6.35" }]
-  : ["2026.6.34", "2026.6.35", "2026.7.1-2", "2026.8.1"]));
+  ? [{ latest: "2026.9.2", "extended-stable": "2026.8.35" }]
+  : ["2026.6.34", "2026.7.1-2", "2026.8.1", "2026.8.33", "2026.8.35", "2026.9.1", "2026.9.2"]));
 `,
         { mode: 0o755 },
       );
@@ -306,7 +344,7 @@ console.log(JSON.stringify(process.argv[4] === "dist-tags"
       });
       const expanded = entrypoint === "update-migration" || standaloneSelectors.has(entrypoint);
       const expectedBaselines = expanded
-        ? "openclaw@2026.8.1 openclaw@2026.7.1-2 openclaw@2026.6.35 openclaw@2026.6.34"
+        ? "openclaw@2026.9.2 openclaw@2026.9.1 openclaw@2026.8.35 openclaw@2026.6.34"
         : `openclaw@${entrypoint === "minimum" ? "2026.6.1" : "2026.7.1-2"}`;
       expect(readFileSync(output, "utf8")).toBe(
         `baselines=${expectedBaselines}\nbaseline_scope=${expanded ? "legacy-operator-state" : "all-scenarios"}\nbaseline=openclaw@2026.7.1-2\n`,
@@ -344,10 +382,11 @@ console.log(JSON.stringify(process.argv[4] === "dist-tags"
             group.published_upgrade_survivor_scenarios,
           ]),
         ).toEqual([
-          ["openclaw@2026.8.1", "legacy-operator-state"],
-          ["openclaw@2026.7.1-2", "plugin-deps-cleanup legacy-operator-state"],
-          ["openclaw@2026.6.35", "legacy-operator-state"],
+          ["openclaw@2026.9.2", "legacy-operator-state"],
+          ["openclaw@2026.9.1", "legacy-operator-state"],
+          ["openclaw@2026.8.35", "legacy-operator-state"],
           ["openclaw@2026.6.34", "legacy-operator-state"],
+          ["openclaw@2026.7.1-2", "plugin-deps-cleanup"],
         ]);
       }
       expect(
@@ -364,36 +403,41 @@ console.log(JSON.stringify(process.argv[4] === "dist-tags"
     });
   });
 
-  it.each([
-    { extended: undefined, expected: ["2026.9.2", "2026.9.1", "2026.6.34"] },
-    { extended: "2026.6.35", expected: ["2026.9.2", "2026.9.1", "2026.6.35", "2026.6.34"] },
-    { extended: "2026.6.34", expected: ["2026.9.2", "2026.9.1", "2026.6.34"] },
-  ])(
-    "resolves supported npm lines with optional/deduplicated extended-stable ($extended)",
-    ({ extended, expected }) => {
-      withJsonFixture(
-        "tags.json",
-        { latest: "2026.9.2", ...(extended ? { "extended-stable": extended } : {}) },
-        (tagsFile) => {
-          withJsonFixture(
-            "versions.json",
-            ["2026.6.34", "2026.6.35", "2026.9.1", "2026.9.2", "2026.9.3-beta.1", "2026.9.3"],
-            (versionsFile) => {
-              expect(
-                resolveBaselines(
-                  new Map([
-                    ["requested", "supported-lines"],
-                    ["npm-dist-tags-json", tagsFile],
-                    ["npm-versions-json", versionsFile],
-                  ]),
-                ),
-              ).toEqual(expected.map((version) => `openclaw@${version}`));
-            },
-          );
-        },
-      );
+  it.each<BaselineFixture & { name: string; expected: string[] }>([
+    { name: "fallback", args: { fallback: "2026.6.1" }, expected: ["2026.6.1"] },
+    ...[
+      { extended: undefined, expected: ["2026.9.2", "2026.9.1", "2026.6.34"] },
+      { extended: "2026.8.35", expected: ["2026.9.2", "2026.9.1", "2026.8.35", "2026.6.34"] },
+      { extended: "2026.8.33", expected: ["2026.9.2", "2026.9.1", "2026.8.33", "2026.6.34"] },
+    ].map(({ extended, expected }) => ({
+      name: `supported lines with extended-stable ${extended}`,
+      args: { requested: "supported-lines" },
+      tags: { latest: "2026.9.2", ...(extended ? { "extended-stable": extended } : {}) },
+      versions: [
+        "2026.6.34",
+        "2026.8.33",
+        "2026.8.35",
+        "2026.9.1",
+        "2026.9.2",
+        "2026.9.3-beta.1",
+        "2026.9.3",
+      ],
+      expected,
+    })),
+    {
+      name: "supported lines excluding unpublished candidate",
+      args: {
+        requested: "supported-lines",
+        "candidate-version": "2026.9.3",
+        "candidate-published": "false",
+      },
+      tags: { latest: "2026.9.3" },
+      versions: ["2026.6.34", "2026.8.33", "2026.9.2", "2026.9.3"],
+      expected: ["2026.9.2", "2026.6.34"],
     },
-  );
+  ])("resolves $name", ({ expected, ...fixture }) => {
+    expect(resolveFixture(fixture)).toEqual(expected.map((version) => `openclaw@${version}`));
+  });
 
   it("omits the unpublished candidate version from expanded supported lines", () => {
     withJsonFixture("tags.json", { latest: "2026.9.3" }, (tagsFile) => {
@@ -413,41 +457,59 @@ console.log(JSON.stringify(process.argv[4] === "dist-tags"
     });
   });
 
-  it.each([
-    {
-      tags: {},
-      versions: ["2026.6.34", "2026.9.2"],
-      error: "npm latest must name a published stable version",
-    },
-    {
-      tags: { latest: "2026.9.2", "extended-stable": "2026.6.99" },
-      versions: ["2026.6.34", "2026.9.1", "2026.9.2"],
-      error: "npm extended-stable must name a published extended-stable version",
-    },
-    ...["2026.9.1", "2026.6.35-1", "2026.6.35-beta.1"].map((extended) => ({
-      tags: { latest: "2026.9.2", "extended-stable": extended },
-      versions: ["2026.6.34", "2026.9.1", "2026.9.2", extended],
-      error: "npm extended-stable must name a published extended-stable version",
+  it.each<BaselineFixture & { error: string }>([
+    ...[
+      { requested: "2026.5.31" },
+      { fallback: "openclaw@2026.5.31-beta.1" },
+      { requested: "all-since-2026.5.31" },
+    ].map((args) => ({
+      args,
+      error: "Upgrade pre-June installs through OpenClaw 2026.9.5 and run Doctor first",
+    })),
+    ...[
+      {
+        tags: {},
+        versions: ["2026.8.33", "2026.9.2"],
+        error: "npm latest must name a published stable version",
+      },
+      {
+        tags: { latest: "2026.9.2", "extended-stable": "2026.8.99" },
+        versions: ["2026.6.34", "2026.8.33", "2026.9.1", "2026.9.2"],
+        error: "npm extended-stable must name a published extended-stable version",
+      },
+      ...["2026.9.1", "2026.8.35-1", "2026.8.35-beta.1"].map((extended) => ({
+        tags: { latest: "2026.9.2", "extended-stable": extended },
+        versions: ["2026.6.34", "2026.8.33", "2026.9.1", "2026.9.2", extended],
+        error: "npm extended-stable must name a published extended-stable version",
+      })),
+      {
+        tags: { latest: "2026.9.2" },
+        versions: ["2026.9.1", "2026.9.2"],
+        error: "oldest supported baseline is not published",
+      },
+    ].map(({ tags, versions, error }) => ({
+      tags,
+      versions,
+      error,
+      args: { requested: "supported-lines" },
     })),
     {
-      tags: { latest: "2026.9.2" },
-      versions: ["2026.9.1", "2026.9.2"],
-      error: "oldest supported baseline is not published",
+      args: { requested: "release-history", "history-count": "1e3" },
+      releases: [],
+      error: "--history-count must be a positive integer",
     },
-  ])("fails closed on unusable supported-line metadata ($error)", ({ tags, versions, error }) => {
-    withJsonFixture("tags.json", tags, (tagsFile) => {
-      withJsonFixture("versions.json", versions, (versionsFile) => {
-        expect(() =>
-          resolveBaselines(
-            new Map([
-              ["requested", "supported-lines"],
-              ["npm-dist-tags-json", tagsFile],
-              ["npm-versions-json", versionsFile],
-            ]),
-          ),
-        ).toThrow(error);
-      });
-    });
+    {
+      args: { requested: "last-stable-1e3" },
+      releases: [],
+      error: "last-stable baseline count must be a positive integer",
+    },
+    {
+      args: { requested: "all-since-2026.6.9007199254740993" },
+      releases: [],
+      error: "invalid all-since baseline token: all-since-2026.6.9007199254740993",
+    },
+  ])("rejects unusable baseline inputs: $args $tags", ({ error, ...fixture }) => {
+    expect(() => resolveFixture(fixture)).toThrow(error);
   });
 
   it("resolves release-history to the last six supported stable releases", () => {

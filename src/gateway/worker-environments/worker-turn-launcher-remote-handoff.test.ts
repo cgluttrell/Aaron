@@ -1,13 +1,16 @@
 import { mkdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { expectDefined } from "@openclaw/normalization-core/expect";
 import { Value } from "typebox/value";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WorkerConnectRequestFrameSchema } from "../../../packages/gateway-protocol/src/schema/worker-admission.js";
 import { makeTextToolResult } from "../../../test/helpers/text-tool-result.js";
+import * as preparedRuntime from "../../agents/prepared-model-runtime.js";
 import {
   makeAgentAssistantMessage,
   makeAgentUserMessage,
 } from "../../agents/test-helpers/agent-message-fixtures.js";
+import { createEmptyPreparedModelRuntimeSnapshot } from "../../agents/test-helpers/embedded-agent-runner-e2e-mocks.js";
 import {
   configureExecutionIdentityAdmissionSink,
   type ExecutionIdentityAdmissionWork,
@@ -51,7 +54,24 @@ import {
 } from "./worker-turn-launcher.test-support.js";
 
 describe("worker turn launcher remote handoff", () => {
-  beforeEach(setupWorkerTurnLauncherTest);
+  beforeEach(async () => {
+    await setupWorkerTurnLauncherTest();
+    vi.spyOn(preparedRuntime, "acquireAgentRunPreparedModelRuntime").mockImplementation(
+      async (input) => {
+        const snapshot = createEmptyPreparedModelRuntimeSnapshot(input);
+        return {
+          snapshot,
+          pluginGeneration: {
+            configuredCatalogEntries: [],
+            inlineProviderModels: [],
+            pluginMetadataSnapshot: snapshot.metadataSnapshot,
+            pluginRegistry: snapshot.pluginRegistry,
+          },
+          [Symbol.asyncDispose]: async () => {},
+        };
+      },
+    );
+  });
   afterEach(cleanupWorkerTurnLauncherTest);
   afterEach(() => setActiveNodeContexts([]));
 
@@ -363,30 +383,33 @@ describe("worker turn launcher remote handoff", () => {
     );
     const imagePath = savedImage.path;
     const manager = openSessionManager();
-    manager.appendMessage(
+    await manager.appendMessageAsync(
       makeAgentAssistantMessage({
         content: [{ type: "toolCall", id: "shared-call", name: "read", arguments: {} }],
         stopReason: "toolUse",
         timestamp: 16,
       }),
     );
-    const firstKeptEntryId = manager.appendMessage(
+    const firstKeptEntryId = await manager.appendMessageAsync(
       makeAgentUserMessage({ content: "Earlier request", timestamp: 17 }),
     );
-    manager.appendMessage(
+    if (!firstKeptEntryId) {
+      throw new Error("expected persisted pre-reset user entry");
+    }
+    await manager.appendMessageAsync(
       makeTextToolResult("shared-call", "read", "Discarded owner result", false, 18),
     );
-    manager.appendMessage(
+    await manager.appendMessageAsync(
       makeAgentAssistantMessage({
         content: [{ type: "toolCall", id: "shared-call", name: "read", arguments: {} }],
         stopReason: "toolUse",
         timestamp: 19,
       }),
     );
-    manager.appendMessage(
+    await manager.appendMessageAsync(
       makeTextToolResult("shared-call", "read", "Kept owner result", false, 20),
     );
-    manager.appendMessage(
+    await manager.appendMessageAsync(
       makeAgentAssistantMessage({
         content: [{ type: "text", text: "Earlier reply" }],
         timestamp: 21,
@@ -415,13 +438,16 @@ describe("worker turn launcher remote handoff", () => {
           socketPath: "/worker/gateway.sock",
         });
         const completed = openSessionManager();
-        const leafId = completed.appendMessage(
+        const leafId = await completed.appendMessageAsync(
           makeAgentAssistantMessage({
             content: [{ type: "text", text: "Worker reply" }],
             timestamp: 21,
           }),
         );
-        return acknowledgeCompletedWorkerTurn(request.turnClaim, leafId);
+        return acknowledgeCompletedWorkerTurn(
+          request.turnClaim,
+          expectDefined(leafId, "persisted worker reply"),
+        );
       }),
       reconcileWorkspace: vi.fn(reconcileUnchangedLocalWorkspace),
     });

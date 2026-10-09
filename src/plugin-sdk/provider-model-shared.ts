@@ -1,4 +1,5 @@
 // Provider model helpers normalize model catalog entries shared by provider plugins.
+import { normalizeModelCostConfig } from "@openclaw/llm-core";
 import { normalizeOptionalLowercaseString } from "../../packages/normalization-core/src/string-coerce.js";
 import {
   buildAnthropicReplayPolicyForModel,
@@ -140,6 +141,7 @@ export type {
 export {
   bindsClaudeThinkingPrefix,
   resolveClaudeFable5ModelIdentity,
+  resolveClaudeHaiku55ModelIdentity,
   resolveClaudeModelIdentity,
   resolveClaudeMythos5ModelIdentity,
   resolveClaudeNativeThinkingLevelMap,
@@ -208,16 +210,15 @@ export {
   buildStrictAnthropicReplayPolicy,
 };
 
-/** Compare canonical flat rates without assuming display-only models include cost metadata. */
+/** Compare canonical rates and tiers; display-only models may omit cost metadata. */
 export function modelCostsEqual(
   current: ProviderRuntimeModel["cost"] | undefined,
   expected: ProviderRuntimeModel["cost"],
 ): boolean {
   return (
-    current?.input === expected.input &&
-    current?.output === expected.output &&
-    current?.cacheRead === expected.cacheRead &&
-    current?.cacheWrite === expected.cacheWrite
+    current !== undefined &&
+    JSON.stringify(normalizeModelCostConfig(current)) ===
+      JSON.stringify(normalizeModelCostConfig(expected))
   );
 }
 

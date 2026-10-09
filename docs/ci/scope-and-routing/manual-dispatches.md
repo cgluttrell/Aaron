@@ -39,10 +39,11 @@ gh workflow run full-release-validation.yml --ref main \
   -f expected_sha="$VALIDATION_SHA"
 ```
 
-Gateway extended-stable shared publication requires complete exact-target Full
-Release Validation from the trusted main-pinned `release-ci/*` harness targeting
-the frozen `extended-stable/YYYY.M.33` tip. Direct canonical-branch and `main`
-producers do not satisfy the protected publisher. Current
+Gateway extended-stable shared publication requires complete candidate-owned
+Full Release Validation from an independently admitted `release-ci/*` harness
+at Q=C, targeting the frozen `extended-stable/YYYY.M.33` tip. The raw diagnostic
+example above and direct `main` producers do not satisfy that publication
+contract. Current
 manifests also supply qualified npm preflight artifacts. The shared
 `OpenClaw Release Publish` parent dispatches from a protected lightweight
 `release-publish/<sha12>-<epoch>` tag at the frozen trusted-main Tooling SHA and
@@ -116,7 +117,8 @@ to a JSON object with `nodeVersion`, `packageManager`, `vitestVersion`,
 `maxWorkers`, `files`, and `projects`. Use an exact Node 24 patch and the
 checkout's complete pnpm integrity pin and Vitest version. `maxWorkers` is an
 integer from 1 through 4. `files` is the original ordered array of literal,
-tracked test paths; `projects` is the original ordered array of
+tracked test paths under `src/`, `test/`, `extensions/`, or `packages/`;
+`projects` is the original ordered array of
 `test/vitest/vitest.<name>.config.ts` paths. Globs, shell text, arbitrary CLI
 arguments, and environment overrides are not accepted.
 

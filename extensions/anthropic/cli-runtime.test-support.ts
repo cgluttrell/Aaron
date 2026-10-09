@@ -5,6 +5,7 @@ import { once } from "node:events";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 writeFileSync("fixture.pid", String(process.pid));
 const scenario = process.env.CLAUDE_FIXTURE_SCENARIO;
@@ -72,6 +73,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     hooks = initialize.hooks;
     if (scenario === "revoked-initialize") {
       writeFileSync("initialize.ready", "ready");
+      sendReceipt(path.join(process.cwd(), "initialize.ready"), "ready");
       while (!existsSync("initialize.release")) await delay(5);
     }
     assert.ok(hooks.PreToolUse[0].hookCallbackIds[0]);
@@ -143,18 +145,16 @@ for await (const line of createInterface({ input: process.stdin })) {
       } else result();
       continue;
     }
-    if (scenario === "background-success") {
+    if (scenario === "background-success" || scenario === "background-agent-subagent-bash") {
+      const subagentBash = scenario === "background-agent-subagent-bash";
       send({ type: "system", subtype: "background_tasks_changed",
         tasks: [{ task_id: "background-agent", task_type: "local_agent" }] });
       send({ type: "result", subtype: "success", is_error: false, result: "", session_id: "fixture-session" });
-      writeFileSync("background.ready", "ready");
-      while (!existsSync("background.release")) await delay(5);
-      send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
-      send({ type: "system", subtype: "task_notification", task_id: "background-agent",
-        status: "completed", output_file: "", summary: "agent finished" });
-      send({ type: "result", subtype: "success", is_error: false,
-        origin: { kind: "task-notification" }, result: JSON.stringify({ finalBackgroundAnswer: true }),
-        session_id: "fixture-session" });
+      // Claude Code 2.1.289: the agent's own Bash reports on the main stream, owner field only on its start.
+      if (subagentBash) send({ type: "system", subtype: "task_started", task_id: "subagent-bash",
+        task_type: "local_bash", is_backgrounded: false, owned_by_subagent: true, tool_use_id: "tool-subagent-bash" });
+      request("background-release", { subtype: "can_use_tool", tool_name: "Read",
+        input: { file_path: "fixture.txt" }, tool_use_id: "background-release" });
       continue;
     }
     if (["background-bash-success", "background-bash-batched", "background-bash-early", "background-bash-inline", "background-bash-overlap", "background-bash-late-approval"].includes(scenario) && (replayReceipts || turn === 1)) {
@@ -197,9 +197,10 @@ for await (const line of createInterface({ input: process.stdin })) {
           message: { role: "user", content: notification("background-bash") } });
         if (inline) replayTask("background-bash");
       }
+      writeFileSync("background.ready", "ready");
+      sendReceipt(path.join(process.cwd(), "background.ready"), "ready");
       if (!inline) send({ type: "result", subtype: "success", is_error: false, num_turns: 1,
         result: "", session_id: "fixture-session" });
-      writeFileSync("background.ready", "ready");
       while (!existsSync("background.release")) await delay(5);
       if (!early) finishTasks();
       if (batched) {
@@ -278,7 +279,16 @@ for await (const line of createInterface({ input: process.stdin })) {
   } else if (message.type === "control_response") {
     assert.equal(message.response.subtype, "success");
     const { request_id: id, response } = message.response;
-    if (id === "elicitation") {
+    if (id === "background-release") {
+      if (scenario === "background-agent-subagent-bash") send({ type: "system", subtype: "task_notification", task_id: "subagent-bash",
+        tool_use_id: "tool-subagent-bash", status: "completed", output_file: "", summary: "sleep" });
+      send({ type: "system", subtype: "background_tasks_changed", tasks: [] });
+      send({ type: "system", subtype: "task_notification", task_id: "background-agent",
+        status: "completed", output_file: "", summary: "agent finished" });
+      send({ type: "result", subtype: "success", is_error: false,
+        origin: { kind: "task-notification" }, result: JSON.stringify({ finalBackgroundAnswer: true }),
+        session_id: "fixture-session" });
+    } else if (id === "elicitation") {
       result({ elicitation: response });
     } else if (id.startsWith("prior-")) {
       priorResponses[id] = response;

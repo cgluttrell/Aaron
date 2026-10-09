@@ -3,6 +3,7 @@
 // here. Planning and execution live in separate modules.
 import { fileURLToPath } from "node:url";
 import {
+  UPDATE_FIRST_HOP_MISSING_LOAD_PATH_LANE,
   listRecordedFirstHopSourceVersions,
   updateFirstHopCompatLaneName,
 } from "./update-first-hop-lanes.mjs";
@@ -62,11 +63,11 @@ const rootManagedVpsUpgradeCommand = upgradeSurvivorScriptCommand(
   "OPENCLAW_UPGRADE_SURVIVOR_PUBLISHED_BASELINE=1 OPENCLAW_UPGRADE_SURVIVOR_ROOT_MANAGED_VPS=1",
   'export OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC="${OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC:-openclaw@latest}"; export OPENCLAW_UPGRADE_SURVIVOR_DOCKER_RUN_TIMEOUT="${OPENCLAW_UPGRADE_SURVIVOR_DOCKER_RUN_TIMEOUT:-1500s}"',
 );
-// Run 36506342273 (hosted 4-vCPU): lane exceeded 1515s; x ~1.5 => 2280s inner.
+// Hosted passes took up to 2290s; use 3420s inside Docker plus 300s host cleanup.
 // Run 36506210440: restart update took 856s; Crabbox 4-CPU took 993s x ~1.5 => 1500s.
 const updateRestartAuthCommand = upgradeSurvivorScriptCommand(
   "OPENCLAW_UPGRADE_SURVIVOR_PUBLISHED_BASELINE=1 OPENCLAW_UPGRADE_SURVIVOR_UPDATE_RESTART_MODE=auto-auth OPENCLAW_UPGRADE_SURVIVOR_COMMAND_TIMEOUT=1500s",
-  'export OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC="${OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC:-openclaw@latest}"; export OPENCLAW_UPGRADE_SURVIVOR_DOCKER_RUN_TIMEOUT="${OPENCLAW_UPGRADE_SURVIVOR_DOCKER_RUN_TIMEOUT:-2280s}"',
+  'export OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC="${OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC:-openclaw@latest}"; export OPENCLAW_UPGRADE_SURVIVOR_DOCKER_RUN_TIMEOUT="${OPENCLAW_UPGRADE_SURVIVOR_DOCKER_RUN_TIMEOUT:-3420s}"',
 );
 const updateMigrationCommand = upgradeSurvivorScriptCommand(
   "OPENCLAW_UPGRADE_SURVIVOR_PUBLISHED_BASELINE=1",
@@ -75,22 +76,30 @@ const updateMigrationCommand = upgradeSurvivorScriptCommand(
 const dreamingCronDoctorCommand = upgradeSurvivorScriptCommand(
   "OPENCLAW_UPGRADE_SURVIVOR_PUBLISHED_BASELINE=1 OPENCLAW_UPGRADE_SURVIVOR_BASELINE_SPEC=openclaw@2026.9.6 OPENCLAW_UPGRADE_SURVIVOR_CANDIDATE=current OPENCLAW_UPGRADE_SURVIVOR_SCENARIO=dreaming-cron-doctor OPENCLAW_UPGRADE_SURVIVOR_UPDATE_RESTART_MODE=manual OPENCLAW_UPGRADE_SURVIVOR_ROOT_MANAGED_VPS=0 OPENCLAW_UPGRADE_SURVIVOR_LIVE_MODELS= OPENCLAW_UPGRADE_SURVIVOR_LIVE_OPENAI=0",
 );
-// One lane per recorded source release so the hops can run concurrently.
-const updateFirstHopCompatLanes = listRecordedFirstHopSourceVersions().map((version) =>
-  npmLane(
-    updateFirstHopCompatLaneName(version),
-    `OPENCLAW_QA_ALLOW_UPDATE_FIRST_HOP=1 OPENCLAW_UPDATE_FIRST_HOP_SOURCE_VERSIONS=${version} OPENCLAW_SKIP_DOCKER_BUILD=1 pnpm test:docker:update-first-hop-compat`,
-    {
-      resources: ["service"],
-      stateScenario: "upgrade-survivor",
-      // Run 36506342273 (hosted 4-vCPU): projected 2125s x ~1.5 => 3200s inner;
-      // add 300s for host-side fixtures, package preparation, and cleanup.
-      timeoutMs: 3500 * 1000,
-      // Limit npm/disk contention to two hops at npm limit 5; a weight-3 survivor can overlap one.
-      weight: 2,
-    },
+const updateFirstHopCompatLaneOptions = {
+  resources: ["service"],
+  stateScenario: "upgrade-survivor",
+  // Run 36506342273 (hosted 4-vCPU): projected 2125s x ~1.5 => 3200s inner;
+  // add 300s for host-side fixtures, package preparation, and cleanup.
+  timeoutMs: 3500 * 1000,
+  // Limit npm/disk contention to two hops at npm limit 5; a weight-3 survivor can overlap one.
+  weight: 2,
+} satisfies LaneOptions;
+// Keep source-derived hops separate while running the post-convergence edge case once.
+const updateFirstHopCompatLanes = [
+  ...listRecordedFirstHopSourceVersions().map((version) =>
+    npmLane(
+      updateFirstHopCompatLaneName(version),
+      `OPENCLAW_QA_ALLOW_UPDATE_FIRST_HOP=1 OPENCLAW_UPDATE_FIRST_HOP_SCENARIO=source OPENCLAW_UPDATE_FIRST_HOP_SOURCE_VERSIONS=${version} OPENCLAW_SKIP_DOCKER_BUILD=1 pnpm test:docker:update-first-hop-compat`,
+      updateFirstHopCompatLaneOptions,
+    ),
   ),
-);
+  npmLane(
+    UPDATE_FIRST_HOP_MISSING_LOAD_PATH_LANE,
+    "OPENCLAW_QA_ALLOW_UPDATE_FIRST_HOP=1 OPENCLAW_UPDATE_FIRST_HOP_SCENARIO=missing-load-path OPENCLAW_SKIP_DOCKER_BUILD=1 pnpm test:docker:update-first-hop-compat",
+    updateFirstHopCompatLaneOptions,
+  ),
+];
 const CODEX_HARNESS_API_KEY_ENV = "OPENCLAW_LIVE_CODEX_HARNESS_AUTH=api-key";
 const npmOnboardLaneOptions = {
   prepublishPluginPackages: ["@openclaw/codex"],
@@ -249,8 +258,8 @@ function createPackageUpdateMaintenanceLanes() {
     }),
     npmLane("update-restart-auth", updateRestartAuthCommand, {
       stateScenario: "upgrade-survivor",
-      // Run 36506342273: 1515s x ~1.5 => 2280s inner + 300s host-side margin.
-      timeoutMs: 43 * 60 * 1000,
+      // Preserve 5 minutes of host-side cleanup margin beyond the container budget.
+      timeoutMs: 3720 * 1000,
       upgradeSurvivorScenario: "base",
       weight: 3,
     }),
@@ -872,9 +881,9 @@ const releasePathPackageUpdateOpenAiLanes = [
   scheduledLane("live-codex-npm-plugin"),
   scheduledLane("codex-on-demand", { timeoutMs: 30 * 60 * 1000 }),
   scheduledLane("release-typed-onboarding"),
-  // Use the shorter package row without changing npm weights or upgrade coverage.
-  ...scheduledLaneList("root-managed-vps-upgrade", "update-restart-auth"),
+  scheduledLane("root-managed-vps-upgrade"),
 ];
+const releasePathPackageUpdateRestartAuthLanes = scheduledLaneList("update-restart-auth");
 
 // Balance the npm-limited rows without raising per-runner resource caps.
 const releasePathPackageOnboardingLanes = scheduledLaneList(
@@ -914,6 +923,7 @@ const primaryReleasePathChunks: Record<string, DockerE2eLane[]> = {
     ),
   ],
   "package-update-openai": releasePathPackageUpdateOpenAiLanes,
+  "package-update-restart-auth": releasePathPackageUpdateRestartAuthLanes,
   "package-update-onboarding": releasePathPackageOnboardingLanes,
   "package-update-migrations": releasePathPackageMigrationLanes,
   "package-update-self-upgrade": releasePathPackageSelfUpgradeLanes,
@@ -933,6 +943,7 @@ const primaryReleasePathChunks: Record<string, DockerE2eLane[]> = {
 const primaryReleasePathChunkProfiles: Record<string, DockerE2eReleaseProfile[]> = {
   core: ["stable", "full"],
   "package-update-openai": ["beta", "stable", "full"],
+  "package-update-restart-auth": ["beta", "stable", "full"],
   "package-update-onboarding": ["beta", "stable", "full"],
   "package-update-migrations": ["beta", "stable", "full"],
   "package-update-self-upgrade": ["beta", "stable", "full"],
@@ -950,7 +961,11 @@ const primaryReleasePathChunkProfiles: Record<string, DockerE2eReleaseProfile[]>
 };
 
 const legacyReleasePathChunks: Record<string, DockerE2eLane[]> = {
-  "package-update": [...releasePathPackageUpdateOpenAiLanes, ...releasePathPackageUpdateCoreLanes],
+  "package-update": [
+    ...releasePathPackageUpdateOpenAiLanes,
+    ...releasePathPackageUpdateRestartAuthLanes,
+    ...releasePathPackageUpdateCoreLanes,
+  ],
   "package-update-core": releasePathPackageUpdateCoreLanes,
   "plugins-runtime-core": releasePathPluginRuntimeCoreLanes,
   "plugins-runtime": releasePathPluginRuntimeLanes,

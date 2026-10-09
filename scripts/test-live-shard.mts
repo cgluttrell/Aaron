@@ -93,6 +93,11 @@ const OPTIONAL_LIVE_SHARD_FILE_ENVS = new Map([
   ["test/e2e/crabbox-sandbox.live.test.ts", ["OPENCLAW_E2E_CRABBOX"]],
   ["test/image-generation.infer-cli.live.test.ts", ["OPENCLAW_LIVE_INFER_CLI_TEST"]],
 ]);
+const REQUIRED_NONEMPTY_LIVE_SHARD_FILE_ENVS = new Map([
+  ["extensions/llama-cpp/src/external-server/llama-server.live.test.ts", ["LLAMA_SERVER_LIVE_URL"]],
+  ["extensions/meta/meta.live.test.ts", ["MODEL_API_KEY"]],
+  ["extensions/mistral/mistral.live.test.ts", ["MISTRAL_API_KEY", "ELEVENLABS_API_KEY"]],
+]);
 const SKIPPED_ASSERTION_STATUSES = new Set(["disabled", "pending", "skipped", "todo"]);
 const QA_RUNTIME_LIVE_TEST = "extensions/qa-lab/src/matrix-channel-driver.lifecycle.live.test.ts";
 const QA_RUNTIME_ARTIFACT = "dist/extensions/qa-lab/runtime-api.js";
@@ -317,19 +322,28 @@ function isMoonshotLiveTest(file: string) {
   return file.startsWith("extensions/moonshot/");
 }
 
-// Release-lead waiver for 2026.9.7 (Peter, 2026-09-29 00:40 PT), carried into
-// 2026.9.8 by the release owner on 2026-10-01: these files' only live case is
+// Release-lead waiver for 2026.9.7 (Peter, 2026-09-29 00:40 PT), carried through
+// 2026.9.9 by the release owner: these files' only live case is
 // skipped on the release branch, so selecting them would leave no passing assertion.
 // Scoped to the exact candidate versions; restore after #161083/#161084 and the
 // subagent cold-restart follow-up land.
-const RELEASE_2026_9_7_AND_8_WAIVED_LIVE_FILES = new Set([
+const RELEASE_2026_9_7_TO_9_WAIVED_LIVE_FILES = new Set([
   "src/gateway/gateway-progress-refresh.live.test.ts",
   "src/agents/embedded-agent-runner.responses-output-limit.live.test.ts",
   "test/gateway-subagent-restart.live.test.ts",
 ]);
 const RELEASE_WAIVED_LIVE_FILES = new Map<string, ReadonlySet<string>>([
-  ["2026.9.7", RELEASE_2026_9_7_AND_8_WAIVED_LIVE_FILES],
-  ["2026.9.8", RELEASE_2026_9_7_AND_8_WAIVED_LIVE_FILES],
+  ["2026.9.7", RELEASE_2026_9_7_TO_9_WAIVED_LIVE_FILES],
+  ["2026.9.8", RELEASE_2026_9_7_TO_9_WAIVED_LIVE_FILES],
+  [
+    "2026.9.9",
+    new Set([
+      ...RELEASE_2026_9_7_TO_9_WAIVED_LIVE_FILES,
+      // Release owner approved omitting the flaky Gemini switch probe for 2026.9.9.
+      // Keep Google provider/Gateway coverage; restore this probe on the next line.
+      "src/agents/google-gemini-switch.live.test.ts",
+    ]),
+  ],
 ]);
 
 export function withoutReleaseWaivedLiveFiles(
@@ -635,11 +649,14 @@ function isDisabledOptionalLiveShardFile(
   evidence: FilePassEvidence | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ) {
-  const requiredEnvNames = OPTIONAL_LIVE_SHARD_FILE_ENVS.get(file);
-  if (
-    !requiredEnvNames ||
-    requiredEnvNames.some((name) => parsePermissiveBooleanToken(env[name]) === true)
-  ) {
+  const booleanOptIns = OPTIONAL_LIVE_SHARD_FILE_ENVS.get(file);
+  const requiredNonemptyEnv = REQUIRED_NONEMPTY_LIVE_SHARD_FILE_ENVS.get(file);
+  const enabled = booleanOptIns
+    ? booleanOptIns.some((name) => parsePermissiveBooleanToken(env[name]) === true)
+    : requiredNonemptyEnv
+      ? requiredNonemptyEnv.every((name) => env[name]?.trim())
+      : true;
+  if (enabled) {
     return false;
   }
   const statuses = evidence?.statuses ?? [];
@@ -657,7 +674,7 @@ function countEnabledLivePasses(
   env: NodeJS.ProcessEnv = process.env,
 ) {
   if (
-    OPTIONAL_LIVE_SHARD_FILE_ENVS.has(file) &&
+    (OPTIONAL_LIVE_SHARD_FILE_ENVS.has(file) || REQUIRED_NONEMPTY_LIVE_SHARD_FILE_ENVS.has(file)) &&
     isDisabledOptionalLiveShardFile(file, evidence, env)
   ) {
     return 0;

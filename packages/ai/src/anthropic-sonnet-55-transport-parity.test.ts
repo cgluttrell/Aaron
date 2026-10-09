@@ -10,6 +10,43 @@ describe("Anthropic Sonnet 5.5 transport parity", () => {
   registerParityHostLifecycle();
 
   it.each([
+    [undefined, "medium"],
+    ["minimal", "low"],
+    ["xhigh", "xhigh"],
+    ["max", "max"],
+    ["off", undefined],
+  ] as const)(
+    "sends Haiku 5.5 %s without legacy budgets or fallbacks",
+    async (reasoning, effort) => {
+      for (const implementation of ["provider", "transport"] as const) {
+        const { payload, headers } = await captureAnthropicRequest(implementation, {
+          model: { id: "claude-haiku-5-5", maxTokens: 128_000 },
+          reasoning,
+          toolChoice: { type: "tool", name: "lookup" },
+          temperature: 0.2,
+        });
+        expect(payload).toMatchObject({
+          max_tokens: 128_000,
+          tool_choice: { type: "tool", name: "lookup" },
+        });
+        if (reasoning === "off") {
+          expect(payload.thinking).toEqual({ type: "disabled" });
+          expect(payload).not.toHaveProperty("output_config");
+        } else {
+          expect(payload.thinking).toMatchObject({ type: "adaptive" });
+          expect(payload.thinking).not.toHaveProperty("budget_tokens");
+          expect(payload.output_config).toEqual({ effort });
+        }
+        expect(payload).not.toHaveProperty("temperature");
+        expect(payload).not.toHaveProperty("service_tier");
+        expect(payload).not.toHaveProperty("fallbacks");
+        expect(payload).not.toHaveProperty("speed");
+        expect(headers.get("anthropic-beta") ?? "").not.toContain("server-side-fallback");
+      }
+    },
+  );
+
+  it.each([
     { model: { id: "claude-sonnet-5-5" }, reasoning: undefined, effort: "high" },
     {
       model: {
@@ -85,6 +122,11 @@ describe("Anthropic Sonnet 5.5 transport parity", () => {
   );
 
   it.each([
+    { source: "claude-haiku-5-5", target: "claude-haiku-5-5", preserve: true },
+    { source: "claude-haiku-5-5", target: "claude-haiku-4-5", preserve: false },
+    { source: "claude-haiku-4-5", target: "claude-haiku-5-5", preserve: false },
+    { source: "claude-haiku-5-5", target: "claude-fable-5-1", preserve: false },
+    { source: "claude-haiku-5-5", target: "claude-sonnet-5-5", preserve: false },
     { source: "claude-sonnet-5-5", target: "claude-sonnet-5-5", preserve: true },
     { source: "claude-sonnet-5", target: "claude-sonnet-5-5", preserve: true },
     { source: "claude-opus-4-8", target: "claude-sonnet-5-5", preserve: true },

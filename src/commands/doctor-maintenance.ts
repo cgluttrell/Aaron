@@ -31,7 +31,6 @@ import { holdDoctorMaintenanceExit } from "./doctor-maintenance-exit.js";
 import {
   assertDoctorMaintenanceInspection,
   classifyDoctorMaintenanceRefusal,
-  readDoctorMaintenanceRecoveryConfig,
 } from "./doctor-maintenance-inspection.js";
 import {
   assertStaleDoctorGatewayStopped,
@@ -131,9 +130,23 @@ export async function beginDoctorMaintenance(
     await state.release();
     repairStoresMayBeOpen = false;
   };
+  let deferredStateReleaseFailure: unknown;
+  const throwDeferredStateReleaseFailure = () => {
+    if (deferredStateReleaseFailure !== undefined) {
+      // SAFETY: TypeScript erases this assertion, preserving the exact captured rejection identity.
+      throw deferredStateReleaseFailure as Error;
+    }
+  };
   const release = async (assertCustody?: () => void) => {
     await settle(async () => {
-      await releaseState();
+      try {
+        await releaseState();
+      } catch (error) {
+        if (hasCommandProcessCleanupError(error) || state.hasOpenResources) {
+          throw error;
+        }
+        deferredStateReleaseFailure ??= error;
+      }
       const recovery = stopped?.windowsTaskAutoStartRecovery;
       try {
         assertCustody?.();
@@ -349,8 +362,10 @@ export async function beginDoctorMaintenance(
           undefined,
           assertStopCustody ?? assertUpdateAdmissionCurrent,
         );
+        throwDeferredStateReleaseFailure();
       } else {
         await release();
+        throwDeferredStateReleaseFailure();
       }
     } catch (restoreError) {
       throw new AggregateError([error, restoreError], `${String(error)} ${String(restoreError)}`, {
@@ -383,7 +398,10 @@ export async function beginDoctorMaintenance(
     throw refusal;
   };
   // Admission can stop the service before returning a maintenance handle.
-  const exit = holdDoctorMaintenanceExit();
+  const exit = holdDoctorMaintenanceExit((message) => {
+    warnings.push(message);
+    params.runtime.error(message);
+  });
   const state = createDoctorMaintenanceState({
     params,
     env,
@@ -589,7 +607,7 @@ export async function beginDoctorMaintenance(
     get databaseWrites() {
       return state.receipt;
     },
-    run: <T>(operation: () => T) => state.resources!.run(operation),
+    run: <T>(operation: () => T) => state.run(operation),
     releaseState: () => settle(releaseState),
     async release() {
       if (this !== maintenance) {
@@ -598,6 +616,7 @@ export async function beginDoctorMaintenance(
       custody = "released";
       try {
         await release();
+        throwDeferredStateReleaseFailure();
       } catch (error) {
         exit.release(true);
         throw error;
@@ -627,28 +646,21 @@ export async function beginDoctorMaintenance(
           await release(assertCustody);
           return;
         }
-        if (classifyDoctorMaintenanceRefusal(failure).kind === "data-at-risk") {
-          retainStoppedInstallation = true;
-          await release(assertCustody);
-          return;
-        }
         if (!cfg) {
           try {
-            cfg = await readDoctorMaintenanceRecoveryConfig(
-              state.resources!,
-              env,
-              params.runtime.log,
-            );
+            const { readConfigFileSnapshot } = await import("../config/config.js");
+            cfg = (await readConfigFileSnapshot({ skipPluginValidation: true, observe: false }))
+              .config;
           } catch (error) {
-            retainStoppedInstallation = true;
             throw new DoctorMaintenanceRefusalError(
-              `Doctor left the Gateway stopped because persisted repair state is not ready: ${formatErrorMessage(error)}`,
+              `Doctor could not restore the Gateway because persisted repair state is not ready: ${formatErrorMessage(error)}`,
               { kind: "data-at-risk", reason: "incomplete-migration" },
               { cause: error },
             );
           }
         }
         await finish(cfg, assertCustody, writeConfig);
+        throwDeferredStateReleaseFailure();
       } catch (restoreError) {
         failed = true;
         if (failure !== undefined) {

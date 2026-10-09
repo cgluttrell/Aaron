@@ -137,6 +137,7 @@ const RELEASE_2026_9_5_REQUIRED_REVIEWED_SOURCE_FINDING_COUNTS = new Map(
 const CURRENT_REQUIRED_REVIEWED_SOURCE_FINDING_COUNTS = new Map<string, number>([
   ...RELEASE_2026_9_5_REQUIRED_REVIEWED_SOURCE_FINDING_COUNTS,
   ["@openclaw/facetime:dangerous-exec:src/audio-pump.ts", 1],
+  ["@openclaw/llama-cpp-provider:dangerous-exec:src/llama-server-vc-runtime.ts", 1],
   ["@openclaw/onnx:dangerous-exec:src/worker-client.ts", 1],
 ]);
 
@@ -293,6 +294,7 @@ for (const [key, count] of [
   ["@openclaw/codex:dangerous-exec:src/app-server/auth-refresh-authority.integration.test.ts", 1],
   ["@openclaw/feishu:env-harvesting:src/client.test.ts", 1],
   ["@openclaw/imessage:dangerous-exec:src/client.test.ts", 4],
+  ["@openclaw/mxc-sandbox:dangerous-exec:test/mxc-sdk-wire-contract.integration.test.ts", 1],
   ["@openclaw/signal:dangerous-exec:src/socket-path.test.ts", 1],
 ] as const) {
   CURRENT_OPTIONAL_REVIEWED_PACKED_FINDING_COUNTS.set(key, count);
@@ -412,6 +414,7 @@ const FROZEN_RELEASE_SECURITY_INVENTORY_POLICIES = new Map<string, PluginSecurit
   ],
   ["release/2026.9.7", CURRENT_SECURITY_INVENTORY_POLICY],
   ["release/2026.9.8", CURRENT_SECURITY_INVENTORY_POLICY],
+  ["release/2026.9.9", CURRENT_SECURITY_INVENTORY_POLICY],
   [
     "extended-stable/2026.6.33",
     {
