@@ -25,7 +25,7 @@ export function resolveCronActiveRuntimeConfig(cfg: OpenClawConfig): OpenClawCon
 }
 
 /** Derives isolated cron agent defaults from one immutable config snapshot. */
-export function resolveCronAgentConfigFromSnapshot(params: {
+function resolveCronAgentConfigFromSnapshot(params: {
   config: OpenClawConfig;
   agentConfigOverride?: ResolvedAgentConfig;
 }) {
