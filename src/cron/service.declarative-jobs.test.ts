@@ -238,7 +238,9 @@ describe("CronService declarative jobs", () => {
     },
   );
 
-  it("persists an ineligible review and reconciles recovery without replacing its job", async () => {
+  it("keeps a review enabled under a codex-routed model and reconciles a model change without replacing its job", async () => {
+    // Fork T2958 (6f3b495ae58) pins system review turns to the OpenClaw runtime, so a review is
+    // never ineligible: the upstream no-rooted-runtime disable path no longer exists.
     const { cron, storePath } = await setup();
     const cfg: OpenClawConfig = {
       agents: {
@@ -253,26 +255,23 @@ describe("CronService declarative jobs", () => {
     };
     const created = await add(cron, project(), { enabledExplicit: true, systemOwned: true });
     expect(created.job).toMatchObject({
-      enabled: false,
-      displayName: expect.stringContaining("no-rooted-runtime"),
-    });
-    expect(created.job.state.nextRunAtMs).toBeUndefined();
-    expect(
-      (await loadCronStore(storePath)).jobs.find((job) => job.id === created.id),
-    ).toMatchObject({ enabled: false, displayName: created.job.displayName });
-    cfg.agents!.defaults!.model = "anthropic/claude-sonnet-4-6";
-    const recovered = await add(cron, project(), { enabledExplicit: true, systemOwned: true });
-    expect(recovered).toMatchObject({
-      id: created.id,
-      created: false,
-      updated: true,
       enabled: true,
+      displayName: "Skill collection review (main)",
     });
-    expect(recovered.job.displayName).toBe("Skill collection review (main)");
-    expect(recovered.job.state.nextRunAtMs).toEqual(expect.any(Number));
+    expect(created.job.state.nextRunAtMs).toEqual(expect.any(Number));
     expect(
       (await loadCronStore(storePath)).jobs.find((job) => job.id === created.id),
     ).toMatchObject({ enabled: true, displayName: "Skill collection review (main)" });
+    cfg.agents!.defaults!.model = "anthropic/claude-sonnet-4-6";
+    const recovered = await add(cron, project(), { enabledExplicit: true, systemOwned: true });
+    expect(recovered).toMatchObject({ id: created.id, created: false, enabled: true });
+    expect(recovered.job.displayName).toBe("Skill collection review (main)");
+    expect(recovered.job.state.nextRunAtMs).toEqual(expect.any(Number));
+    const reviews = (await loadCronStore(storePath)).jobs.filter(
+      (job) => job.displayName === "Skill collection review (main)",
+    );
+    expect(reviews.map((job) => job.id)).toEqual([created.id]);
+    expect(reviews[0]).toMatchObject({ enabled: true });
   });
 
   it("keeps the first creator across declaration convergence and restart", async () => {
