@@ -673,6 +673,7 @@ src/infra/gateway-lock-process.ts
 src/infra/gateway-owner-lease.ts
 src/infra/gateway-lock-payload.ts
 src/infra/gateway-state-owner-directory.ts
+src/infra/gateway-state-owner-holder.ts
 src/infra/gateway-state-owner.ts
 src/infra/gateway-process-argv.ts
 src/infra/gateway-supervision.ts
