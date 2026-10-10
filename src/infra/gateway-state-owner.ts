@@ -10,6 +10,7 @@ import {
   resolveGatewayLockDir,
   resolveGatewayLockDirForCanonicalStateDir,
 } from "../config/paths.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 import { getFileLockProcessStartTime, isPidAlive } from "../shared/pid-alive.js";
 import {
@@ -31,6 +32,7 @@ import {
   removeCreatedProjectionDirectories,
   type StateOwnerDirectoryIdentity,
 } from "./gateway-state-owner-directory.js";
+import { describeStateOwnerHolder } from "./gateway-state-owner-holder.js";
 import { normalizeSqliteNonNegativeInteger } from "./sqlite-busy-timeout.js";
 import { runWithSqliteCleanup } from "./sqlite-lifecycle-errors.js";
 import { isLockOwnerDefinitelyStale } from "./stale-lock-file.js";
@@ -168,9 +170,10 @@ export const GatewayStateOwnerContentionError = resolveGlobalSingleton(
       constructor(
         public readonly databasePath: string,
         public override readonly cause?: unknown,
+        public readonly holder?: string,
       ) {
         super(
-          `OpenClaw state database is busy at ${databasePath}. Wait for the other OpenClaw process to finish, then retry. If it persists, run \`openclaw gateway status\` and check for other OpenClaw processes using the same state directory. A running Gateway can hold this ownership until it stops; stop it through its service manager or original terminal before retrying.`,
+          `OpenClaw state database is busy at ${databasePath}. Wait for the other OpenClaw process to finish, then retry. If it persists, run \`openclaw gateway status\` and check for other OpenClaw processes using the same state directory. A running Gateway can hold this ownership until it stops; stop it through its service manager or original terminal before retrying.${holder ? ` Holder: ${holder}.` : ""}`,
         );
         this.name = "GatewayStateOwnerContentionError";
       }
@@ -179,6 +182,18 @@ export const GatewayStateOwnerContentionError = resolveGlobalSingleton(
 export type GatewayStateOwnerContentionError = InstanceType<
   typeof GatewayStateOwnerContentionError
 >;
+
+const contentionLog = createSubsystemLogger("state/owner");
+
+function stateOwnerContention(
+  databasePath: string,
+  pathname: string,
+  cause?: unknown,
+): GatewayStateOwnerContentionError {
+  const holder = describeStateOwnerHolder(pathname);
+  contentionLog.warn(`state owner contention at ${databasePath}: ${holder}`);
+  return new GatewayStateOwnerContentionError(databasePath, cause, holder);
+}
 
 const StateDatabaseAdmissionPendingError = resolveGlobalSingleton(
   Symbol.for("openclaw.stateDatabaseAdmissionPendingError"),
@@ -290,7 +305,7 @@ function acquireOwnerFile(
       ) {
         // A serving Gateway cannot lend schema authority. An unregistered local
         // holder may need this host to service grants, so it cannot be waited on.
-        throw new GatewayStateOwnerContentionError(databasePath);
+        throw stateOwnerContention(databasePath, pathname);
       }
     } catch (error) {
       if (extractErrorCode(error) !== "ENOENT") {
@@ -325,7 +340,7 @@ function acquireOwnerFile(
         continue;
       }
       if (code === "file_lock_timeout" || code === "file_lock_stale") {
-        throw new GatewayStateOwnerContentionError(databasePath, error);
+        throw stateOwnerContention(databasePath, pathname, error);
       }
       throw error;
     }
@@ -404,7 +419,7 @@ export function acquireGatewayStateOwner(params: {
 }): StateDatabaseSchemaLease {
   const pathname = resolveGatewayStateOwnerPath(params.databasePath);
   if (owners.has(pathname)) {
-    throw new GatewayStateOwnerContentionError(params.databasePath);
+    throw stateOwnerContention(params.databasePath, pathname);
   }
   const payload = params.payload
     ? { ...params.payload, ownerId: params.payload.ownerId ?? randomUUID() }
@@ -456,7 +471,7 @@ export function acquireStateDatabaseSchemaLease(
   const pathname = resolveGatewayStateOwnerPath(databasePath);
   let owner = owners.get(pathname);
   if (owner && (!owner.accepting || !hasPhysicalOwnership(owner))) {
-    throw new GatewayStateOwnerContentionError(databasePath);
+    throw stateOwnerContention(databasePath, pathname);
   }
   if (owner) {
     assertStateDatabaseAccessAllowed(databasePath);
@@ -561,7 +576,7 @@ export function tryBorrowGatewayStateOwner(
     return undefined;
   }
   if (!owner.accepting || !hasPhysicalOwnership(owner)) {
-    throw new GatewayStateOwnerContentionError(databasePath);
+    throw stateOwnerContention(databasePath, pathname);
   }
   assertStateDatabaseAccessAllowed(databasePath);
   return acquireStateDatabaseSchemaLease(databasePath);
