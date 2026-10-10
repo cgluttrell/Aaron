@@ -32,6 +32,12 @@ export function createNoopLogger(): NoopLogger {
   };
 }
 
+// Synthetic cron fixtures are not cgroup admission tests. Keep unrelated CI
+// host memory pressure from changing their expected run outcome.
+export const allowDispatchPressureForTest: NonNullable<
+  CronServiceDeps["dispatchPressureGuard"]
+> = () => ({ status: "allow", reason: "below_threshold" });
+
 export function createCronStoreHarness(options?: { prefix?: string }) {
   let fixtureRoot = "";
   let caseId = 0;
