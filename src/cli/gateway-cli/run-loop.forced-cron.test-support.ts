@@ -35,6 +35,9 @@ const cron = new CronService({
   log: { info() {}, warn() {}, error() {}, debug() {} },
   enqueueSystemEvent() {},
   requestHeartbeat() {},
+  // This fixture proves restart draining, not cgroup admission. Keep its synthetic
+  // cron run admitted even when the shared CI host is under memory pressure.
+  dispatchPressureGuard: () => ({ status: "allow", reason: "below_threshold" }),
   runIsolatedAgentJob: ({ abortSignal, onExecutionStarted }) =>
     trackAsyncWork(async () => {
       assert(abortSignal);
