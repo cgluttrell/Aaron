@@ -580,8 +580,6 @@ describe("shared-state worker error transport", () => {
     expect(hydrateOpenClawStateWorkerError(retained)).toBe(retained);
   });
 
-<<<<<<< HEAD
-=======
   it.each([
     new SqliteCoordinatorError("admission refused", new Error("native cause")),
     new GatewayStateOwnerContentionError("/fixture/state.sqlite"),
@@ -606,7 +604,6 @@ describe("shared-state worker error transport", () => {
     }
   });
 
->>>>>>> 35c55aa06f0 (Lane: Forge; Model: GPT-6; Session: mission-control-forge-(repair-builder)-a418ca50-2a97-4b00-ba9c-6e2cabce004a)
   const validNode = {
     type: "maintenance",
     kind: "audit-events-v2",

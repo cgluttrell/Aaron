@@ -2,7 +2,11 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
-import { setupCronServiceSuite, writeCronStoreSnapshot } from "../../cron/service.test-harness.js";
+import {
+  allowDispatchPressureForTest,
+  setupCronServiceSuite,
+  writeCronStoreSnapshot,
+} from "../../cron/service.test-harness.js";
 import { createCronServiceState as createCronServiceStateBase } from "../../cron/service/state.js";
 import { onTimer } from "../../cron/service/timer.test-support.js";
 import { loadCronStore } from "../../cron/store.js";
@@ -55,6 +59,7 @@ function createCronServiceState(
     runIsolatedAgentJob: vi.fn(async () => ({ status: "ok" as const })),
     cronEnabled: true,
     log: logger,
+    dispatchPressureGuard: allowDispatchPressureForTest,
     ...params,
   });
 }
