@@ -7,7 +7,10 @@ import {
 } from "../../agents/admitted-run-context.js";
 import { hasActiveCronJobs } from "../../cron/active-jobs.js";
 import { CronService, type CronEvent } from "../../cron/service.js";
-import { setupCronServiceSuite } from "../../cron/service.test-harness.js";
+import {
+  allowDispatchPressureForTest,
+  setupCronServiceSuite,
+} from "../../cron/service.test-harness.js";
 import type { CronServiceDeps } from "../../cron/service/state.js";
 import {
   createGatewaySchedulerClock,
@@ -106,6 +109,7 @@ describe.each(
       onEvent: (event) => events.push(event),
       runIsolatedAgentJob: runJob,
       runScriptJob: runJob,
+      dispatchPressureGuard: allowDispatchPressureForTest,
     });
     try {
       const job = await cron.add(

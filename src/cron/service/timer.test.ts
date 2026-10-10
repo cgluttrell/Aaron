@@ -4,7 +4,11 @@ import { describe, expect, it, vi } from "vitest";
 import { observeCronStoreCommits } from "../../../test/helpers/cron/runtime-mutation.js";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { upsertSessionEntryCore } from "../../config/sessions/session-accessor.js";
-import { setupCronServiceSuite, writeCronStoreSnapshot } from "../../cron/service.test-harness.js";
+import {
+  allowDispatchPressureForTest,
+  setupCronServiceSuite,
+  writeCronStoreSnapshot,
+} from "../../cron/service.test-harness.js";
 import { createCronServiceState as createCronServiceStateBase } from "../../cron/service/state.js";
 import { onTimer } from "../../cron/service/timer.test-support.js";
 import { loadCronStore } from "../../cron/store.js";
@@ -40,6 +44,7 @@ function createCronServiceState(
     defaultAgentId: "main",
     cronEnabled: true,
     log: logger,
+    dispatchPressureGuard: allowDispatchPressureForTest,
     ...params,
   });
 }

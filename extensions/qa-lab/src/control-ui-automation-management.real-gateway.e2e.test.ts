@@ -154,7 +154,11 @@ suite.define(() => {
           repoRoot,
           command: {
             executablePath: process.execPath,
-            argsPrefix: [path.join(repoRoot, "openclaw.mjs")],
+            argsPrefix: [
+              "--require",
+              path.join(repoRoot, "extensions/qa-lab/src/non-pressure-cgroup-fixture.cjs"),
+              path.join(repoRoot, "openclaw.mjs"),
+            ],
             cwd: repoRoot,
             usePackagedPlugins: true,
           },
