@@ -50,7 +50,7 @@ export type ErrorIdentity =
         | "skill-upload-request"
         | "mcp-oauth-corruption";
     }
-  | { type: "state-owner-contention"; databasePath: string }
+  | { type: "state-owner-contention"; databasePath: string; holder?: string }
   | { type: "ownership-metadata"; databasePath: string }
   | { type: "external-ownership"; databasePath: string; managerId: string }
   | { type: "state-lease"; leaseCode: OpenClawStateLeaseErrorCode }
@@ -107,7 +107,11 @@ export function identifyError(error: Error): ErrorIdentity {
     return { type: "skill-upload-request" };
   }
   if (error instanceof GatewayStateOwnerContentionError) {
-    return { type: "state-owner-contention", databasePath: error.databasePath };
+    return {
+      type: "state-owner-contention",
+      databasePath: error.databasePath,
+      ...(error.holder === undefined ? {} : { holder: error.holder }),
+    };
   }
   if (error instanceof SqliteCoordinatorError) {
     return { type: "coordinator" };
@@ -215,7 +219,11 @@ export function parseIdentity(node: Record<string, unknown>): ErrorIdentity | un
         : undefined;
     case "state-owner-contention":
       return typeof node.databasePath === "string"
-        ? { type: node.type, databasePath: node.databasePath }
+        ? {
+            type: node.type,
+            databasePath: node.databasePath,
+            ...(typeof node.holder === "string" ? { holder: node.holder } : {}),
+          }
         : undefined;
     case "ownership-metadata":
       return typeof node.databasePath === "string"
@@ -292,7 +300,7 @@ export function createError(node: ErrorIdentity & { message: string }): Error {
     case "coordinator":
       return new SqliteCoordinatorError(node.message);
     case "state-owner-contention":
-      return new GatewayStateOwnerContentionError(node.databasePath);
+      return new GatewayStateOwnerContentionError(node.databasePath, undefined, node.holder);
     case "ownership":
       return new OpenClawStateOwnershipError(node.message);
     case "ownership-metadata":

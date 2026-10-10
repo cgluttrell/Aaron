@@ -1,8 +1,12 @@
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { runNodeScript } from "../../test/helpers/run-node-script.js";
 import { resolveGatewayLockDir } from "../config/paths.js";
+import { resetLogger, setLoggerOverride } from "../logging/logger.js";
+import { loggingState } from "../logging/state.js";
 import { stateNativeProcessEntrypoints } from "../state/native-process-runtime.test-support.js";
 import {
   closeOpenClawStateDatabaseForTest,
@@ -732,6 +736,105 @@ describe("Gateway state ownership", () => {
       } finally {
         maintenance?.release();
         owner.release();
+      }
+    });
+  });
+
+  function captureContentionWarnings() {
+    const warn = vi.fn();
+    const originalConsole = loggingState.rawConsole;
+    setLoggerOverride({ level: "silent", consoleLevel: "warn", consoleStyle: "pretty" });
+    loggingState.rawConsole = { log: vi.fn(), info: vi.fn(), warn, error: vi.fn() };
+    return {
+      lines: () => warn.mock.calls.map((call) => String(call[0])),
+      restore() {
+        loggingState.rawConsole = originalConsole;
+        setLoggerOverride(null);
+        resetLogger();
+      },
+    };
+  }
+
+  it("logs the real foreign holder on contention without reclaiming its lock", async () => {
+    await withTempDir("openclaw-state-owner-holder-log-", async (root) => {
+      const databasePath = path.join(root, "state", "openclaw.sqlite");
+      const ownerUrl = new URL("./gateway-state-owner.ts", import.meta.url);
+      const child = spawn(
+        process.execPath,
+        [
+          "--import",
+          import.meta.resolve("tsx"),
+          "--input-type=module",
+          "--eval",
+          `import { acquireGatewayStateOwner } from ${JSON.stringify(ownerUrl.href)};
+          const owner = acquireGatewayStateOwner({ databasePath: ${JSON.stringify(databasePath)} });
+          process.stdout.write("ready\\n");
+          process.stdin.once("data", () => {
+            owner.release();
+            process.exit(0);
+          });`,
+        ],
+        { stdio: ["pipe", "pipe", "inherit"] },
+      );
+      const exited = once(child, "exit");
+      const capture = captureContentionWarnings();
+      try {
+        const [ready] = (await once(child.stdout, "data")) as [Buffer];
+        expect(ready.toString()).toBe("ready\n");
+        let refused: unknown;
+        try {
+          acquireStateDatabaseSchemaLease(databasePath, { busyTimeoutMs: 0 }).release();
+        } catch (error) {
+          refused = error;
+        }
+        expect(refused).toBeInstanceOf(GatewayStateOwnerContentionError);
+        const holder = (refused as GatewayStateOwnerContentionError).holder ?? "";
+        expect(holder).toContain(`holder_pid=${child.pid}`);
+        expect(holder).toContain("holder_role=sqlite-maintenance");
+        expect(holder).toContain("holder_kind=process");
+        expect(holder).toMatch(/holder_held_ms=\d+/u);
+        expect((refused as Error).message).toContain(holder);
+        const line = capture.lines().find((entry) => entry.includes("state owner contention"));
+        expect(line).toContain(databasePath);
+        expect(line).toContain(holder);
+        // Observing the holder never reclaims or rewrites its lock.
+        expect(
+          JSON.parse(fs.readFileSync(resolveGatewayStateOwnerPath(databasePath), "utf8")),
+        ).toMatchObject({ pid: child.pid, role: "sqlite-maintenance" });
+      } finally {
+        capture.restore();
+        child.stdin.write("release\n");
+        expect(await exited).toEqual([0, null]);
+      }
+      expect(fs.existsSync(resolveGatewayStateOwnerPath(databasePath))).toBe(false);
+    });
+  });
+
+  it("reports an unverifiable holder as unavailable instead of trusting its record", async () => {
+    await withTempDir("openclaw-state-owner-holder-unavailable-", async (root) => {
+      const databasePath = path.join(root, "state", "openclaw.sqlite");
+      const owner = acquireGatewayStateOwner({ databasePath });
+      owner.release();
+      fs.writeFileSync(
+        owner.path,
+        JSON.stringify({
+          pid: -1,
+          role: "sqlite-maintenance",
+          createdAt: new Date().toISOString(),
+          configPath: path.join(root, "openclaw.json"),
+        }),
+      );
+      const capture = captureContentionWarnings();
+      try {
+        expect(() => acquireStateDatabaseSchemaLease(databasePath, { busyTimeoutMs: 0 })).toThrow(
+          expect.objectContaining({ holder: "holder=unavailable" }),
+        );
+        const line = capture.lines().find((entry) => entry.includes("state owner contention"));
+        expect(line).toContain("holder=unavailable");
+        expect(line).not.toContain("holder_pid");
+      } finally {
+        capture.restore();
+        fs.rmSync(owner.path, { force: true });
       }
     });
   });

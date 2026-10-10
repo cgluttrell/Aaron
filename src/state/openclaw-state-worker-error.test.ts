@@ -571,12 +571,20 @@ describe("shared-state worker error transport", () => {
   it.each([
     new SqliteCoordinatorError("admission refused", new Error("native cause")),
     new GatewayStateOwnerContentionError("/fixture/state.sqlite"),
+    new GatewayStateOwnerContentionError(
+      "/fixture/state.sqlite",
+      undefined,
+      "holder_pid=555 holder_role=sqlite-maintenance holder_kind=schema holder_held_ms=800",
+    ),
   ])("preserves lifecycle error classification for %s", (original) => {
     const decoded = roundTrip(original);
     expect(decoded).toMatchObject({ name: original.name, message: original.message });
     if (original instanceof GatewayStateOwnerContentionError) {
       expect(decoded).toBeInstanceOf(GatewayStateOwnerContentionError);
-      expect(decoded).toMatchObject({ databasePath: original.databasePath });
+      expect(decoded).toMatchObject({
+        databasePath: original.databasePath,
+        holder: original.holder,
+      });
     } else {
       expect(decoded).toBeInstanceOf(SqliteCoordinatorError);
       expect(decoded.cause).toBeInstanceOf(Error);
