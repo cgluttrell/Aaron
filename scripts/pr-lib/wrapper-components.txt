@@ -833,6 +833,7 @@ src/infra/gateway-owner-lease.ts
 src/infra/gateway-process-argv.ts
 src/infra/gateway-scheduler.ts
 src/infra/gateway-state-owner-directory.ts
+src/infra/gateway-state-owner-holder.ts
 src/infra/gateway-state-owner-heartbeat.runtime.ts
 src/infra/gateway-state-owner-heartbeat.ts
 src/infra/gateway-state-owner-heartbeat.worker.ts
