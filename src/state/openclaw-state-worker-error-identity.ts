@@ -79,7 +79,49 @@ function isMessageOnlyErrorIdentity(node: { type?: unknown }): node is MessageOn
   return typeof node.type === "string" && Object.hasOwn(MESSAGE_ONLY_ERRORS, node.type);
 }
 
+<<<<<<< HEAD
 type ErrorIdentity = NonNullable<ReturnType<typeof parseIdentity>>;
+=======
+export type ErrorIdentity =
+  | { type: "secret-store-validation"; secretCode: SecretStoreValidationError["code"] }
+  | MessageOnlyErrorIdentity
+  | { type: "session-goal-operation"; goalCode: SessionGoalOperationErrorCode }
+  | { type: "session-mutation-conflict"; operationLabel: string }
+  | { type: "worker-session-already-attached"; sessionId: string; environmentId: string }
+  | {
+      type: "workspace-alias-repointed";
+      aliasPath: string;
+      storedWorkspacePath: string;
+      currentWorkspacePath: string;
+    }
+  | { type: "error" | "aggregate" | "mcp-oauth-corruption" }
+  | { type: "state-owner-contention"; databasePath: string; holder?: string }
+  | { type: "ownership-metadata"; databasePath: string }
+  | { type: "external-ownership"; databasePath: string; managerId: string }
+  | { type: "state-lease"; leaseCode: OpenClawStateLeaseErrorCode }
+  | { type: "skill-library"; libraryCode: SkillLibraryErrorCode; currentRevision?: string }
+  | {
+      type: "plugin-blob";
+      blobCode: PluginBlobStoreError["code"];
+      operation: PluginBlobStoreError["operation"];
+      path?: string;
+    }
+  | { type: "maintenance"; kind: MaintenanceKind }
+  | {
+      type: "plugin-state";
+      stateCode: PluginStateStoreError["code"];
+      operation: PluginStateStoreError["operation"];
+      path?: string;
+      owner: PluginStateStoreError["owner"];
+    }
+  | { type: "state-migration"; kind: StateMigrationKind; pathname: string }
+  | {
+      type: "session-metadata";
+      reason: SessionMetadataUnavailableError["reason"];
+      missingTables: readonly string[];
+    }
+  | { type: "agent-media-migration"; pathname: string; schemaVersion: number };
+>>>>>>> 35c55aa06f0 (Lane: Forge; Model: GPT-6; Session: mission-control-forge-(repair-builder)-a418ca50-2a97-4b00-ba9c-6e2cabce004a)
 
 export function identifyError(error: Error): ErrorIdentity {
   if (error instanceof AuthProfileStoreUnreadableError) {
@@ -170,7 +212,7 @@ export function identifyError(error: Error): ErrorIdentity {
     };
   }
   if (error instanceof GatewayStateOwnerContentionError) {
-    return { type: "state-owner-contention", databasePath: error.databasePath };
+    return { type: "state-owner-contention", databasePath: error.databasePath, ...(error.holder ? { holder: error.holder } : {}) };
   }
   if (error instanceof OpenClawStateLeaseError) {
     return { type: "state-lease", leaseCode: error.code };
@@ -402,6 +444,9 @@ export function parseIdentity(node: Record<string, unknown>) {
     }
     case "auth-profile-store-unreadable":
     case "state-owner-contention":
+      return typeof node.databasePath === "string"
+        ? { type: node.type, databasePath: node.databasePath, ...(typeof node.holder === "string" ? { holder: node.holder } : {}) }
+        : undefined;
     case "ownership-metadata":
       return typeof node.databasePath === "string"
         ? { type: node.type, databasePath: node.databasePath }
@@ -504,7 +549,7 @@ export function createError(node: ErrorIdentity & { message: string }): Error {
     case "auth-profile-store-unreadable":
       return new AuthProfileStoreUnreadableError(node.databasePath);
     case "state-owner-contention":
-      return new GatewayStateOwnerContentionError(node.databasePath);
+      return new GatewayStateOwnerContentionError(node.databasePath, undefined, node.holder);
     case "ownership-metadata":
       return new OpenClawStateOwnershipMetadataError(node.databasePath, "");
     case "external-ownership":

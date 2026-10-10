@@ -580,6 +580,33 @@ describe("shared-state worker error transport", () => {
     expect(hydrateOpenClawStateWorkerError(retained)).toBe(retained);
   });
 
+<<<<<<< HEAD
+=======
+  it.each([
+    new SqliteCoordinatorError("admission refused", new Error("native cause")),
+    new GatewayStateOwnerContentionError("/fixture/state.sqlite"),
+    new GatewayStateOwnerContentionError(
+      "/fixture/state.sqlite",
+      undefined,
+      "holder_pid=555 holder_role=sqlite-maintenance holder_kind=schema holder_held_ms=800",
+    ),
+  ])("preserves lifecycle error classification for %s", (original) => {
+    const decoded = roundTrip(original);
+    expect(decoded).toMatchObject({ name: original.name, message: original.message });
+    if (original instanceof GatewayStateOwnerContentionError) {
+      expect(decoded).toBeInstanceOf(GatewayStateOwnerContentionError);
+      expect(decoded).toMatchObject({
+        databasePath: original.databasePath,
+        holder: original.holder,
+      });
+    } else {
+      expect(decoded).toBeInstanceOf(SqliteCoordinatorError);
+      expect(decoded.cause).toBeInstanceOf(Error);
+      expect(decoded.cause).toMatchObject({ message: "native cause" });
+    }
+  });
+
+>>>>>>> 35c55aa06f0 (Lane: Forge; Model: GPT-6; Session: mission-control-forge-(repair-builder)-a418ca50-2a97-4b00-ba9c-6e2cabce004a)
   const validNode = {
     type: "maintenance",
     kind: "audit-events-v2",

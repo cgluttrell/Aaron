@@ -211,10 +211,10 @@ export const GatewayStateOwnerContentionError = resolveGlobalSingleton(
       constructor(
         public readonly databasePath: string,
         public override readonly cause?: unknown,
-        holderDetail?: string,
+        public readonly holder?: string,
       ) {
         super(
-          `OpenClaw state database is busy at ${databasePath}. ${holderDetail ? `${holderDetail} ` : ""}Wait for the other OpenClaw process to finish, then retry. If it persists, run \`openclaw gateway status\` and check for other OpenClaw processes using the same state directory. A running Gateway can hold this ownership until it stops; stop it through its service manager or original terminal before retrying.`,
+          `OpenClaw state database is busy at ${databasePath}. ${holder ? `${holder} ` : ""}Wait for the other OpenClaw process to finish, then retry. If it persists, run \`openclaw gateway status\` and check for other OpenClaw processes using the same state directory. A running Gateway can hold this ownership until it stops; stop it through its service manager or original terminal before retrying.`,
         );
         this.name = "GatewayStateOwnerContentionError";
       }
