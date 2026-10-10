@@ -75,7 +75,7 @@ export type ErrorIdentity =
       currentWorkspacePath: string;
     }
   | { type: "error" | "aggregate" | "mcp-oauth-corruption" }
-  | { type: "state-owner-contention"; databasePath: string }
+  | { type: "state-owner-contention"; databasePath: string; holder?: string }
   | { type: "ownership-metadata"; databasePath: string }
   | { type: "external-ownership"; databasePath: string; managerId: string }
   | { type: "state-lease"; leaseCode: OpenClawStateLeaseErrorCode }
@@ -162,7 +162,7 @@ export function identifyError(error: Error): ErrorIdentity {
     };
   }
   if (error instanceof GatewayStateOwnerContentionError) {
-    return { type: "state-owner-contention", databasePath: error.databasePath };
+    return { type: "state-owner-contention", databasePath: error.databasePath, ...(error.holder ? { holder: error.holder } : {}) };
   }
   if (error instanceof OpenClawStateLeaseError) {
     return { type: "state-lease", leaseCode: error.code };
@@ -340,6 +340,9 @@ export function parseIdentity(node: Record<string, unknown>): ErrorIdentity | un
         ? { type: node.type, reason: node.reason, missingTables: [...node.missingTables] }
         : undefined;
     case "state-owner-contention":
+      return typeof node.databasePath === "string"
+        ? { type: node.type, databasePath: node.databasePath, ...(typeof node.holder === "string" ? { holder: node.holder } : {}) }
+        : undefined;
     case "ownership-metadata":
       return typeof node.databasePath === "string"
         ? { type: node.type, databasePath: node.databasePath }
@@ -423,7 +426,7 @@ export function createError(node: ErrorIdentity & { message: string }): Error {
     case "aggregate":
       return new AggregateError([], node.message);
     case "state-owner-contention":
-      return new GatewayStateOwnerContentionError(node.databasePath);
+      return new GatewayStateOwnerContentionError(node.databasePath, undefined, node.holder);
     case "ownership-metadata":
       return new OpenClawStateOwnershipMetadataError(node.databasePath, "");
     case "external-ownership":
