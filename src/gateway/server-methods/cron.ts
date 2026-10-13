@@ -96,7 +96,6 @@ import {
   cronJobIsVisible,
   cronJobVisibilityTarget,
 } from "./cron-visibility.js";
-import { resolveOperatorSessionCreation } from "./session-creation-provenance.js";
 import type { GatewayRequestHandlers } from "./types.js";
 import { assertValidParams } from "./validation.js";
 
