@@ -111,7 +111,7 @@ describe("before_agent_reply", () => {
     ]);
     const runner = createHookRunner(registry, { logger });
 
-    const result = await runner.runBeforeAgentReply(EVENT, TEST_PLUGIN_AGENT_CTX);
+    const result = await runner.runBeforeAgentReply(event, TEST_PLUGIN_AGENT_CTX);
 
     expect(result).toEqual({ handled: true, reply: { text: "ok" } });
     expect(logger.error).toHaveBeenCalledWith(
@@ -135,7 +135,7 @@ describe("before_agent_reply", () => {
     const runner = createHookRunner(registry);
 
     await expect(
-      runner.runBeforeAgentReply(EVENT, { ...TEST_PLUGIN_AGENT_CTX, trigger: "user" }),
+      runner.runBeforeAgentReply(event, { ...TEST_PLUGIN_AGENT_CTX, trigger: "user" }),
     ).resolves.toEqual({ handled: true, reply: { text: "unrestricted" } });
     expect(scheduled).not.toHaveBeenCalled();
     expect(unrestricted).toHaveBeenCalledOnce();
@@ -168,7 +168,7 @@ describe("before_agent_reply", () => {
       ]);
       const runner = createHookRunner(registry);
 
-      const pending = runner.runBeforeAgentReply(EVENT, TEST_PLUGIN_AGENT_CTX);
+      const pending = runner.runBeforeAgentReply(event, TEST_PLUGIN_AGENT_CTX);
       let settled = false;
       void pending.then(() => {
         settled = true;
