@@ -6,12 +6,12 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createDeferred, withinTest } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { withCliProcessScope } from "../../cli/runtime-cleanup-scope.js";
+import * as logging from "../../logging/logger.js";
 import {
   markGatewayRestartDraining,
   resetGatewayWorkAdmission,
 } from "../../process/gateway-work-admission.js";
 import { recordAgentDatabaseAdmissions } from "../../state/agent-database-admission.js";
-import * as logging from "../../logging/logger.js";
 import * as agentDatabase from "../../state/openclaw-agent-db.js";
 import {
   closeOpenClawAgentDatabaseByPath,
@@ -247,7 +247,7 @@ it("resumes automatic maintenance after Gateway work admission resets", async ()
 
 it("does not start detached maintenance for an executable one-shot CLI write", async () => {
   const { request } = createStore();
-  const dispatch = vi.mocked(reclamation.runSqliteSessionReclamation);
+  const dispatch = vi.mocked(reclamationRun.runSqliteSessionReclamation);
   withCliProcessScope(() => kickSessionEntryMaintenanceAfterWrite(request));
   await yieldToEventLoop();
   expect(dispatch).not.toHaveBeenCalled();
