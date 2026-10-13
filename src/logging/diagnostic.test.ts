@@ -253,6 +253,17 @@ describe("diagnostic session activity aliases", () => {
   });
 });
 
+// A real event-loop stall advances the monotonic clock as well as wall time.
+function installMonotonicStallClock(): (toSystemTime: number) => void {
+  let stallMs = 0;
+  const fakeNow = performance.now.bind(performance);
+  vi.spyOn(performance, "now").mockImplementation(() => fakeNow() + stallMs);
+  return (toSystemTime) => {
+    stallMs += toSystemTime - Date.now();
+    vi.setSystemTime(toSystemTime);
+  };
+}
+
 describe("stuck session diagnostics threshold", () => {
   const session = { sessionId: "s1", sessionKey: "main" };
   let events: DiagnosticEventPayload[];
@@ -297,6 +308,7 @@ describe("stuck session diagnostics threshold", () => {
     const warnSpy = vi.spyOn(diagnosticLogger, "warn").mockImplementation(() => undefined);
 
     vi.setSystemTime(0);
+    const stallUntil = installMonotonicStallClock();
     startEnabledDiagnosticHeartbeat({ recoverStuckSession });
     logSessionStateChange({ ...session, state: "processing" });
     markDiagnosticEmbeddedRunStarted(session);
@@ -309,7 +321,7 @@ describe("stuck session diagnostics threshold", () => {
     });
     vi.advanceTimersByTime(10_000);
 
-    vi.setSystemTime(35_000);
+    stallUntil(35_000);
     vi.advanceTimersByTime(30_000);
 
     expectLoggerMessageContaining(warnSpy, "liveness heartbeat delayed");
@@ -318,6 +330,19 @@ describe("stuck session diagnostics threshold", () => {
     vi.advanceTimersByTime(30_000);
 
     expectRecoveryCall(recoverStuckSession, { ...session, queueDepth: 0, allowActiveAbort: true });
+  });
+
+  it("ignores a wall-clock step that does not delay the event loop (T2843)", () => {
+    const recoverStuckSession = vi.fn();
+    const warnSpy = vi.spyOn(diagnosticLogger, "warn").mockImplementation(() => undefined);
+    vi.setSystemTime(0);
+    startEnabledDiagnosticHeartbeat({ recoverStuckSession });
+    logSessionStateChange({ ...session, state: "processing" });
+    vi.advanceTimersByTime(30_000);
+    vi.setSystemTime(Date.now() + 2_800);
+    vi.advanceTimersByTime(30_000);
+    expectNoLoggerMessageContaining(warnSpy, "liveness heartbeat delayed");
+    expectRecoveryCall(recoverStuckSession, { ...session, queueDepth: 0 });
   });
 
   it("does not let ordinary heartbeat jitter consume the remaining abort budget", () => {
@@ -1113,6 +1138,7 @@ describe("stuck session diagnostics threshold", () => {
     }));
 
     vi.setSystemTime(0);
+    const stallUntil = installMonotonicStallClock();
     startEnabledDiagnosticHeartbeat({
       emitMemorySample: createEmitMemorySampleMock(),
       recoverStuckSession,
@@ -1124,7 +1150,7 @@ describe("stuck session diagnostics threshold", () => {
     logMessageQueued({ ...session, source: "test" });
     logSessionStateChange({ ...session, state: "processing" });
     markDiagnosticEmbeddedRunStarted(session);
-    vi.setSystemTime(1_001);
+    stallUntil(1_001);
     vi.advanceTimersByTime(30_000);
 
     expect(sampleLiveness).toHaveBeenCalledTimes(1);
