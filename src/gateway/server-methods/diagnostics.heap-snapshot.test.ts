@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
+import { captureDiagnosticHeapSnapshot } from "../../logging/diagnostic-heap-snapshot.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { handleGatewayRequest } from "../server-methods.js";
@@ -93,6 +94,35 @@ afterEach(() => {
 });
 
 describe("diagnostics.heapSnapshot", () => {
+  it.each([
+    {
+      hostAvailableBytes: 512 * 1024 ** 2,
+      cgroupWorkingSetBytes: 0,
+      cgroupLimitBytes: 4 * 1024 ** 3,
+    },
+    {
+      hostAvailableBytes: 4 * 1024 ** 3,
+      cgroupWorkingSetBytes: 3 * 1024 ** 3,
+      cgroupLimitBytes: 3 * 1024 ** 3,
+    },
+  ])(
+    "refuses capture without host or cgroup headroom before filesystem preparation: %j",
+    async (headroom) => {
+      const result = await captureDiagnosticHeapSnapshot({
+        signal: new AbortController().signal,
+        hasAuthority: () => true,
+        readHeadroom: () => headroom,
+      });
+      expect(result).toEqual({
+        status: "unavailable",
+        reason: "insufficient-headroom",
+        cleanupFailed: false,
+      });
+      expect(native.write).not.toHaveBeenCalled();
+      expect(await fs.readdir(stateDir)).toEqual([]);
+    },
+  );
+
   it.each(["unsupported", "heap-too-large"] as const)(
     "refuses %s capture before filesystem preparation",
     async (reason) => {
