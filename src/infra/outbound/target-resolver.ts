@@ -1,7 +1,7 @@
 // Target resolver combines plugin id heuristics, cached directory searches,
 // live fallback lookups, and normalized fallback targets.
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
-import type { ChannelPlugin } from "../../channels/plugins/types.plugin.js";
+import type { AnyChannelPlugin as ChannelPlugin } from "../../channels/plugins/types.plugin.js";
 import type {
   ChannelDirectoryEntry,
   ChannelDirectoryEntryKind,
