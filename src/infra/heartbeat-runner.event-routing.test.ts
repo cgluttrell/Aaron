@@ -264,7 +264,7 @@ describe("Heartbeat event routing", () => {
 
       expect(result.status).toBe("ran");
       expect(getFirstReplyContext(replySpy).Body).toContain(
-        "Please relay the command output to the user",
+        "An async command you ran earlier has completed",
       );
       expect(getFirstReplyContext(replySpy).Body).not.toContain("user delivery is disabled");
     });
@@ -307,7 +307,7 @@ describe("Heartbeat event routing", () => {
 
       expect(result.status).toBe("ran");
       expect(getFirstReplyContext(replySpy).Body).toContain(
-        "Please relay the command output to the user",
+        "An async command you ran earlier has completed",
       );
       expectTelegramSend(sendTelegram, { to: "5232990709", text: "bound result" });
       expect(sendDiscord).not.toHaveBeenCalled();
@@ -345,7 +345,7 @@ describe("Heartbeat event routing", () => {
 
       expect(result.status).toBe("ran");
       expect(getFirstReplyContext(replySpy).Body).toContain(
-        "Please relay the command output to the user",
+        "An async command you ran earlier has completed",
       );
       expectTelegramSend(sendTelegram, { to: "5232990709", text: "ordinary result" });
     });
