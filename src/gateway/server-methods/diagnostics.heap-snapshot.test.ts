@@ -8,6 +8,7 @@ import { runNodeScript } from "../../../test/helpers/run-node-script.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { resolveRuntimeWorkerUrl } from "../../infra/runtime-worker-url.js";
 import { diagnosticProfileEntrypoints } from "../../logging/diagnostic-profile-runtime.test-support.js";
+import { captureDiagnosticHeapSnapshot } from "../../logging/diagnostic-heap-snapshot.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { resolveTestNodeExecPath } from "../../test-utils/node-process.js";
@@ -145,6 +146,34 @@ describe("diagnostics.heapSnapshot", () => {
       expect.objectContaining({ code: options.role === "node" ? "INVALID_REQUEST" : "FORBIDDEN" }),
     );
   });
+    {
+      hostAvailableBytes: 512 * 1024 ** 2,
+      cgroupWorkingSetBytes: 0,
+      cgroupLimitBytes: 4 * 1024 ** 3,
+    },
+    {
+      hostAvailableBytes: 4 * 1024 ** 3,
+      cgroupWorkingSetBytes: 3 * 1024 ** 3,
+      cgroupLimitBytes: 3 * 1024 ** 3,
+    },
+  ])(
+    "refuses capture without host or cgroup headroom before filesystem preparation: %j",
+    async (headroom) => {
+      const result = await captureDiagnosticHeapSnapshot({
+        signal: new AbortController().signal,
+        hasAuthority: () => true,
+        readHeadroom: () => headroom,
+      });
+      expect(result).toEqual({
+        status: "unavailable",
+        reason: "insufficient-headroom",
+        cleanupFailed: false,
+      });
+      expect(native.write).not.toHaveBeenCalled();
+      expect(await fs.readdir(stateDir)).toEqual([]);
+    },
+  );
+
 
   it("rejects path-controlling params", async () => {
     const call = request({ params: { path: "/tmp/override" } });
