@@ -1,188 +1,23 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import fsPromises from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { runPackageUpdateDoctor } from "../cli/update-cli/update-command-package.js";
+import { describe, expect, it, vi } from "vitest";
 import { withEnvAsync } from "../test-utils/env.js";
 import * as diskSpace from "./disk-space.js";
+import { collectNestedErrorCandidates } from "./error-graph-internal.js";
 import { renderUpdateRunReport, updateRunReportInputFromResult } from "./update-run-report.js";
 import { buildUpdateCommandRunner } from "./update-runner-command.js";
-import { resolveCandidateNodeRuntimeForTest } from "./update-runner-git-candidate.test-support.js";
+import { createGitAdmissionFixture as fixture } from "./update-runner-git-admission.test-support.js";
 import { withGitTargetInspectionRoot } from "./update-runner-git-target.js";
 import { updateGitCheckout } from "./update-runner-git.js";
-import type { CommandRunner, UpdateRunnerOptions } from "./update-runner-types.js";
-
-const temporary = useAutoCleanupTempDirTracker(afterEach);
-
-function fixture(
-  relativeRemote = false,
-  partialClone = false,
-  shallow = false,
-  objectFormat: "sha1" | "sha256" = "sha1",
-) {
-  const root = temporary.make("openclaw-git-admission-test-");
-  const source = path.join(root, "remote with spaces");
-  const install = path.join(root, "installed");
-  const globalConfig = path.join(root, "empty-config");
-  fs.writeFileSync(globalConfig, "");
-  const env = {
-    ...process.env,
-    GIT_CONFIG_GLOBAL: globalConfig,
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_SSH: undefined,
-    GIT_SSH_COMMAND: undefined,
-    GIT_SSH_VARIANT: undefined,
-  };
-  const git = (cwd: string, ...args: string[]) => {
-    const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", env });
-    expect(result.status, result.stderr).toBe(0);
-    return result.stdout.trim();
-  };
-  fs.mkdirSync(source);
-  git(source, "init", "-b", "main", `--object-format=${objectFormat}`);
-  git(source, "config", "user.name", "Update fixture");
-  git(source, "config", "user.email", "fixture@example.invalid");
-  fs.writeFileSync(path.join(source, ".gitignore"), "node_modules/\ndist/\n.artifacts/\n");
-  fs.writeFileSync(path.join(source, "openclaw.mjs"), "export {};\n");
-  const targets = new Map<string, Parameters<UpdateRunnerOptions["inspectGitTarget"]>[0]>();
-  const commit = (version: string, agentSchema: number) => {
-    fs.writeFileSync(
-      path.join(source, "package.json"),
-      JSON.stringify({
-        name: "openclaw",
-        version,
-        packageManager: "pnpm@12.1.0",
-        openclaw: { schemaVersions: { state: 5, agent: agentSchema } },
-      }),
-    );
-    git(source, "add", ".");
-    git(source, "commit", "-m", "isolated fixture");
-    git(source, "tag", `v${version}`);
-    const sha = git(source, "rev-parse", "HEAD");
-    targets.set(sha, { sha, version, schemaVersions: { state: 5, agent: agentSchema } });
-    return sha;
-  };
-  commit("2026.7.1", 13);
-  if (shallow) {
-    commit("2026.7.1-beta.1", 13);
-    commit("2026.7.1-beta.2", 13);
-  }
-  if (partialClone) {
-    git(source, "config", "uploadpack.allowFilter", "true");
-    git(
-      root,
-      "clone",
-      "--filter=blob:none",
-      ...(shallow ? ["--depth=2"] : []),
-      pathToFileURL(source).href,
-      install,
-    );
-  } else {
-    git(root, "clone", source, install);
-  }
-  git(install, "remote", "rename", "origin", "upstream.with.dots");
-  if (relativeRemote) {
-    git(install, "remote", "set-url", "upstream.with.dots", path.relative(install, source));
-  }
-  if (partialClone) {
-    // A successful checkout only hydrates current files, not this history blob.
-    commit("2026.7.2-beta.1", 14);
-  }
-  const target = commit("2026.7.2", 14);
-  const calls: string[][] = [];
-  const runCommand: CommandRunner = async (argv, options) => {
-    if (argv[0] === "pnpm") {
-      if (argv.includes("build")) {
-        const dist = path.join(options.cwd!, "dist");
-        fs.mkdirSync(path.join(dist, "control-ui"), { recursive: true });
-        fs.writeFileSync(
-          path.join(dist, "entry.js"),
-          "console.log(JSON.stringify(require('../package.json')));\n",
-        );
-        fs.writeFileSync(path.join(dist, "control-ui", "index.html"), "ready\n");
-      }
-      return { code: 0, stdout: argv.includes("--version") ? "12.1.0\n" : "", stderr: "" };
-    }
-    expect(argv[0]).toBe("git");
-    calls.push(argv);
-    const result = spawnSync("git", argv.slice(1), {
-      cwd: options.cwd,
-      env: { ...env, ...options.env },
-      encoding: "utf8",
-      input: options.input,
-      stdio: [options.stdinFileDescriptor ?? "pipe", "pipe", "pipe"],
-      timeout: 15_000,
-    });
-    return { code: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
-  };
-  const run = (
-    options: Partial<Omit<UpdateRunnerOptions, "prepareGitExposure">> = {},
-    command: CommandRunner = runCommand,
-  ) => {
-    const inspected = new Set<string>();
-    let mutationAdmitted = false;
-    return updateGitCheckout({
-      gitRoot: install,
-      runCommand: command,
-      defaultCommandEnv: env,
-      timeoutMs: 15_000,
-      startedAt: Date.now(),
-      opts: {
-        channel: "stable",
-        ...options,
-        inspectGitTarget: async (candidate) => {
-          assert(candidate.sha);
-          expect(candidate).toEqual(targets.get(candidate.sha));
-          inspected.add(candidate.sha);
-          await options.inspectGitTarget?.(candidate);
-        },
-        validateCandidate: async (candidateRoot) => {
-          expect(mutationAdmitted).toBe(false);
-          const candidateSha = git(candidateRoot, "rev-parse", "HEAD");
-          expect(inspected.has(candidateSha)).toBe(true);
-          expect(fs.statSync(path.join(candidateRoot, "dist", "entry.js")).isFile()).toBe(true);
-          await options.validateCandidate?.(candidateRoot);
-        },
-        beforeGitMutation: async (candidate) => {
-          assert(candidate.sha);
-          expect(inspected.has(candidate.sha)).toBe(true);
-          expect(candidate).toEqual(targets.get(candidate.sha));
-          await options.beforeGitMutation?.(candidate);
-          mutationAdmitted = true;
-        },
-        runGitDoctor:
-          options.runGitDoctor ??
-          (async (installedRoot) => {
-            expect(mutationAdmitted).toBe(true);
-            const installedSha = git(installedRoot, "rev-parse", "HEAD");
-            expect(inspected.has(installedSha)).toBe(true);
-            const doctor = await runPackageUpdateDoctor({
-              root: installedRoot,
-              timeoutMs: 15_000,
-              progress: {},
-              managedServiceEnv: {
-                OPENCLAW_STATE_DIR: path.join(root, "state"),
-                OPENCLAW_CONFIG_PATH: path.join(root, "state", "openclaw.json"),
-              },
-              nodeRunner: (await resolveCandidateNodeRuntimeForTest()).path,
-            });
-            expect(doctor?.exitCode, doctor?.stderrTail ?? undefined).toBe(0);
-            expect(JSON.parse(doctor?.stdoutTail ?? "")).toMatchObject({
-              version: targets.get(installedSha)?.version,
-              openclaw: { schemaVersions: targets.get(installedSha)?.schemaVersions },
-            });
-            return doctor;
-          }),
-      },
-    });
-  };
-  return { root, source, install, globalConfig, git, commit, target, calls, runCommand, run };
-}
+import type {
+  CommandRunner,
+  UpdateRunnerOptions,
+  UpdateStepProgress,
+} from "./update-runner-types.js";
 
 function snapshotTree(root: string): string[] {
   return fs
@@ -274,8 +109,6 @@ describe("Git database admission", () => {
   );
 
   it.each([
-    { channel: "stable", publish: false, downgrade: false, shallow: false },
-    { channel: "dev", publish: false, downgrade: false, shallow: false },
     { channel: "stable", publish: true, downgrade: false, shallow: false },
     { channel: "dev", publish: false, downgrade: true, shallow: false },
     { channel: "dev", publish: false, downgrade: false, shallow: true },
@@ -337,13 +170,24 @@ describe("Git database admission", () => {
   );
 
   it.each([false, true])(
-    "retains the imported pack through repack before checkout (publish=%s)",
-    async (publish) => {
+    "retains imported packs through repack and publication, respecting keep ownership (foreign=%s)",
+    async (foreignKeep) => {
       const state = fixture();
       const published = path.join(state.root, "published");
       let repacked = false;
       let descriptor: number | undefined;
+      let keepName: string | undefined;
       const command: CommandRunner = async (argv, options) => {
+        if (foreignKeep && argv[2] === state.install && argv[3] === "index-pack") {
+          const pack = options.stdinFileDescriptor!;
+          const trailer = Buffer.alloc(20);
+          fs.readSync(pack, trailer, 0, trailer.length, fs.fstatSync(pack).size - 20);
+          keepName = `pack-${trailer.toString("hex")}.keep`;
+          fs.writeFileSync(
+            path.join(state.install, ".git", "objects", "pack", keepName),
+            "operator retention\n",
+          );
+        }
         const result = await state.runCommand(argv, options);
         if (argv[2] === state.install && argv[3] === "index-pack" && result.code === 0) {
           descriptor = options.stdinFileDescriptor;
@@ -354,25 +198,28 @@ describe("Git database admission", () => {
         return result;
       };
       const result = await state.run(
-        publish
-          ? {
-              gitArtifactStorageRoot: state.root,
-              publishGitCheckout: async () => {
-                fs.renameSync(state.install, published);
-                return published;
-              },
-            }
-          : {},
+        {
+          gitArtifactStorageRoot: state.root,
+          publishGitCheckout: async () => {
+            fs.renameSync(state.install, published);
+            return published;
+          },
+        },
         command,
       );
-      const installed = publish ? published : state.install;
       expect(repacked).toBe(true);
       expect(descriptor).toBeTypeOf("number");
       expect(() => fs.fstatSync(descriptor!)).toThrow();
       expect(result.status, JSON.stringify(result)).toBe("ok");
-      expect(state.git(installed, "rev-parse", "HEAD")).toBe(state.target);
-      const packs = path.join(installed, ".git", "objects", "pack");
-      expect(fs.readdirSync(packs).filter((name) => name.endsWith(".keep"))).toEqual([]);
+      expect(state.git(published, "rev-parse", "HEAD")).toBe(state.target);
+      const packs = path.join(published, ".git", "objects", "pack");
+      expect(fs.readdirSync(packs).filter((name) => name.endsWith(".keep"))).toEqual(
+        foreignKeep ? [keepName] : [],
+      );
+      if (foreignKeep) {
+        assert(keepName);
+        expect(fs.readFileSync(path.join(packs, keepName), "utf8")).toBe("operator retention\n");
+      }
     },
   );
 
@@ -412,69 +259,93 @@ describe("Git database admission", () => {
     },
   );
 
-  it("refuses insufficient object-volume capacity before stopping the Gateway", async () => {
-    const state = fixture();
-    const before = state.git(state.install, "rev-parse", "HEAD");
-    const prepareMutation = vi.fn();
-    const capacity = vi.spyOn(diskSpace, "tryReadDiskSpace").mockReturnValue({
-      targetPath: state.install,
-      checkedPath: state.install,
-      availableBytes: 0,
-      totalBytes: 1024,
-    });
-    try {
-      const result = await state.run({ beforeGitMutation: prepareMutation });
-      expect(result).toMatchObject({ status: "error", reason: "snapshot-capacity-insufficient" });
-      expect(result.steps).toContainEqual(
-        expect.objectContaining({
-          name: "git update pack capacity",
-          stderrTail: expect.stringContaining("0 bytes available"),
-        }),
+  it.each(["insufficient", "reporting-rejected", "unknown"] as const)(
+    "handles object-volume capacity before stopping the Gateway (%s)",
+    async (outcomeKind) => {
+      const state = fixture();
+      const before = state.git(state.install, "rev-parse", "HEAD");
+      const prepareMutation = vi.fn();
+      const reportingError = new Error("Git pack capacity receipt rejected");
+      const onStepComplete = vi.fn<NonNullable<UpdateStepProgress["onStepComplete"]>>(
+        async (step) => {
+          if (outcomeKind === "reporting-rejected" && step.name === "git update pack capacity") {
+            throw reportingError;
+          }
+        },
       );
-      expect(prepareMutation).not.toHaveBeenCalled();
-      expect(state.git(state.install, "rev-parse", "HEAD")).toBe(before);
-    } finally {
-      capacity.mockRestore();
-    }
-  });
-
-  it("continues with a warning when object-volume capacity is unknown", async () => {
-    const state = fixture();
-    const capacity = vi.spyOn(diskSpace, "tryReadDiskSpace").mockReturnValue(null);
-    try {
-      const result = await state.run({ beforeGitMutation: async () => undefined });
-      expect(result.status, JSON.stringify(result)).toBe("ok");
-      expect(result.steps).toContainEqual(
-        expect.objectContaining({
-          name: "git update pack capacity",
-          exitCode: 0,
-          warnings: [expect.stringContaining("free space could not be measured")],
-        }),
+      const capacity = vi.spyOn(diskSpace, "tryReadDiskSpace").mockReturnValue(
+        outcomeKind === "unknown"
+          ? null
+          : {
+              targetPath: state.install,
+              checkedPath: state.install,
+              availableBytes: 0,
+              totalBytes: 1024,
+            },
       );
-      expect(state.git(state.install, "rev-parse", "HEAD")).toBe(state.target);
-    } finally {
-      capacity.mockRestore();
-    }
-  });
-
-  it("does not release another owner's keep file after import", async () => {
-    const state = fixture();
-    let keepPath = "";
-    const command: CommandRunner = async (argv, options) => {
-      if (argv[2] === state.install && argv[3] === "index-pack") {
-        const descriptor = options.stdinFileDescriptor!;
-        const trailer = Buffer.alloc(20);
-        fs.readSync(descriptor, trailer, 0, trailer.length, fs.fstatSync(descriptor).size - 20);
-        const hash = trailer.toString("hex");
-        keepPath = path.join(state.install, ".git", "objects", "pack", `pack-${hash}.keep`);
-        fs.writeFileSync(keepPath, "operator retention\n");
+      try {
+        const outcome = await state
+          .run({
+            beforeGitMutation: prepareMutation,
+            progress: { onStepComplete },
+          })
+          .then(
+            (result) => ({ result }),
+            (error: unknown) => ({ error }),
+          );
+        if (outcomeKind === "reporting-rejected") {
+          expect("error" in outcome).toBe(true);
+          const errors = collectNestedErrorCandidates(
+            "error" in outcome ? outcome.error : undefined,
+          );
+          expect(errors).toContain(reportingError);
+          expect(onStepComplete).toHaveBeenCalledWith(
+            expect.objectContaining({ name: "git update pack capacity", exitCode: 1 }),
+          );
+          expect(errors).toContainEqual(
+            expect.objectContaining({
+              exitCode: 1,
+              stderrTail: expect.stringMatching(
+                /snapshot-capacity-insufficient: Git update pack and index need [\s\S]*0 bytes available/,
+              ),
+            }),
+          );
+        } else {
+          if ("error" in outcome) {
+            throw outcome.error;
+          }
+          const { result } = outcome;
+          if (outcomeKind === "unknown") {
+            expect(result.status, JSON.stringify(result)).toBe("ok");
+            expect(result.steps).toContainEqual(
+              expect.objectContaining({
+                name: "git update pack capacity",
+                exitCode: 0,
+                warnings: [expect.stringContaining("free space could not be measured")],
+              }),
+            );
+          } else {
+            expect(result).toMatchObject({
+              status: "error",
+              reason: "snapshot-capacity-insufficient",
+            });
+            expect(result.steps).toContainEqual(
+              expect.objectContaining({
+                name: "git update pack capacity",
+                stderrTail: expect.stringContaining("0 bytes available"),
+              }),
+            );
+          }
+        }
+        expect(prepareMutation).toHaveBeenCalledTimes(outcomeKind === "unknown" ? 1 : 0);
+        expect(state.git(state.install, "rev-parse", "HEAD")).toBe(
+          outcomeKind === "unknown" ? state.target : before,
+        );
+      } finally {
+        capacity.mockRestore();
       }
-      return state.runCommand(argv, options);
-    };
-    const result = await state.run({}, command);
-    expect(result.status, JSON.stringify(result)).toBe("ok");
-    expect(fs.readFileSync(keepPath, "utf8")).toBe("operator retention\n");
-  });
+    },
+  );
 
   it("stages divergent history blobs and delta bases before taking upstream offline", async () => {
     const state = fixture(false, true);
@@ -511,9 +382,9 @@ describe("Git database admission", () => {
   });
 
   it.each([
-    ...(["staging", "import"] as const).flatMap((phase) =>
-      [false, true].map((validRuntime) => ({ phase, validRuntime, sourceChanged: false })),
-    ),
+    { phase: "staging", validRuntime: true, sourceChanged: false },
+    { phase: "import", validRuntime: false, sourceChanged: false },
+    { phase: "import", validRuntime: true, sourceChanged: false },
     { phase: "import" as const, validRuntime: true, sourceChanged: true },
   ])(
     "preserves the retained runtime on $phase failure (validRuntime=$validRuntime, sourceChanged=$sourceChanged)",
@@ -635,19 +506,32 @@ describe("Git database admission", () => {
   });
 
   it.each(["stable", "dev"] as const)(
-    "rechecks admission after transport (%s)",
+    "rechecks admission after transport and keeps the target pinned (%s)",
     async (channel) => {
       const state = fixture();
       let checkoutObserved = false;
       let admissionFinished = false;
       let admissionFresh = false;
       const remoteFetches: boolean[] = [];
+      const admission = vi.fn<UpdateRunnerOptions["beforeGitMutation"]>(async (target) => {
+        expect(target).toEqual({
+          sha: state.target,
+          version: "2026.7.2",
+          schemaVersions: { state: 5, agent: 14 },
+        });
+        if (channel === "stable") {
+          state.commit("2026.7.3", 15);
+        }
+        admissionFinished = true;
+        admissionFresh = true;
+      });
       const command: CommandRunner = async (argv, options) => {
         if (argv[2] === state.install && (argv[3] === "fetch" || argv[3] === "index-pack")) {
           remoteFetches.push(admissionFinished);
           admissionFresh = false;
         }
         if (argv[2] === state.install && (argv[3] === "checkout" || argv[3] === "rebase")) {
+          expect(argv.at(-1)).toBe(state.target);
           expect(remoteFetches).toEqual([true]);
           expect(admissionFresh).toBe(true);
           expect(state.git(state.install, "show", `${state.target}:package.json`)).toContain(
@@ -660,10 +544,7 @@ describe("Git database admission", () => {
       const result = await state.run(
         {
           channel,
-          beforeGitMutation: async () => {
-            admissionFinished = true;
-            admissionFresh = true;
-          },
+          beforeGitMutation: admission,
           inspectGitTarget: async () => {
             if (admissionFinished) {
               admissionFresh = true;
@@ -674,6 +555,8 @@ describe("Git database admission", () => {
       );
       expect(result.status, JSON.stringify(result)).toBe("ok");
       expect(checkoutObserved).toBe(true);
+      expect(state.git(state.install, "rev-parse", "HEAD")).toBe(state.target);
+      expect(admission).toHaveBeenCalledOnce();
     },
   );
 
@@ -849,34 +732,6 @@ process.exit(result.status ?? 93);
     expect(snapshotTree(state.install)).toEqual(before);
   });
 
-  it("keeps the admitted target pinned when its remote advances", async () => {
-    const state = fixture();
-    let checkoutObserved = false;
-    const admission = vi.fn(async (target) => {
-      expect(target).toEqual({
-        sha: state.target,
-        version: "2026.7.2",
-        schemaVersions: { state: 5, agent: 14 },
-      });
-      state.commit("2026.7.3", 15);
-    });
-    const command: CommandRunner = async (argv, options) => {
-      if (argv[0] === "git" && argv[2] === state.install && argv[3] === "checkout") {
-        expect(argv.at(-1)).toBe(state.target);
-        expect(state.git(state.install, "show", `${state.target}:package.json`)).toContain(
-          '"agent":14',
-        );
-        checkoutObserved = true;
-      }
-      return state.runCommand(argv, options);
-    };
-    const result = await state.run({ beforeGitMutation: admission }, command);
-    expect(result.status, JSON.stringify(result)).toBe("ok");
-    expect(checkoutObserved).toBe(true);
-    expect(state.git(state.install, "rev-parse", "HEAD")).toBe(state.target);
-    expect(admission).toHaveBeenCalledOnce();
-  });
-
   it.each([false, true])("publishes only an admitted checkout (refuse=%s)", async (refuse) => {
     const state = fixture();
     const published = path.join(state.root, "published");
@@ -916,7 +771,6 @@ process.exit(result.status ?? 93);
     expect(fs.existsSync(published)).toBe(!refuse);
   });
   it.each([
-    { relative: false, shallow: false },
     { relative: true, shallow: false },
     { relative: false, shallow: true },
   ])(

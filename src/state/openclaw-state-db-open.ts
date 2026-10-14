@@ -15,6 +15,7 @@ import {
 } from "../infra/sqlite-integrity.js";
 import { createSqliteLifecycleAggregateError } from "../infra/sqlite-lifecycle-errors.js";
 import { isSqliteSchemaVersionError } from "../infra/sqlite-user-version.js";
+import { prepareSqliteDatabaseDirectory } from "../infra/sqlite-wal-filesystem.js";
 import { createSqliteWalReclamationResult } from "../infra/sqlite-wal-reclamation.js";
 import {
   configureSqliteConnectionPragmas,
@@ -22,7 +23,10 @@ import {
   type SqliteWalMaintenance,
 } from "../infra/sqlite-wal.js";
 import { readDatabaseIdentityBirthtime } from "../infra/sqlite-worker-identity.js";
-import { getSqliteWorkerExistingDatabaseIdentity } from "../infra/sqlite-worker-state-context.js";
+import {
+  captureSqliteWorkerWalMaintenanceSuspension,
+  getSqliteWorkerExistingDatabaseIdentity,
+} from "../infra/sqlite-worker-state-context.js";
 import { withStateDatabaseSchemaMaintenance } from "../infra/state-database-maintenance.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { openClawStateDatabaseCache } from "./openclaw-state-db-cache.js";
@@ -111,6 +115,7 @@ export function openUnpublishedStateDatabase(
     if (!original) {
       quarantineOrphanedSqliteSidecars(params.pathname);
       ensureOpenClawStatePermissions(params.pathname, params.env, { createDirectory: true });
+      prepareSqliteDatabaseDirectory(params.pathname);
     }
     return openNativeStateDatabase(params, initialization, original);
   };
@@ -160,6 +165,7 @@ function openNativeStateDatabase(
         path: params.pathname,
         walMaintenance: {
           checkpoint: () => false,
+          stop: async () => {},
           close: () => true,
           reclaimFreePages: createSqliteWalReclamationResult,
         },
@@ -187,6 +193,7 @@ function openNativeStateDatabase(
             assertStateDatabaseAccessAllowed(params.pathname);
             return operation();
           },
+          isScheduledMaintenanceSuspended: captureSqliteWorkerWalMaintenanceSuspension(),
           foreignKeys: true,
           synchronous: "NORMAL",
         });

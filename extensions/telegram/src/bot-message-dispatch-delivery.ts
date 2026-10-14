@@ -22,7 +22,6 @@ import {
 } from "./bot-message-dispatch-draft.js";
 import {
   applyQuoteReplyTarget,
-  applyTextToPayload,
   projectPayloadForDelivery,
   usesNativeTelegramQuote,
 } from "./bot-message-dispatch-payload.js";
@@ -47,6 +46,7 @@ import type { TelegramInlineButtons } from "./button-types.js";
 import { failPromptContextSequence, mergeTelegramPartialDeliveryError } from "./chunk-delivery.js";
 import { prepareTelegramFinalDeliveryConfig } from "./final-delivery-config.js";
 import {
+  applyTextToPayload,
   copyTelegramDroppedControlFallback,
   resolveFinalTelegramPresentationText,
 } from "./interactive-fallback.js";
@@ -56,6 +56,7 @@ import {
   type DraftLaneState,
   type LaneDeliveryResult,
   type LaneName,
+  type TelegramSendPayloadOptions,
 } from "./lane-delivery-text-deliverer.js";
 import { recordOutboundMessageForPromptContext } from "./outbound-message-context.js";
 import {
@@ -72,19 +73,6 @@ import { resolveTelegramTargetChatType } from "./targets.js";
 
 type TelegramDeliveryConfig = TurnConfig & {
   lanes: Record<LaneName, DraftLaneState>;
-};
-
-type TelegramSendPayloadOptions = {
-  afterAcceptedDraft?: boolean;
-  durable?: boolean;
-  silent?: boolean;
-  mirrorTranscript?: boolean;
-  promptContextSequence?: TelegramPromptContextProjectionSequence;
-  textMode?: "html";
-  onPlatformSendDispatch?: () => Promise<void>;
-  assertPlatformSendAuthorized?: () => void;
-  bindPendingFinalDelivery?: <T extends ReplyPayload>(payload: T) => T;
-  onMediaAccepted?: (mediaUrls: readonly string[]) => void;
 };
 
 const promptContextDeliverySignature = (payload: ReplyPayload): string | undefined => {
@@ -187,6 +175,9 @@ export async function sendPayload(
   payload: ReplyPayload,
   options?: TelegramSendPayloadOptions,
 ): Promise<LivePreviewDeliveryResult> {
+  if (options?.durable) {
+    sourceTurn.finalDeliveryNotDispatched = false;
+  }
   if (sourceTurn.isSuperseded()) {
     await options?.promptContextSequence?.fail();
     return { visibleReplySent: false, suppression: { reason: "channel_transform" } };
@@ -289,6 +280,7 @@ export async function sendPayload(
       }),
     });
     if (durable.status === "failed") {
+      sourceTurn.finalDeliveryNotDispatched = durable.sentBeforeError === false;
       return await failPromptContextSequence(projectionSequence, durable.error);
     }
     if (durable.status === "handled_visible") {
@@ -650,11 +642,7 @@ export function createDeliveryState(
   const deliveryState = createLaneDeliveryStateTracker();
   const deliverLaneText = createLaneTextDeliverer({
     lanes: config.lanes,
-    applyTextToPayload,
     sendPayload: async (payload, options) => await sendPayload(getTurn(), payload, options),
-    flushDraftLane: async (lane) => await lane.stream?.flush(),
-    stopDraftLane: async (lane) => await lane.stream?.stop(),
-    clearDraftLane: async (lane) => await lane.stream?.clear(),
     editStreamMessage: async ({ messageId, text, textMode, buttons }) => {
       const turn = getTurn();
       if (!turn.isSuperseded()) {

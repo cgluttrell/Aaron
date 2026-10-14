@@ -2,6 +2,7 @@ import { asOptionalRecord, isRecord } from "@openclaw/normalization-core/record-
 import { OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE } from "../agents/internal-runtime-context.js";
 import { extractStoredAssistantText } from "../agents/tools/chat-history-text.js";
 import { isSilentReplyText, SILENT_REPLY_TOKEN } from "../auto-reply/tokens.js";
+import type { SessionTranscriptEventMatch } from "../config/sessions/session-history-read.types.js";
 import { isOpenClawDeliveryMirrorAssistantMessage } from "../shared/transcript-only-openclaw-assistant.js";
 import {
   readSessionTranscriptRunId,
@@ -25,7 +26,9 @@ export function isVisibleAssistantResultEventForRun(event: unknown, runId: strin
     !isRecord(event) ||
     !isRecord(event.message) ||
     readSessionTranscriptRunId(event.message) !== runId ||
-    resolveTerminalAssistantTranscriptRunId(event.message, runId) === undefined
+    resolveTerminalAssistantTranscriptRunId(event.message, runId) === undefined ||
+    // An interim stop asked the provider to continue, so it is progress, not the answer.
+    event.message.endTurn === false
   ) {
     return false;
   }
@@ -38,17 +41,7 @@ export function isVisibleAssistantResultEventForRun(event: unknown, runId: strin
   return Boolean(text?.trim()) && !isSilentReplyText(text, SILENT_REPLY_TOKEN);
 }
 
-export type SessionTranscriptEventMatch =
-  | { kind: "latest" }
-  | { kind: "visible-final"; runId: string }
-  | {
-      kind: "idempotency";
-      key: string;
-      assistant?: boolean;
-      runId?: string;
-      deliveryMirror?: boolean;
-    }
-  | { kind: "active-assistant"; runId: string };
+export type { SessionTranscriptEventMatch } from "../config/sessions/session-history-read.types.js";
 
 /** Match content before checking any active-branch identity in the same snapshot. */
 export function matchesTranscriptEvent(

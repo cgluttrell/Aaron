@@ -309,7 +309,7 @@ const nativeScripts = [
   "scripts/restart-mac.sh",
   "scripts/stage-cloudflared-macos.sh",
   "scripts/stage-cua-driver-macos.sh",
-  "scripts/stage-mac-node-worker.sh",
+  "scripts/stage-mac-runtime.sh",
   "scripts/test-macos-health-render.sh",
 ];
 

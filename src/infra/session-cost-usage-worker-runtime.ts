@@ -11,6 +11,7 @@ import { resolveAgentDir } from "../agents/agent-scope-config.js";
 import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import {
   parseSqliteSessionFileMarker,
+  sqliteSessionFileMarkerMatchesTarget,
   type SqliteSessionFileMarker,
 } from "../config/sessions/legacy-sqlite-marker.js";
 import { listSessionTranscriptInstances } from "../config/sessions/session-accessor.js";
@@ -37,6 +38,7 @@ import {
   resolveOpenClawAgentSqlitePath,
   type OpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
+import type { OpenClawAgentDatabaseExecution } from "../state/openclaw-agent-execution-contract.js";
 import {
   hydrateOpenClawStateWorkerError,
   retainOpenClawStateWorkerErrorPayload,
@@ -47,6 +49,10 @@ import {
   type SessionCostUsageRollupSnapshot,
 } from "./session-cost-usage-cache.kernel.js";
 import { prepareSessionCostUsageRefreshLock } from "./session-cost-usage-cache.sqlite.js";
+import {
+  createIncognitoUsageCostAdapter,
+  type UsageCostIncognitoBinding,
+} from "./session-cost-usage-incognito.js";
 import {
   createUsageCostResolver,
   prepareUsageCostPricing,
@@ -203,6 +209,61 @@ type UsageCostWorkerRequest =
 export async function runUsageCostWorker(
   prepared: PreparedUsageCostWorker,
   operation: UsageCostWorkerRequest,
+  incognito?: UsageCostIncognitoBinding,
+): Promise<UsageCostWorkerResult | { kind: "busy" }> {
+  if (!incognito) {
+    return runPreparedUsageCostWorker(prepared, operation);
+  }
+  const captured = {
+    ...prepared,
+    location: structuredClone(prepared.location),
+    databases: structuredClone(prepared.databases),
+  };
+  const capturedOperation = structuredClone(operation);
+  const target = structuredClone(incognito.target);
+  const { agentId, databasePath } = captured.location;
+  if (
+    agentId !== incognito.actor.agentId ||
+    databasePath !== incognito.actor.path ||
+    captured.location.storePath !== databasePath ||
+    captured.databases.some((entry) => entry.agentId !== agentId || entry.path !== databasePath)
+  ) {
+    throw new Error("Usage actor does not own the prepared database");
+  }
+  const marker = { agentId, storePath: databasePath, sessionId: target.sessionId };
+  const selectedFiles =
+    capturedOperation.kind === "sessions"
+      ? capturedOperation.sessions.map((entry) => entry.sessionFile)
+      : "sessionFiles" in capturedOperation
+        ? (capturedOperation.sessionFiles ?? [])
+        : [];
+  if (
+    [
+      ...selectedFiles,
+      ...(capturedOperation.kind === "refresh"
+        ? (capturedOperation.rebuildRows?.map((row) => row.key) ?? [])
+        : []),
+    ].some((file) => !sqliteSessionFileMarkerMatchesTarget(file, marker))
+  ) {
+    throw new Error("Usage request contains another incognito session");
+  }
+  return incognito.actor.sessions.withCompute(
+    incognito.authority,
+    target,
+    (compute) =>
+      runPreparedUsageCostWorker(
+        captured,
+        capturedOperation,
+        createIncognitoUsageCostAdapter(compute, target, marker),
+      ),
+    getAsyncWorkSignal(),
+  );
+}
+
+async function runPreparedUsageCostWorker(
+  prepared: PreparedUsageCostWorker,
+  operation: UsageCostWorkerRequest,
+  incognito?: ReturnType<typeof createIncognitoUsageCostAdapter>,
 ): Promise<UsageCostWorkerResult | { kind: "busy" }> {
   const location = structuredClone(prepared.location);
   const capturedOperation = structuredClone(operation);
@@ -213,7 +274,7 @@ export async function runUsageCostWorker(
       return {
         options,
         memory,
-        database: memory ? getOpenClawAgentDatabaseIfOpen(options) : undefined,
+        database: memory && !incognito ? getOpenClawAgentDatabaseIfOpen(options) : undefined,
         identity: memory
           ? undefined
           : fs.statSync(options.path, { bigint: true, throwIfNoEntry: false }),
@@ -230,6 +291,8 @@ export async function runUsageCostWorker(
     const assertBindingCurrent = (
       binding: (typeof bindings)[number],
       admittedDatabase?: OpenClawAgentDatabase,
+      execution?: OpenClawAgentDatabaseExecution,
+      opening?: boolean,
     ) => {
       const admittedCache =
         admittedDatabase &&
@@ -249,8 +312,17 @@ export async function runUsageCostWorker(
         return;
       }
       const current = fs.statSync(binding.options.path, { bigint: true, throwIfNoEntry: false });
-      if (!binding.identity && current && admittedCache) {
+      const admittedFile =
+        binding === cacheBinding &&
+        execution?.agentId === binding.options.agentId &&
+        execution.path === binding.options.path &&
+        execution.fileIdentity?.physicalIdentity === (current && `${current.dev}:${current.ino}`);
+      if (!binding.identity && current && (admittedCache || admittedFile)) {
         binding.identity = current;
+      }
+      if (!binding.identity && opening && execution && !execution.fileIdentity) {
+        execution.assertCurrent();
+        return;
       }
       if (
         binding.identity
@@ -260,16 +332,24 @@ export async function runUsageCostWorker(
         throw new Error("Usage database changed during worker operation");
       }
     };
-    const assertCurrent = (admittedDatabase?: OpenClawAgentDatabase) => {
+    const assertCurrent = (
+      admittedDatabase?: OpenClawAgentDatabase,
+      execution?: OpenClawAgentDatabaseExecution,
+      opening?: boolean,
+    ) => {
+      incognito?.assertCurrent();
       scope.assertCurrent();
       signal?.throwIfAborted();
+      if (incognito) {
+        return;
+      }
       for (const binding of bindings) {
         if (binding !== cacheBinding) {
           assertBindingCurrent(binding);
         }
       }
       // Only the lock owner's admitted writer may create a previously absent cache.
-      assertBindingCurrent(cacheBinding, admittedDatabase);
+      assertBindingCurrent(cacheBinding, admittedDatabase, execution, opening);
     };
     const resolveBinding = (target: Pick<SqliteSessionFileMarker, "agentId" | "storePath">) => {
       const options = toDatabaseOptions(resolveSqliteReadScope({ ...target, env: location.env }));
@@ -298,16 +378,18 @@ export async function runUsageCostWorker(
       sources.clear();
       pruneRows.length = 0;
     });
-    const lock =
-      capturedOperation.kind === "refresh"
+    const hostLock =
+      capturedOperation.kind === "refresh" && !incognito
         ? prepareSessionCostUsageRefreshLock(location.agentId, location.databasePath, {
             env: location.env,
             assertCurrent,
           })
         : undefined;
+    if (hostLock) {
+      scope.retainCleanup(hostLock.release);
+    }
+    const lock = capturedOperation.kind === "refresh" ? (incognito?.lock ?? hostLock) : undefined;
     if (lock) {
-      // Cleanup custody exists before acquisition can wait or commit its token.
-      scope.retainCleanup(lock.release);
       if (!(await lock.acquire())) {
         return { kind: "busy" };
       }
@@ -330,15 +412,22 @@ export async function runUsageCostWorker(
     const hostErrors = new Map<number, unknown>();
     let errorSequence = 0;
     try {
-      const failureEntries = lock
-        ? await failures.entries().catch((error: unknown) => {
-            logger.warn("Could not read usage refresh failure history", { error });
-            return [];
-          })
-        : [];
+      const failureEntries =
+        lock && !incognito
+          ? await failures.entries().catch((error: unknown) => {
+              logger.warn("Could not read usage refresh failure history", { error });
+              return [];
+            })
+          : [];
       const failedKeys = new Set(failureEntries.map((entry) => entry.key));
       const result = await scope.run(
-        { kind: "usage-cost", location, operation: workerOperation, databases: [] },
+        {
+          kind: "usage-cost",
+          location,
+          operation: workerOperation,
+          databases: [],
+          transcriptFiles: incognito ? [incognito.filePath] : undefined,
+        },
         {
           signal,
           beforeDispatch: assertCurrent,
@@ -358,6 +447,15 @@ export async function runUsageCostWorker(
               }
               // SAFETY: The paired worker constructs this union; host effects still check current authority.
               const request = value as UsageCostWorkerHostRequest;
+              if (incognito && request.kind.startsWith("memory-")) {
+                const output = await incognito.read(request, context.signal);
+                assertRequestCurrent();
+                return {
+                  input: { ok: true, value: output } satisfies UsageCostWorkerHostReply,
+                  transferList,
+                  timeoutMs: USAGE_COST_WORKER_TIMEOUT_MS,
+                };
+              }
               let output: UsageCostWorkerHostEffects[keyof UsageCostWorkerHostEffects]["output"];
               switch (request.kind) {
                 case "refresh-session":
@@ -371,10 +469,16 @@ export async function runUsageCostWorker(
                   output = request.input.map(resolveCost);
                   break;
                 case "restore": {
+                  if (incognito) {
+                    throw new Error("Incognito transcripts have no cold storage");
+                  }
                   const binding = resolveBinding(request.input);
                   await restoreSessionColdTranscript(
                     { ...request.input, storePath: binding.options.path, env: location.env },
                     assertRequestCurrent,
+                    undefined,
+                    undefined,
+                    context.signal,
                   );
                   output = undefined;
                   break;
@@ -479,7 +583,7 @@ export async function runUsageCostWorker(
                   if (!lock) {
                     throw new Error("Usage report cannot prune cache rows");
                   }
-                  await lock.pruneRows(pruneRows);
+                  await lock.pruneRows(pruneRows, context.signal);
                   pruneRows.length = 0;
                   output = undefined;
                   break;
@@ -487,17 +591,21 @@ export async function runUsageCostWorker(
                   if (!lock) {
                     throw new Error("Usage report cannot write cache rows");
                   }
-                  output = await lock.writeRollup({
-                    rollupId: request.input.key,
-                    previousValueJson: request.input.previousValue,
-                    valueJson: request.input.value,
-                    blob: request.input.blob,
-                    updatedAt: request.input.updatedAt,
-                  });
+                  output = await lock.writeRollup(
+                    {
+                      rollupId: request.input.key,
+                      previousValueJson: request.input.previousValue,
+                      valueJson: request.input.value,
+                      blob: request.input.blob,
+                      updatedAt: request.input.updatedAt,
+                    },
+                    context.signal,
+                  );
                   if (output && failedKeys.has(failureKey(request.input.key))) {
                     await failures
                       .delete(failureKey(request.input.key), {
                         assertCurrent: assertRequestCurrent,
+                        signal: context.signal,
                       })
                       .catch((error: unknown) => {
                         logger.warn("Could not clear usage refresh failure fact", { error });
@@ -527,7 +635,7 @@ export async function runUsageCostWorker(
       return result;
     } catch (error) {
       let failure = restoreWorkerFailure(error, hostErrors);
-      if (activeSessionFile && !signal?.aborted) {
+      if (activeSessionFile && !signal?.aborted && !incognito) {
         try {
           await failures.register(
             failureKey(activeSessionFile),

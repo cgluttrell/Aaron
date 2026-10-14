@@ -29,6 +29,7 @@ import {
 } from "../store/run-receipt-store.test-support.js";
 import { cronStreamScheduleKey } from "../stream-schedule.js";
 import type { CronJob } from "../types.js";
+import * as runtimeMutation from "./runtime-mutation.js";
 
 const onExitSchedule = { kind: "on-exit", command: "true" } as const;
 
@@ -87,7 +88,6 @@ describe("cron run receipt settlement", () => {
       const { storePath } = await makeStorePath();
       const context = new AsyncLocalStorage<"caller" | "scheduler">();
       const observed: Array<string | undefined> = [];
-      let schedulerEntries = 0;
       const runPayload = async () => {
         await Promise.resolve();
         observed.push(context.getStore());
@@ -100,10 +100,7 @@ describe("cron run receipt settlement", () => {
         log: logger,
         enqueueSystemEvent: vi.fn(),
         requestHeartbeat: vi.fn(),
-        runSchedulerOwned: (run) => {
-          schedulerEntries += 1;
-          return context.run("scheduler", run);
-        },
+        runSchedulerOwned: (run) => context.run("scheduler", run),
         onEvent: (event) => {
           if (event.action === "started" || event.action === "finished") {
             observed.push(`${event.action}:${context.getStore()}`);
@@ -158,9 +155,9 @@ describe("cron run receipt settlement", () => {
           expect(outcome).toEqual(source === "startup" ? undefined : { ok: true, ran: true });
           expect(context.getStore()).toBe("caller");
         });
-        const owner = source === "manual" ? "caller" : "scheduler";
-        expect(observed).toEqual([`started:${owner}`, owner, `finished:${owner}`]);
-        expect(schedulerEntries).toBe(source === "manual" ? 0 : 1);
+        // Manual activation reports from the caller; execution is always scheduler-owned.
+        const startedOwner = source === "manual" ? "caller" : "scheduler";
+        expect(observed).toEqual([`started:${startedOwner}`, "scheduler", "finished:scheduler"]);
       } finally {
         service.stop();
       }
@@ -403,6 +400,19 @@ describe("cron run receipt settlement", () => {
         createTestGatewayScheduler(clock.clock),
       );
       const stoppedObserver = makeService(storePath, successorRunner);
+      const receiptFinishes: Promise<void>[] = [];
+      const finishStarted = createDeferred();
+      const executeMutation = runtimeMutation.runCronRuntimeMutation;
+      const mutation = vi
+        .spyOn(runtimeMutation, "runCronRuntimeMutation")
+        .mockImplementation((params) => {
+          const completion = executeMutation(params);
+          if (params.type === "cron.finishReceipt") {
+            receiptFinishes.push(completion);
+            finishStarted.resolve();
+          }
+          return completion;
+        });
       const settlementAbort = new AbortController();
       const first =
         trigger === "startup" ? owner.start() : owner.run(job.id, "force").then(() => undefined);
@@ -449,7 +459,7 @@ describe("cron run receipt settlement", () => {
         const database = openOpenClawStateDatabase().db;
         if (trigger === "manual-finish-retry") {
           database.exec(`
-            CREATE TEMP TRIGGER reject_on_exit_receipt_finish
+            CREATE TRIGGER reject_on_exit_receipt_finish
             BEFORE UPDATE ON cron_run_receipts
             WHEN OLD.job_id = '${job.id}' AND NEW.status != 'running'
             BEGIN SELECT RAISE(ABORT, 'receipt finish temporarily unavailable'); END;
@@ -475,8 +485,12 @@ describe("cron run receipt settlement", () => {
           });
           database.exec("DROP TRIGGER reject_on_exit_receipt_finish");
         }
-        // Allow the retained receipt retry and foreign-owner reconciliation to run.
+        // Join the real receipt write before advancing the successor's polling clock.
+        // Advancing fake time alone cannot settle worker I/O or its retained retry.
+        await finishStarted.promise;
         await vi.advanceTimersByTimeAsync(2_000);
+        await Promise.allSettled(receiptFinishes);
+        expect(latestReceiptStatus(storePath, job.id)).toBe("error");
         await clock.advanceBy(2_000);
         await expect(settlement).resolves.toEqual({ ok: true, ran: true });
         expect(onReserved).toHaveBeenCalledOnce();
@@ -487,6 +501,8 @@ describe("cron run receipt settlement", () => {
         settlementAbort.abort();
         releaseRunner.resolve({ status: "ok", summary: "late runner settled" });
         await first.catch(() => undefined);
+        await Promise.allSettled(receiptFinishes);
+        mutation.mockRestore();
         owner.stop();
         successor.stop();
         stoppedObserver.stop();

@@ -115,11 +115,7 @@ function readHandoffClaims() {
 function readCommandClaims() {
   return readHandoffClaims().filter((row) => {
     const payload = parseManagedHandoffLeasePayload(row.payload_json);
-    return (
-      /\/\.openclaw-update-child-[a-f0-9-]{36}-command$/.test(row.install_root) &&
-      payload?.version === 2 &&
-      payload.action.kind === "update"
-    );
+    return payload?.version === 2 && payload.action.kind === "update" && payload.action.custody;
   });
 }
 
@@ -133,7 +129,7 @@ function expectRetainedCommandClaims(writerPid: number, roots: string[]) {
     expect(parseManagedHandoffLeasePayload(claim.payload_json)).toMatchObject({
       version: 2,
       executor: { pid: writerPid },
-      action: { kind: "update" },
+      action: { kind: "update", custody: "bound" },
     });
   }
 }
@@ -471,7 +467,12 @@ it.skipIf(process.platform === "win32").each([true, false])(
               if (identityAvailable || completedStep.name !== "doctor process settlement") {
                 return undefined;
               }
-              throw reportingError;
+              const reporting = Promise.resolve().then(() => {
+                throw reportingError;
+              });
+              // Observe the expected rejection without changing the Promise returned to its owner.
+              void reporting.catch(() => {});
+              return reporting;
             },
           },
         }).catch((error: unknown) => {

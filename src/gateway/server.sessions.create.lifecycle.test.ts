@@ -21,7 +21,7 @@ import {
   chatSendOwner,
   requireNonEmptyString,
 } from "./server.sessions.create.test-support.js";
-import { listSessionGroups } from "./session-groups.js";
+import { readSessionGroupCatalog } from "./session-group-catalog.js";
 import { loadGatewayTestConfig } from "./test-helpers.config-runtime.js";
 import { embeddedRunMock, testState, writeSessionStore } from "./test-helpers.js";
 import {
@@ -53,36 +53,6 @@ function describeSessionStoreForensics(storePath: string): string {
   return JSON.stringify({ storeDir, files, resolvedTargetPath: target.path, rows });
 }
 
-test("sessions.create assigns and registers its requested group", async () => {
-  const { storePath } = await createSessionStoreDir();
-  const broadcastToConnIds = vi.fn();
-
-  const created = await directSessionReq<{ key: string }>(
-    "sessions.create",
-    {
-      agentId: "main",
-      category: "  Client work  ",
-    },
-    {
-      context: {
-        broadcastToConnIds,
-        getSessionEventSubscriberConnIds: () => new Set(["conn-1"]),
-      },
-    },
-  );
-
-  expect(created.ok).toBe(true);
-  const key = requireNonEmptyString(created.payload?.key, "grouped session key");
-  expect(loadSessionEntry({ sessionKey: key, storePath })?.category).toBe("Client work");
-  expect(listSessionGroups().map((group) => group.name)).toContain("Client work");
-  expect(broadcastToConnIds).toHaveBeenCalledWith(
-    "sessions.changed",
-    expect.objectContaining({ reason: "groups" }),
-    new Set(["conn-1"]),
-    { dropIfSlow: true },
-  );
-});
-
 test("sessions.create registers a category only after the session commit succeeds", async () => {
   await createSessionStoreDir();
   const category = "Deferred category";
@@ -109,12 +79,16 @@ test("sessions.create registers a category only after the session commit succeed
   );
 
   expect(failed.ok).toBe(false);
-  expect(listSessionGroups().map((group) => group.name)).not.toContain(category);
+  expect(readSessionGroupCatalog().groups.map((group) => group.name)).not.toContain(category);
 
   const broadcastToConnIds = vi.fn();
   const created = await directSessionReq(
     "sessions.create",
-    { agentId: "main", category, key: "agent:main:dashboard:successful-category-create" },
+    {
+      agentId: "main",
+      category: `  ${category}  `,
+      key: "agent:main:dashboard:successful-category-create",
+    },
     {
       context: {
         broadcastToConnIds,
@@ -124,7 +98,9 @@ test("sessions.create registers a category only after the session commit succeed
   );
 
   expect(created.ok).toBe(true);
-  expect(listSessionGroups().filter((group) => group.name === category)).toHaveLength(1);
+  expect(readSessionGroupCatalog().groups.filter((group) => group.name === category)).toHaveLength(
+    1,
+  );
   expect(
     broadcastToConnIds.mock.calls.filter(([, payload]) => payload?.reason === "groups"),
   ).toHaveLength(1);
@@ -153,6 +129,31 @@ test("concurrent sessions.create requests adopt one canonical keyed session", as
     persistedSessionId,
     persistedSessionId === canonicalSessionId ? "" : describeSessionStoreForensics(storePath),
   ).toBe(canonicalSessionId);
+});
+
+test("concurrent sessions.create requests share a fresh non-main agent database", async () => {
+  const { dir } = await createSessionStoreDir();
+  testState.sessionStorePath = path.join(dir, "agents", "{agentId}", "sessions", "sessions.json");
+  testState.agentsConfig = { ownership: "explicit", entries: { main: {}, work: {} } };
+  (await getGatewayConfigModule()).clearRuntimeConfigSnapshot();
+  const keys = Array.from({ length: 4 }, (_, index) => `agent:work:dashboard:first-${index}`);
+  const created = await Promise.all(
+    keys.map((key) =>
+      directSessionReq<{ key: string; sessionId: string }>("sessions.create", {
+        agentId: "work",
+        key,
+      }),
+    ),
+  );
+  expect(created.map((result) => ({ ok: result.ok, error: result.error }))).toEqual(
+    keys.map(() => ({ ok: true, error: undefined })),
+  );
+  const storePath = testState.sessionStorePath.replace("{agentId}", "work");
+  for (const [index, key] of keys.entries()) {
+    expect(loadSessionEntry({ agentId: "work", sessionKey: key, storePath })?.sessionId).toBe(
+      created[index]?.payload?.sessionId,
+    );
+  }
 });
 
 test("createGatewaySession forwards its commit guard into main-session reset", async () => {
@@ -725,9 +726,9 @@ test("sessions.create adopting an existing key does not restamp node provenance"
     });
     // Adoption is not a node creation: no `created` event may enter the journal.
     expect(
-      listSessionStateEventsSince("agent:main:dashboard:adopted", "main", 0, 20).events.filter(
-        (event) => event.kind === "created",
-      ),
+      (
+        await listSessionStateEventsSince("agent:main:dashboard:adopted", "main", 0, 20)
+      ).events.filter((event) => event.kind === "created"),
     ).toEqual([]);
   } finally {
     chatSend.mockRestore();

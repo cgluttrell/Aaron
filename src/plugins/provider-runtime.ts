@@ -67,8 +67,6 @@ import type {
   ProviderCreateStreamFnContext,
   ProviderFetchUsageSnapshotContext,
   ProviderNormalizeConfigContext,
-  ProviderReasoningOutputMode,
-  ProviderReasoningOutputModeContext,
   ProviderNormalizeResolvedModelContext,
   ProviderNormalizeTransportContext,
   ProviderPreferRuntimeResolvedModelContext,
@@ -465,26 +463,16 @@ export function resolveProviderConfigApiKeyWithPlugin(
   );
 }
 
-export const sanitizeProviderReplayHistoryWithPlugin = asyncRuntimeHook("sanitizeReplayHistory");
-
-export const validateProviderReplayTurnsWithPlugin = asyncRuntimeHook("validateReplayTurns");
+export {
+  resolveProviderReasoningOutputModeWithPlugin,
+  sanitizeProviderReplayHistoryWithPlugin,
+  sanitizeProviderReplayHistoryWithPluginAsync,
+  validateProviderReplayTurnsWithPlugin,
+} from "./provider-replay-runtime.js";
 
 export const normalizeProviderToolSchemasWithPlugin = toolSchemaHook("normalizeToolSchemas");
 
 export const inspectProviderToolSchemasWithPlugin = toolSchemaHook("inspectToolSchemas");
-
-export function resolveProviderReasoningOutputModeWithPlugin(
-  params: ProviderRuntimeLookup & {
-    runtimeHandle?: ProviderRuntimePluginHandle;
-    context: ProviderReasoningOutputModeContext;
-  },
-): ProviderReasoningOutputMode | undefined {
-  const mode = ensureProviderRuntimePluginHandle({
-    ...params,
-    modelId: params.context.modelId,
-  }).plugin?.resolveReasoningOutputMode?.(params.context);
-  return mode === "native" || mode === "tagged" ? mode : undefined;
-}
 
 export function resolveProviderStreamFn(
   params: ProviderRuntimeLookup & {
@@ -690,7 +678,7 @@ export async function resolveProviderOAuthCredentialWithPlugin(
     if (!refreshOAuth) {
       return { status: "unhandled" } as const;
     }
-    credential = await refreshOAuth(params.credential);
+    credential = await refreshOAuth.call(plugin, params.credential, params.config);
   }
   if (!credential) {
     return { status: "unhandled" } as const;
@@ -716,7 +704,12 @@ export function resolveProviderOAuthRefreshCapabilityWithPlugin(params: Provider
     : ({ status: "unhandled" } as const);
 }
 
-export const refreshProviderOAuthCredentialWithPlugin = asyncRuntimeHook("refreshOAuth");
+export async function refreshProviderOAuthCredentialWithPlugin(
+  params: ProviderRuntimeLookup & { context: OAuthCredential },
+) {
+  const plugin = resolveProviderRuntimePlugin(params);
+  return await plugin?.refreshOAuth?.(params.context, params.config);
+}
 
 export const buildProviderAuthDoctorHintWithPlugin = asyncRuntimeHook("buildAuthDoctorHint");
 

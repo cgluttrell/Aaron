@@ -53,6 +53,7 @@ describe("required maintenance with restart-safe admitted input", () => {
     async (history) => {
       await withOpenClawTestState({ label: "required-maintenance-pending" }, async (state) => {
         const requests: ModelRequest[] = [];
+        const runtimeContext = "Synthetic current runtime fact for the approved request.";
         const approved =
           "Approved current request: preserve ünicode 🦞 and exact newlines.\n" +
           "Current background information.\n".repeat(1_600) +
@@ -181,7 +182,7 @@ describe("required maintenance with restart-safe admitted input", () => {
         const scope = { agentId: "main", sessionKey, sessionId, storePath };
         const cfg: OpenClawConfig = {
           agents: {
-            list: [{ id: "main", default: true, workspace: state.workspaceDir }],
+            entries: { main: { workspace: state.workspaceDir } },
             defaults: {
               workspace: state.workspaceDir,
               model: { primary: "test-provider/test-model" },
@@ -201,8 +202,8 @@ describe("required maintenance with restart-safe admitted input", () => {
                     name: "Synthetic model",
                     reasoning: false,
                     input: ["text"],
-                    contextWindow: 32_768,
-                    contextTokens: 32_768,
+                    contextWindow: 49_152,
+                    contextTokens: 49_152,
                     maxTokens: 8_192,
                     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
                   },
@@ -328,12 +329,14 @@ describe("required maintenance with restart-safe admitted input", () => {
             conversationToolPolicy: { deny: ["read"] },
           });
           followupRun.prompt = approved;
+          followupRun.currentInboundContext = { text: runtimeContext };
           followupRun.userTurnTranscriptRecorder = recorder;
           entry = loadSessionEntry(scope)!;
           const sessionStore = { [sessionKey]: entry };
           installAgentRunnerMemoryFixture(() => ({
             softThresholdTokens: 4_000,
-            reserveTokensFloor: 8_192,
+            // Keep the 24,576-token maintenance threshold with transport-estimation headroom.
+            reserveTokensFloor: 24_576,
             forceFlushTranscriptBytes: 2 * 1024 * 1024,
             prompt: "Checkpoint durable notes. Reply NO_REPLY.",
             systemPrompt: "Write durable notes only.",
@@ -413,6 +416,9 @@ describe("required maintenance with restart-safe admitted input", () => {
           expect(providerText(lastUser?.content).endsWith(approved)).toBe(true);
           expect(providerText(lastUser?.content).split(approved)).toHaveLength(2);
           expect(foregroundMessages.filter(isModelRuntimeContextCarrier)).toHaveLength(1);
+          expect(
+            providerText(foregroundMessages.find(isModelRuntimeContextCarrier)?.content),
+          ).toContain(runtimeContext);
           expect(foregroundMessages.findIndex(isModelRuntimeContextCarrier)).toBeGreaterThan(
             userIndex,
           );

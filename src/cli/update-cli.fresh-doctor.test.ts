@@ -1,5 +1,6 @@
 import { Command } from "commander";
 import { describe, expect, it, vi } from "vitest";
+import { recordCommandProcessFailure } from "../process/exec-result.js";
 import { VERSION } from "../version.js";
 import {
   commandCalls,
@@ -8,6 +9,7 @@ import {
   lastWriteJsonCall,
   npmPluginUpdateCall,
   packageInstallCommandCall,
+  requireValue,
   spawnCall,
   syncPluginCall,
 } from "./update-cli-assertions.test-support.js";
@@ -31,8 +33,8 @@ import {
   resolveOpenClawPackageRoot,
   resolveUpdateInstallKind,
   runExec,
-  runUtf8CommandWithTimeout,
   runPostCorePluginConvergenceSpy,
+  runUtf8CommandWithTimeout,
   updateCommand,
   updateGitCheckout,
 } from "./update-cli-modules.test-support.js";
@@ -60,39 +62,6 @@ describe("update-cli", () => {
     setupUpdatedRootRefresh,
   } = createUpdateCliFixture();
 
-  const mockFreshDoctorFailure = (params: { stdout?: string; stderr: string }) => {
-    const runCommand = vi.mocked(runUtf8CommandWithTimeout).getMockImplementation();
-    if (!runCommand) {
-      throw new Error("Missing fresh Doctor command fixture");
-    }
-    vi.mocked(runUtf8CommandWithTimeout).mockImplementation(async (argv, options) => {
-      if (argv[2] === "doctor") {
-        return {
-          code: 1,
-          signal: null,
-          killed: false,
-          termination: "exit",
-          cleanup: "normal",
-          stdout: params.stdout ?? "",
-          stderr: params.stderr,
-        };
-      }
-      const result = await runCommand(argv, options);
-      if (argv.at(-1) !== "--doctor") {
-        return result;
-      }
-      return {
-        ...result,
-        code: 1,
-        signal: null,
-        killed: false,
-        termination: "exit",
-        stdout: params.stdout ?? "",
-        stderr: params.stderr,
-      };
-    });
-  };
-
   it("respawns into the updated git root before requested channel persistence", async () => {
     const { entrypoints } = setupUpdatedRootRefresh({
       gatewayUpdateImpl: (root) =>
@@ -106,7 +75,7 @@ describe("update-cli", () => {
     await updateCommand({ channel: "dev", yes: true, restart: false });
 
     const call = spawnCall();
-    expect(call?.[0]).toMatch(/node/);
+    expect(call?.[0]).toBe(process.execPath);
     expect(call?.[1]).toEqual([
       entrypoints[0],
       "update",
@@ -131,9 +100,23 @@ describe("update-cli", () => {
           after: { sha: "new-sha", version: VERSION },
         }),
     });
-    vi.mocked(runExec).mockResolvedValueOnce({
-      stdout: new Command("update").option("--accept-capabilities").helpInformation(),
-      stderr: "",
+    const runOtherCommand = requireValue(
+      vi.mocked(runExec).getMockImplementation(),
+      "update command fixture",
+    );
+    vi.mocked(runExec).mockImplementation(async (command, args, options) => {
+      if (
+        args.length === 3 &&
+        args[0] === entrypoints[0] &&
+        args[1] === "update" &&
+        args[2] === "--help"
+      ) {
+        return {
+          stdout: new Command("update").option("--accept-capabilities").helpInformation(),
+          stderr: "",
+        };
+      }
+      return runOtherCommand(command, args, options);
     });
 
     await updateCommand({ acceptCapabilities: true, yes: true, restart: false });
@@ -158,9 +141,10 @@ describe("update-cli", () => {
       readPackageVersion.mockResolvedValue("2026.9.3-beta.1");
       primeNpmChannelTag("latest", "2026.9.1");
 
-      await updateCommand({ channel: "stable", json: true, dryRun });
+      const command = updateCommand({ channel: "stable", json: true, dryRun });
 
       if (dryRun) {
+        await command;
         expect(lastWriteJsonCall()).toMatchObject({
           currentVersion: "2026.9.3-beta.1",
           targetVersion: "2026.9.1",
@@ -168,8 +152,12 @@ describe("update-cli", () => {
           switchToPackage: true,
         });
       } else {
+        await expect(command).rejects.toMatchObject({ code: 1 });
         expect(getErrorOutput()).toContain("Downgrade confirmation required.");
-        expect(defaultRuntime.exit).toHaveBeenCalledWith(1);
+        expect(lastWriteJsonCall()).toMatchObject({
+          status: "skipped",
+          reason: "downgrade-confirmation-required",
+        });
       }
       expect(packageInstallCommandCall()?.[0]).toBeUndefined();
       expectNoSideEffects(updateGitCheckout, replaceConfigFile, spawn);
@@ -276,8 +264,9 @@ describe("update-cli", () => {
     vi.mocked(updateGitCheckout).mockResolvedValue(
       runtimeRecovery.currentGitCoreFixture(process.cwd(), VERSION).outcome,
     );
-    const updatedEntrypoint = "/tmp/openclaw-updated-entry.mjs";
-    vi.mocked(resolveGatewayInstallEntrypoint).mockResolvedValueOnce(updatedEntrypoint);
+    vi.mocked(resolveGatewayInstallEntrypoint).mockResolvedValueOnce(
+      "/tmp/openclaw-updated-entry.mjs",
+    );
     mockNpmPluginOutcomes([], true);
     let strictValidationEnv: string | undefined;
     vi.mocked(readConfigFileSnapshot).mockImplementation(async (options) => {
@@ -294,11 +283,21 @@ describe("update-cli", () => {
     const doctorCalls = commandCalls().filter(([argv]) => argv.at(-1) === "--doctor");
     expect(doctorCalls).toHaveLength(1);
     expectDelegatedPluginDoctorInput(doctorCalls[0]?.[1].input);
-    expect(runExec).toHaveBeenCalledExactlyOnceWith(
-      expect.any(String),
-      [updatedEntrypoint, "config", "validate", "--json"],
-      expect.objectContaining({ env: { OPENCLAW_UPDATE_IN_PROGRESS: "0" } }),
-    );
+    const freshCommands = vi
+      .mocked(runExec)
+      .mock.calls.filter(([, args]) => args[0] === FRESH_POST_UPDATE_ENTRYPOINT)
+      .map(([command, args, options]) => ({
+        command,
+        args,
+        env: typeof options === "object" ? options.env : undefined,
+      }));
+    expect(freshCommands).toEqual([
+      {
+        command: expect.any(String),
+        args: [FRESH_POST_UPDATE_ENTRYPOINT, "config", "validate", "--json"],
+        env: { OPENCLAW_UPDATE_IN_PROGRESS: "0" },
+      },
+    ]);
     expect(strictValidationEnv).toBe("0");
     expect(defaultRuntime.exit).not.toHaveBeenCalledWith(1);
   });
@@ -331,10 +330,15 @@ describe("update-cli", () => {
     vi.mocked(resolveGatewayInstallEntrypoint).mockResolvedValueOnce(
       "/tmp/openclaw-updated-entry.mjs",
     );
-    mockFreshDoctorFailure({
-      stderr: "doctor process failed: optional plugin repair unavailable",
-      stdout: "doctor diagnostic output",
-    });
+    vi.mocked(runUtf8CommandWithTimeout).mockRejectedValueOnce(
+      recordCommandProcessFailure(
+        Object.assign(new Error("Command failed: " + "long-argv-prefix ".repeat(100)), {
+          stderr: "doctor process failed: optional plugin repair unavailable",
+          stdout: "doctor diagnostic output",
+        }),
+        { code: 1, cleanup: "normal", termination: "exit" },
+      ),
+    );
     const result = await completeChangedPostCorePluginUpdate();
 
     expect(result.pluginUpdate).toMatchObject({
@@ -343,6 +347,7 @@ describe("update-cli", () => {
     });
     expect(result.pluginUpdate.warnings?.at(-1)?.message).toContain("doctor process failed");
     expect(result.pluginUpdate.warnings?.at(-1)?.message).toContain("doctor diagnostic output");
+    expect(result.pluginUpdate.warnings?.at(-1)?.message).not.toContain("long-argv-prefix");
   });
 
   it("keeps an invalid config authoritative after a fresh plugin doctor failure", async () => {
@@ -350,7 +355,13 @@ describe("update-cli", () => {
       "/tmp/openclaw-updated-entry.mjs",
     );
     const issues = [{ path: "channels.signal.httpUrl", message: "legacy Signal transport field" }];
-    mockFreshDoctorFailure({ stderr: "doctor process failed" });
+    vi.mocked(runUtf8CommandWithTimeout).mockRejectedValueOnce(
+      recordCommandProcessFailure(new Error("doctor process failed"), {
+        code: 1,
+        cleanup: "normal",
+        termination: "exit",
+      }),
+    );
     vi.mocked(runExec).mockRejectedValueOnce(createConfigValidationFailure(issues));
     vi.mocked(readConfigFileSnapshot).mockResolvedValueOnce(
       configSnapshot(baseConfig, {

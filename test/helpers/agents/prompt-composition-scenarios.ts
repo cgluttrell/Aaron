@@ -13,7 +13,7 @@ import { buildEmbeddedSystemPrompt } from "../../../src/agents/embedded-agent-ru
 import { buildAgentSystemPrompt } from "../../../src/agents/system-prompt.js";
 import { createStubTool } from "../../../src/agents/test-helpers/agent-tool-stubs.js";
 import {
-  buildDirectChatContext,
+  buildSourceConversationContext,
   buildGroupChatContext,
   buildGroupIntro,
 } from "../../../src/auto-reply/reply/groups.js";
@@ -147,7 +147,7 @@ function buildAutoReplySystemPrompt(params: {
   const extraSystemPromptParts = [
     buildInboundMetaSystemPrompt(params.sessionCtx, {}),
     params.sessionCtx.ChatType === "direct" || params.sessionCtx.ChatType === "dm"
-      ? buildDirectChatContext({
+      ? buildSourceConversationContext({
           sessionCtx: params.sessionCtx,
         })
       : "",
@@ -534,7 +534,7 @@ async function createBootstrapWarningScenario(workspaceDir: string): Promise<Pro
         bootstrapMaxChars: 1_500,
         bootstrapTotalMaxChars: 2_200,
       },
-      entries: { main: { default: true } },
+      entries: { main: {} },
     },
   } satisfies OpenClawConfig;
   const largeAgents = "# AGENTS.md\n\n" + "Rules.\n".repeat(5_000);

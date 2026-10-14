@@ -17,7 +17,6 @@ import {
   gatewayCommandCall,
   getLogOutput,
   requireValue,
-  type UpdateCliScenario,
 } from "./update-cli-assertions.test-support.js";
 import { registerUpdateCliLifecycle } from "./update-cli-lifecycle.test-support.js";
 import {
@@ -53,7 +52,7 @@ import {
   resolveUpdateInstallIdentity,
   resolveUpdateInstallKind,
   runCommandWithTimeout,
-  runUtf8CommandWithTimeout,
+  runExec,
   updateCommand,
   updateGitCheckout,
 } from "./update-cli-modules.test-support.js";
@@ -81,10 +80,9 @@ export function createUpdateCliFixture() {
   );
   const checkoutRoot = path.join(fixtureRoot, "checkout");
   fsSync.mkdirSync(checkoutRoot);
-  for (const directory of [".git", "src", "extensions", "dist"]) {
+  for (const directory of [".git", "src", "extensions"]) {
     fsSync.mkdirSync(path.join(checkoutRoot, directory));
   }
-  fsSync.writeFileSync(path.join(checkoutRoot, "dist", "index.js"), "export {};\n", "utf8");
   fsSync.writeFileSync(
     path.join(checkoutRoot, "package.json"),
     JSON.stringify({ name: "openclaw", version: VERSION }),
@@ -99,7 +97,6 @@ export function createUpdateCliFixture() {
   let fixtureCount = 0;
   const tempDirs = useAutoCleanupTempDirTracker(afterEach);
   const tempDirsToCleanup = new Set<string>();
-  const fixtureStateDatabases = new Set<string>();
 
   const createCaseDir = (prefix: string) => {
     const dir = path.join(fixtureRoot, `${prefix}-${fixtureCount++}`);
@@ -107,10 +104,7 @@ export function createUpdateCliFixture() {
     return dir;
   };
 
-  const initializeExistingUpdateProfile = createUpdateStateProfileInitializer(
-    fixtureRoot,
-    fixtureStateDatabases,
-  );
+  const initializeExistingUpdateProfile = createUpdateStateProfileInitializer(fixtureRoot);
 
   const baseConfig: OpenClawConfig = {};
   const baseSnapshot = createUpdateCliBaseSnapshot(baseConfig);
@@ -212,12 +206,12 @@ export function createUpdateCliFixture() {
     ffree: 0,
   });
 
-  const reportCandidateSteps = <T extends { steps: UpdateRunResult["steps"] }>(
-    options: { onStep?: (step: UpdateRunResult["steps"][number]) => void },
+  const reportCandidateSteps = async <T extends { steps: UpdateRunResult["steps"] }>(
+    options: { onStep?: (step: UpdateRunResult["steps"][number]) => void | Promise<void> },
     result: T,
-  ): T => {
+  ): Promise<T> => {
     for (const step of result.steps) {
-      options.onStep?.(step);
+      await options.onStep?.(step);
     }
     return result;
   };
@@ -245,12 +239,6 @@ export function createUpdateCliFixture() {
     resumeScheduledTaskAutoStartAfterUpdate.mockImplementation(
       nativeTaskControl.resumeScheduledTaskAutoStartAfterUpdate,
     );
-  };
-
-  const runUpdateCliScenario = async (testCase: UpdateCliScenario) => {
-    vi.clearAllMocks();
-    await testCase.run();
-    testCase.assert();
   };
 
   const runRestartFallbackScenario = async (params: { daemonInstall: "ok" | "fail" }) => {
@@ -335,8 +323,7 @@ export function createUpdateCliFixture() {
     return { root, entrypoints };
   };
 
-  const FRESH_POST_UPDATE_ENTRYPOINT = path.join(fixtureRoot, "openclaw-updated-entry.mjs");
-  fsSync.writeFileSync(FRESH_POST_UPDATE_ENTRYPOINT, "export {};\n", "utf8");
+  const FRESH_POST_UPDATE_ENTRYPOINT = "/tmp/openclaw-updated-entry.mjs";
 
   const mockCurrentProcessFreshDoctor = createCurrentProcessFreshDoctorFixture(
     resolveGatewayInstallEntrypoint,
@@ -348,13 +335,12 @@ export function createUpdateCliFixture() {
     workspaceSuggestions?: boolean;
   }) => {
     const calls = vi
-      .mocked(runUtf8CommandWithTimeout)
+      .mocked(runExec)
       .mock.calls.filter(
-        ([argv]) => argv[1] === FRESH_POST_UPDATE_ENTRYPOINT && argv[2] === "doctor",
+        ([, args]) => args[0] === FRESH_POST_UPDATE_ENTRYPOINT && args[1] === "doctor",
       );
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.[0]).toEqual([
-      expect.any(String),
+    expect(calls[0]?.[1]).toEqual([
       FRESH_POST_UPDATE_ENTRYPOINT,
       "doctor",
       "--repair",
@@ -440,7 +426,6 @@ export function createUpdateCliFixture() {
     mockRunningManagedGateway,
     mockStoppedManagedGitGateway,
     mockNpmGlobalRoot,
-    mockPackageReplacementFailure,
     mockGatewayInstallFailure,
   } = createUpdateCliPackageFixtures({
     runCommandWithTimeout,
@@ -586,7 +571,6 @@ export function createUpdateCliFixture() {
     expectFailedManagedGitRestart,
     expectFreshPostUpdateDoctor,
     fixtureRoot,
-    fixtureStateDatabases,
     FRESH_POST_UPDATE_ENTRYPOINT,
     globalNpmConfig,
     initializeExistingUpdateProfile,
@@ -602,7 +586,6 @@ export function createUpdateCliFixture() {
     mockPackageGatewayLifecycle,
     mockPackageInstallAtCaseDir,
     mockPackageInstallStatus,
-    mockPackageReplacementFailure,
     mockPostDoctorSnapshot,
     mockRunningManagedGateway,
     mockServicePackageCommands,
@@ -615,7 +598,6 @@ export function createUpdateCliFixture() {
     runPostCoreCommand,
     runPostCoreUpdate,
     runRestartFallbackScenario,
-    runUpdateCliScenario,
     runWithGatewayServiceEnv,
     setStdoutTty,
     setTty,

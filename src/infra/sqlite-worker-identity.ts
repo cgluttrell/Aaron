@@ -4,21 +4,11 @@ import path from "node:path";
 import { hasErrnoCode } from "./errno.js";
 import { normalizeWindowsPathPreservingCase } from "./path-guards.js";
 
-export type DatabasePathIdentity = Readonly<{
+export type DatabaseFileIdentity = Readonly<{
   key: string;
-  canonicalPath: string;
   birthtime?: string;
 }>;
-
-/** Native SQLite namespaces are filesystem locators, not distinct database owners. */
-export function normalizeDatabasePath(location: string): string {
-  const normalized =
-    process.platform === "win32" ? normalizeWindowsPathPreservingCase(location) : location;
-  // Preserve other path dialects and device namespaces that do not normalize to a drive or UNC.
-  return process.platform === "win32" && !/^(?:[a-z]:[\\/]|[\\/]{2})/iu.test(normalized)
-    ? location
-    : normalized;
-}
+export type DatabasePathIdentity = DatabaseFileIdentity & Readonly<{ canonicalPath: string }>;
 
 // The physical host policy stays fixed across every admission in this process.
 const useDatabaseBirthtime = process.platform !== "linux";
@@ -31,6 +21,51 @@ export function readDatabaseIdentityBirthtime(file: BigIntStats): string {
   // Node does not expose Linux STATX_BTIME availability and can substitute ctime.
   // Keep the unknown creation-time value stable across ordinary database writes.
   return useDatabaseBirthtime ? file.birthtimeNs.toString() : "0";
+}
+
+/** Native SQLite namespaces are filesystem locators, not distinct database owners. */
+export function normalizeDatabasePath(location: string): string {
+  const normalized =
+    process.platform === "win32" ? normalizeWindowsPathPreservingCase(location) : location;
+  // Preserve other path dialects and device namespaces that do not normalize to a drive or UNC.
+  return process.platform === "win32" && !/^(?:[a-z]:[\\/]|[\\/]{2})/iu.test(normalized)
+    ? location
+    : normalized;
+}
+
+export function readDatabaseFileIdentity(value: unknown): DatabaseFileIdentity {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !("key" in value) ||
+    typeof value.key !== "string" ||
+    !/^file:(?:0|[1-9]\d{0,19}):(?:0|[1-9]\d{0,19})$/.test(value.key) ||
+    ("birthtime" in value &&
+      value.birthtime !== undefined &&
+      (typeof value.birthtime !== "string" || !/^-?(?:0|[1-9]\d{0,29})$/.test(value.birthtime)))
+  ) {
+    throw new Error("SQLite snapshot requires a captured physical file identity");
+  }
+  return {
+    key: value.key,
+    ...("birthtime" in value && typeof value.birthtime === "string"
+      ? { birthtime: value.birthtime }
+      : {}),
+  };
+}
+
+export function assertDatabaseFileIdentity(
+  file: BigIntStats,
+  expected: DatabaseFileIdentity,
+): void {
+  if (
+    !file.isFile() ||
+    `file:${databaseFileIdentityKey(file)}` !== expected.key ||
+    (expected.birthtime !== undefined && readDatabaseIdentityBirthtime(file) !== expected.birthtime)
+  ) {
+    throw new Error("SQLite database file identity changed before existing-only open");
+  }
 }
 
 function existingIdentity(
@@ -163,12 +198,8 @@ export function assertExistingDatabaseIdentity(
   expected: string,
   expectedBirthtime?: string,
 ): void {
-  const file = statSync(databasePath, { bigint: true });
-  if (
-    !file.isFile() ||
-    `file:${file.dev}:${file.ino}` !== expected ||
-    (expectedBirthtime !== undefined && readDatabaseIdentityBirthtime(file) !== expectedBirthtime)
-  ) {
-    throw new Error("SQLite database file identity changed before existing-only open");
-  }
+  assertDatabaseFileIdentity(statSync(databasePath, { bigint: true }), {
+    key: expected,
+    birthtime: expectedBirthtime,
+  });
 }

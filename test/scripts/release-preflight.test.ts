@@ -1,9 +1,22 @@
 // Release preflight tests keep generated-artifact checks fail-closed for operators.
-import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { resolveTestNodeExecPath } from "../../src/test-utils/node-process.js";
+import { createBoundedChildOutput } from "../helpers/bounded-child-output.js";
+import {
+  fixtureReceiptClientSource,
+  openFixtureReceiptChannel,
+} from "../helpers/fixture-receipts.js";
+import { awaitGateBeforeSettlement, withinTest } from "../helpers/promise.js";
 import { cleanupTempDirs, makeTempDir } from "../helpers/temp-dir.js";
 
 const SCRIPT = resolve("scripts/release-preflight.mjs");
@@ -23,7 +36,6 @@ const CHECK_COMMANDS = [
   "pnpm native:i18n:check",
 ];
 const FIX_COMMANDS = [
-  "pnpm update:compat:check",
   "node --import tsx scripts/sync-plugin-versions.ts",
   "pnpm channels:catalog:gen",
   "node --import tsx scripts/generate-plugin-inventory-doc.mts --write",
@@ -40,7 +52,7 @@ afterEach(() => {
   cleanupTempDirs(tempDirs);
 });
 
-function makeFakePnpm(waitFor?: { command: string; event: string }): {
+function makeFakePnpm(waitFor?: { command: string; endpoint: string }): {
   binDir: string;
   eventsPath: string;
   logPath: string;
@@ -55,20 +67,17 @@ function makeFakePnpm(waitFor?: { command: string; event: string }): {
     writeFileSync(
       binPath,
       `#!${testNodeExecPath}
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync } from "node:fs";
+${waitFor ? fixtureReceiptClientSource(waitFor.endpoint) : ""}
 
 const command = ${JSON.stringify(bin)} + " " + process.argv.slice(2).join(" ");
 appendFileSync(process.env.OPENCLAW_RELEASE_PREFLIGHT_PNPM_LOG, command + "\\n");
 appendFileSync(process.env.OPENCLAW_RELEASE_PREFLIGHT_PNPM_EVENTS, "start " + command + "\\n");
 const waitFor = ${JSON.stringify(waitFor ?? null)};
-if (waitFor?.command === command) {
-  const deadline = Date.now() + 3000;
-  while (!readFileSync(process.env.OPENCLAW_RELEASE_PREFLIGHT_PNPM_EVENTS, "utf8").split("\\n").includes(waitFor.event)) {
-    if (Date.now() >= deadline) {
-      console.error("Ready work did not start while another command held a worker");
-      process.exit(9);
-    }
-    await new Promise(resolve => setTimeout(resolve, 10));
+if (waitFor) {
+  sendReceipt("preflight", "start " + command);
+  if (waitFor.command === command) {
+    await awaitRelease(command, "release");
   }
 }
 const delayMs = Number(process.env.OPENCLAW_RELEASE_PREFLIGHT_DELAY_MS ?? "0");
@@ -77,7 +86,7 @@ if (delayMs > 0) {
 }
 appendFileSync(process.env.OPENCLAW_RELEASE_PREFLIGHT_PNPM_EVENTS, "end " + command + "\\n");
 const failures = new Set((process.env.OPENCLAW_RELEASE_PREFLIGHT_FAIL_COMMANDS ?? "").split(";").filter(Boolean));
-process.exit(failures.has(command) ? 7 : 0);
+process.exitCode = failures.has(command) ? 7 : 0;
 `,
       { mode: 0o755 },
     );
@@ -265,18 +274,6 @@ describe("scripts/release-preflight.mjs", () => {
     );
   });
 
-  it("fails release preparation when the supported updater inventory is stale", () => {
-    const fakePnpm = makeFakePnpm();
-    const result = runPreflight(["--fix"], fakePnpm, {
-      OPENCLAW_RELEASE_PREFLIGHT_FAIL_COMMANDS: "pnpm update:compat:check",
-    });
-
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      "- previous updater compatibility: exit 7 (pnpm update:compat:check)",
-    );
-  });
-
   it("serializes the root package writer before generated-artifact readers", () => {
     const fakePnpm = makeFakePnpm();
     const root = makeReleaseFixture();
@@ -302,7 +299,7 @@ describe("scripts/release-preflight.mjs", () => {
     );
   });
 
-  it.each([
+  it.for([
     {
       args: ["--check", "--scope", "config", "--jobs", "2"],
       command: "pnpm config:schema:check",
@@ -315,12 +312,55 @@ describe("scripts/release-preflight.mjs", () => {
     },
   ])(
     "starts ready work without waiting for an unrelated command: $command",
-    ({ args, command, event }) => {
-      const fakePnpm = makeFakePnpm({ command, event });
-      const result = runPreflight(args, fakePnpm, {}, makeReleaseFixture());
-      expect(result.status, result.stderr).toBe(0);
-      const events = readPnpmLog(fakePnpm.eventsPath);
-      expect(events.indexOf(event)).toBeLessThan(events.indexOf(`end ${command}`));
+    async ({ args, command, event }, { signal }) => {
+      const receipts = await openFixtureReceiptChannel();
+      const fakePnpm = makeFakePnpm({ command, endpoint: receipts.endpoint });
+      const child = spawn(testNodeExecPath, [SCRIPT, ...args], {
+        cwd: makeReleaseFixture(),
+        env: {
+          ...process.env,
+          OPENCLAW_RELEASE_PREFLIGHT_PNPM_LOG: fakePnpm.logPath,
+          OPENCLAW_RELEASE_PREFLIGHT_PNPM_EVENTS: fakePnpm.eventsPath,
+          PATH: `${fakePnpm.binDir}${delimiter}${process.env.PATH ?? ""}`,
+        },
+        stdio: ["ignore", "ignore", "pipe"],
+      });
+      const stderr = createBoundedChildOutput();
+      child.stderr.on("data", stderr.append);
+      const completed = new Promise<number | null>((resolveExit, reject) => {
+        child.once("error", reject);
+        child.once("close", resolveExit);
+      });
+      try {
+        await withinTest(
+          awaitGateBeforeSettlement(
+            receipts.waitFor("preflight", event),
+            completed,
+            "Ready work did not start while another command held a worker",
+          ).catch((error: unknown) => {
+            // Commands persist starts before sending receipts on the separate socket.
+            if (
+              !existsSync(fakePnpm.eventsPath) ||
+              !readPnpmLog(fakePnpm.eventsPath).includes(event)
+            ) {
+              throw error;
+            }
+          }),
+          signal,
+        );
+        receipts.release(command, "release");
+        const status = await withinTest(completed, signal);
+        expect(status, stderr.text()).toBe(0);
+        const events = readPnpmLog(fakePnpm.eventsPath);
+        expect(events.indexOf(event)).toBeLessThan(events.indexOf(`end ${command}`));
+      } finally {
+        receipts.release(command, "release");
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGTERM");
+        }
+        await completed.catch(() => {});
+        await receipts.close();
+      }
     },
   );
 
@@ -354,7 +394,6 @@ describe("scripts/release-preflight.mjs", () => {
     expect(result.status).toBe(0);
     expect(readPnpmLog(fakePnpm.logPath).toSorted()).toEqual(
       [
-        "pnpm update:compat:check",
         "node --import tsx scripts/sync-plugin-versions.ts",
         "pnpm channels:catalog:gen",
         "node --import tsx scripts/generate-plugin-inventory-doc.mts --write",

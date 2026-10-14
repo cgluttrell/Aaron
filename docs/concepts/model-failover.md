@@ -20,6 +20,14 @@ is instructed to inspect interrupted actions before deciding whether to repeat
 them. A retry status shows the wait and attempt count. Cancellation remains
 available. No additional configuration is required.
 
+ChatGPT Responses WebSocket connection expiry and a normal close before the
+terminal event follow this recovery policy even after streaming starts. The failed socket is retired; recovery continues the
+saved transcript instead of replaying the request inside the transport.
+
+Anthropic streaming errors retain their structured error type, so rate limits,
+overload, and authentication failures follow the same recovery policy even when
+the provider's message is generic.
+
 Thinking-level recovery applies only when the provider identifies a reasoning or
 thinking parameter. Model/account restrictions and unrelated unsupported options
 keep their original failure classification and follow the configured fallback
@@ -400,6 +408,10 @@ conversation. It means the agent's interpretation of the task needs review; it
 does not establish that the user violated a policy. OpenClaw preserves available
 provider findings and holds queued messages instead of retrying the conversation.
 Already-accepted results can still finish recording.
+
+Older saved errors that retain the policy code also display a safety precaution,
+even without the newer refusal diagnostics. Displaying that historical error does
+not create review findings or authorize continuation.
 
 In the Control UI, choose **Review findings**. When a supported Codex or ChatGPT
 Responses runtime supplies a continuation, the dialog shows its exact message

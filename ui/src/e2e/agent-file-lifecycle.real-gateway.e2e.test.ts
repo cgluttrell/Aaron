@@ -247,9 +247,7 @@ catalogSuite.define(() => {
           await expect
             .poll(() => picker.locator('[role="option"][data-value="fixture/retiring"]').count())
             .toBe(1);
-          const identityName = editor.locator(
-            ".agent-identity-editor__fields input[maxlength='64']",
-          );
+          const identityName = editor.getByRole("textbox", { name: "Display name", exact: true });
           // Identity hydration can replace the selection between fill's browser and keyboard steps.
           await expect.poll(() => identityName.inputValue()).toBe("Assistant");
           await identityName.fill("Keep this identity draft");
@@ -475,12 +473,19 @@ suite.define(() => {
         signal.throwIfAborted();
         await state.writeConfig({
           agents: {
-            defaults: { workspace: mainWorkspace },
+            ownership: "explicit",
+            defaults: {
+              workspace: mainWorkspace,
+              systemAgent: { agentId: "main" },
+              heartbeat: { agentId: "main" },
+              sessionStore: { agentId: "main" },
+            },
             entries: {
-              main: { default: true, workspace: mainWorkspace },
+              main: { workspace: mainWorkspace },
               writer: { workspace: writerWorkspace },
             },
           },
+          talk: { agentId: "main" },
           gateway: {
             auth: { mode: "none" },
             controlUi: {
@@ -568,16 +573,17 @@ suite.define(() => {
             await editor.fill("# Draft typed before the refresh\n");
             const thirdAppend = `${secondAppend}- third memory\n`;
             await writeFile(agentsFile, thirdAppend, "utf8");
-            await page
+            const refresh = page
               .locator(".settings-section__header")
               .filter({ hasText: "Core Files" })
-              .getByRole("button", { name: "Refresh" })
-              .click();
+              .getByRole("button", { name: "Refresh" });
+            await refresh.click();
             await expect.poll(() => editor.inputValue()).toBe("# Draft typed before the refresh\n");
             await save.click();
             await expect.poll(() => conflict.isVisible()).toBe(true);
             expect(await readFile(agentsFile, "utf8")).toBe(thirdAppend);
             await captureAgentFileScreenshot(page, "10-real-gateway-refresh-then-save.png");
+            await expect.poll(() => refresh.isDisabled()).toBe(false);
 
             await page
               .locator(".agent-file-header")

@@ -1,10 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
 import { detectCurrentSqliteCapabilities, nodeRuntimeFailure } from "../../../node-sqlite.mjs";
 import { formatUnsupportedNodeVersionMessage } from "../../../node-version.mjs";
-import type { LegacyConfigUpdatePlan } from "../../commands/doctor/legacy-config-repair.js";
 import { assertConfigWriteAllowedInCurrentMode } from "../../config/config.js";
 import { resolveConfigPath } from "../../config/paths.js";
-import type { ConfigFileSnapshot } from "../../config/types.openclaw.js";
 import { resolveGatewayNativeServiceIdentityConflict } from "../../daemon/constants.js";
 import { disableCurrentOpenClawUpdateLaunchdJob } from "../../daemon/launchd.js";
 import { mergeGatewayServiceEnv } from "../../daemon/service-env-merge.js";
@@ -16,23 +14,18 @@ import {
   isGatewayExternallySupervised,
 } from "../../infra/gateway-supervision.js";
 import { resolveOpenClawPackageRootSync } from "../../infra/openclaw-root.js";
-import { assertNoPendingPackageActivation } from "../../infra/package-update-activation.js";
 import { normalizeUpdateChannel } from "../../infra/update-channels.js";
 import { resolveUpdateInstallKind } from "../../infra/update-check.js";
 import {
   readControlPlaneUpdateSentinelMeta,
   UPDATE_RUN_ID_ENV,
 } from "../../infra/update-control-plane-sentinel.js";
-import {
-  parseDevUpdateTargetEnv,
-  type DevUpdateTarget,
-  UPDATE_DEV_TARGET_REF_ENV,
-} from "../../infra/update-dev-target.js";
+import { readDevUpdateTarget } from "../../infra/update-dev-target.js";
+import { normalizeUpdateFailureResult } from "../../infra/update-failure-result.js";
 import {
   createFreeBsdPkgOwnershipInspection,
   type FreeBsdPkgOwnershipInspection,
 } from "../../infra/update-freebsd-pkg-ownership.js";
-import { resolveUpdateInstallRoot } from "../../infra/update-install-root.js";
 import { cleanupStaleManagedServiceUpdateHandoffs } from "../../infra/update-managed-service-handoff-cleanup.js";
 import {
   POST_CORE_UPDATE_CHANNEL_ENV,
@@ -58,6 +51,7 @@ import {
 } from "../../infra/update-run-ledger.js";
 import type { UpdateRunRecord, UpdateRunStep } from "../../infra/update-run-record.js";
 import { assertUpdateRecoveryAdmission } from "../../infra/update-run-recovery-admission.js";
+import { isUpdateRecoveryPending } from "../../infra/update-run-recovery-schema.js";
 import {
   inspectUpdateRecoveries,
   loadUpdateRecovery,
@@ -86,13 +80,18 @@ import {
 } from "./shared.js";
 import { suppressDeprecations } from "./suppress-deprecations.js";
 import { resolveForegroundUpdateAdmission } from "./update-command-handoff.js";
+import type { UpdateInitializationAdmission } from "./update-command-initialization-types.js";
+import { resolveMutableUpdateInstallKind } from "./update-command-install-kind.js";
 import { revalidateUpdateDatabaseContext } from "./update-command-managed-context.js";
 import {
   admitMutableUpdateSignalRun,
   retireMutableUpdateSignalRun,
   withMutableUpdateSignals,
 } from "./update-command-mutable-signals.js";
-import { UpdateCommandPendingRecoveryFailure } from "./update-command-result.js";
+import {
+  assertUpdatePackageActivationAdmission,
+  settleStalePackageActivationAdmission,
+} from "./update-command-package-activation.js";
 import {
   resolveOwnedManagedUpdateEnv,
   withOwnedManagedUpdateEnv,
@@ -202,35 +201,6 @@ export async function resolveUpdateCommandAdmissionEnv(params: {
   return env;
 }
 
-/** Package admission must not open history or launch diagnostics on a retained operation. */
-export function assertUpdatePackageActivationAdmission(
-  root: string,
-  options?: Parameters<typeof assertNoPendingPackageActivation>[1] & { serviceRoot?: string },
-): void {
-  try {
-    assertNoPendingPackageActivation(resolveUpdateInstallRoot(root), options);
-  } catch (cause) {
-    throw new UpdateCommandPendingRecoveryFailure(
-      {
-        status: "error",
-        mode: "unknown",
-        root,
-        reason: "update-recovery-pending",
-        steps: [],
-        durationMs: 0,
-      },
-      formatErrorMessage(cause),
-      { cause },
-    );
-  }
-  // A retained publication still owns the service installation when the CLI updates another root.
-  if (options?.serviceRoot && options.serviceRoot !== root) {
-    assertUpdatePackageActivationAdmission(options.serviceRoot, {
-      continuation: options.continuation,
-    });
-  }
-}
-
 export async function admitUpdateCommandRun(params: {
   opts: UpdateCommandOptions;
   root: string;
@@ -239,25 +209,17 @@ export async function admitUpdateCommandRun(params: {
   invocationCwd?: string;
   pkgOwnership?: FreeBsdPkgOwnershipInspection;
   expectedForeground?: true;
-  initialization?: {
-    env: NodeJS.ProcessEnv;
-    runId: string;
-    databasePath: string;
-    configPath: string;
-    target: {
-      configSnapshot: ConfigFileSnapshot;
-      legacyConfigPlan?: LegacyConfigUpdatePlan;
-      updateInstallKind?: "git" | "package" | "unknown";
-    };
-  };
+  initialization?: UpdateInitializationAdmission;
+  assertCurrent?: () => void;
 }): Promise<NonNullable<UpdateCommandOptions["run"]>> {
-  assertUpdatePackageActivationAdmission(params.root, { serviceRoot: params.serviceRoot });
+  const packageAdmission = { serviceRoot: params.serviceRoot, dryRun: params.opts.dryRun };
+  assertUpdatePackageActivationAdmission(params.root, packageAdmission);
   const env = await resolveUpdateCommandAdmissionEnv(params);
   // A previous invocation may have died with a sealed restoration plan. Detect
   // it before any writable owner open or history row creation changes that state.
   // An inherited diagnostic run ID is not a durable continuation claim.
   await assertUpdateRecoveryAdmission({ env });
-  assertUpdatePackageActivationAdmission(params.root, { serviceRoot: params.serviceRoot });
+  assertUpdatePackageActivationAdmission(params.root, packageAdmission);
   await assertOpenClawStateWriteAllowedAtPath({
     databasePath: resolveOpenClawStateSqlitePath(env),
     env,
@@ -277,19 +239,24 @@ export async function admitUpdateCommandRun(params: {
         "service-context-changed",
       );
     }
-    await revalidateUpdateDatabaseContext({
-      env,
-      readEnv: env,
-      config: initialized.target.configSnapshot.sourceConfig,
-      configSnapshot: initialized.target.configSnapshot,
-      ...(initialized.target.updateInstallKind === "package" &&
-      usesCandidateUpdateAdmission(params.opts, params.installKind ?? "unknown")
-        ? { configValidation: "candidate" as const }
-        : {}),
-      ...(initialized.target.legacyConfigPlan
-        ? { legacyConfigPlan: initialized.target.legacyConfigPlan }
-        : {}),
-    });
+    if (initialized.target) {
+      const current = await revalidateUpdateDatabaseContext({
+        env,
+        readEnv: env,
+        config: initialized.target.configSnapshot.sourceConfig,
+        configSnapshot: initialized.target.configSnapshot,
+        ...(initialized.target.updateInstallKind === "package" &&
+        usesCandidateUpdateAdmission(params.opts, params.installKind ?? "unknown")
+          ? { configValidation: "candidate" as const }
+          : {}),
+        ...(initialized.target.legacyConfigPlan
+          ? { legacyConfigPlan: initialized.target.legacyConfigPlan }
+          : {}),
+      });
+      initialized.target.configSnapshot = current.configSnapshot;
+      initialized.target.legacyConfigPlan = current.legacyConfigPlan;
+      initialized.target.configReadFailure = undefined;
+    }
   }
   const meta = await readControlPlaneUpdateSentinelMeta(env);
   await resolveForegroundUpdateAdmission({
@@ -301,12 +268,13 @@ export async function admitUpdateCommandRun(params: {
       params.opts.run?.completionOwner === "gateway-restart" ||
       undefined,
   });
-  assertUpdatePackageActivationAdmission(params.root, { serviceRoot: params.serviceRoot });
+  assertUpdatePackageActivationAdmission(params.root, packageAdmission);
   const driver = readUpdateRunDriver();
   const ledgerOptions = {
     env,
     busyTimeoutMs: parseUpdateTimeoutMs(params.opts.timeout) ?? DEFAULT_UPDATE_STEP_TIMEOUT_MS,
   };
+  params.assertCurrent?.();
   const created = createUpdateRun(
     {
       runId: env[UPDATE_RUN_ID_ENV]?.trim() || params.initialization?.runId,
@@ -341,6 +309,8 @@ export async function admitUpdateCommandRun(params: {
       : undefined;
   const run = {
     runId: record.runId,
+    originalRecoveryCapture:
+      params.initialization?.originalRecoveryCapture ?? params.opts.run?.originalRecoveryCapture,
     defaultStepTimeoutMs: record.trigger === "campaign" ? AUTO_UPDATE_STEP_TIMEOUT_MS : undefined,
     env,
     ...(record.trigger !== "cli" &&
@@ -421,27 +391,35 @@ export async function withUpdatePreviewSignals<T>(
 export function createUpdateRunProgress(
   run: NonNullable<UpdateCommandOptions["run"]>,
   progress: UpdateDisplayProgress,
+  recordStep: (step: UpdateRunStep) => Promise<UpdateRunRecord | undefined>,
 ): UpdateStepProgress & {
   deferLedgerWrites: () => void;
-  flushLedgerWrites: () => void;
+  flushLedgerWrites: () => Promise<void>;
   pendingSteps: UpdateRunStep[];
 } {
   let deferred = false;
   const driver = readUpdateRunDriver();
   const pendingSteps: UpdateRunStep[] = [];
-  const record = (step: UpdateRunStep) => {
-    if (deferred) {
-      pendingSteps.push(step);
-      return undefined;
-    }
+  let flushFailure: { cause: unknown } | undefined;
+  const persist = async (step: UpdateRunStep) => {
     try {
-      return recordUpdateRunStep(run.runId, step, { env: run.env });
+      return await recordStep(step);
     } catch (cause) {
       throw new Error(
         `Could not record update step "${step.step}" (${step.status}): ${formatErrorMessage(cause)}`,
         { cause },
       );
     }
+  };
+  const record = async (step: UpdateRunStep) => {
+    if (flushFailure) {
+      throw flushFailure.cause;
+    }
+    if (deferred) {
+      pendingSteps.push(step);
+      return undefined;
+    }
+    return await persist(step);
   };
   return {
     pendingSteps,
@@ -461,22 +439,36 @@ export function createUpdateRunProgress(
       deferred = true;
       retireMutableUpdateSignalRun(run);
     },
-    flushLedgerWrites() {
-      deferred = false;
-      for (const step of pendingSteps.splice(0)) {
-        record(step);
+    async flushLedgerWrites() {
+      if (flushFailure) {
+        throw flushFailure.cause;
       }
+      while (pendingSteps[0]) {
+        try {
+          await persist(pendingSteps[0]);
+        } catch (cause) {
+          // A lost reply cannot authorize replay of this receipt or its remaining tail.
+          flushFailure = { cause };
+          throw cause;
+        }
+        pendingSteps.shift();
+      }
+      deferred = false;
     },
-    onStepStart(step) {
-      const committed = record({ step: step.name, status: "in_progress", startedAtMs: Date.now() });
+    async onStepStart(step) {
+      const committed = await record({
+        step: step.name,
+        status: "in_progress",
+        startedAtMs: Date.now(),
+      });
       progress.onStepStart?.(step, committed);
     },
-    onStepComplete(step) {
+    async onStepComplete(step) {
       const endedAtMs = Date.now();
       // A completed step may persist warnings; display its final committed row.
       let committed: UpdateRunRecord | undefined;
       for (const entry of updateRunStepsFromResultStep(step)) {
-        committed = record({
+        committed = await record({
           ...entry,
           startedAtMs: Math.max(0, endedAtMs - step.durationMs),
           endedAtMs,
@@ -492,18 +484,16 @@ export function completeUpdateCommandRun(
   run: UpdateCommandOptions["run"],
   completion: { rolledBack?: boolean; downtimeMs?: number } = {},
 ): UpdateRunResult {
-  const result = normalizeControlPlaneUpdateResult(input);
+  const result = normalizeUpdateFailureResult(normalizeControlPlaneUpdateResult(input));
   if (!run) {
     return result;
   }
   // A process-local result cannot complete an operationally pending update or
   // authorize package retirement. Only the durable finalizer may close it.
-  const inspected = inspectUpdateRecoveries({ env: run.env }).find(
-    (entry) => entry.record.runId === run.runId,
-  );
-  // A matching historical record can only project its saved outcome or remain
-  // pending below. The mutable fallback still uses strict execution admission;
-  // unrelated legacy evidence must not become an absent/clean recovery state.
+  const recoveries = inspectUpdateRecoveries({ env: run.env });
+  const inspected = recoveries.find((entry) => entry.record.runId === run.runId);
+  // A matching historical record only projects its saved outcome. Execution
+  // remains strict, while unrelated completed history grants no authority.
   const recovery =
     inspected?.format === "legacy-serving"
       ? inspected.record
@@ -513,7 +503,7 @@ export function completeUpdateCommandRun(
     getUpdateRun(run.runId, { env: run.env })?.status === recovery.terminal.status
   ) {
     // Read the atomic durable outcome; diagnostics never authorize retention cleanup.
-    return {
+    return normalizeUpdateFailureResult({
       ...result,
       status: recovery.terminal.status === "succeeded" ? "ok" : "error",
       reason:
@@ -521,15 +511,18 @@ export function completeUpdateCommandRun(
           ? undefined
           : (recovery.primaryFailure?.code ?? "update-rolled-back"),
       runId: run.runId,
-    };
+    });
   }
   if (recovery) {
-    return {
+    return normalizeUpdateFailureResult({
       ...result,
       status: "error",
       reason: result.reason ?? "update-recovery-pending",
       runId: run.runId,
-    };
+    });
+  }
+  if (recoveries.some(({ record }) => isUpdateRecoveryPending(record))) {
+    return { ...result, status: "error", reason: "update-recovery-pending", runId: run.runId };
   }
   const recordOptions = { env: run.env, redactPaths: result.root ? [result.root] : [] };
   // Both finalization and outer CLI unwind come here. A verified restored generation
@@ -583,16 +576,6 @@ export function completeUpdateCommandRun(
   return { ...result, runId: run.runId };
 }
 
-export function readDevUpdateTarget(): DevUpdateTarget | undefined {
-  const parsed = parseDevUpdateTargetEnv(process.env);
-  if (parsed.status === "invalid") {
-    throw new Error(
-      `Invalid internal ${UPDATE_DEV_TARGET_REF_ENV} contract; expected a plain Git ref or a supported tracked-target encoding.`,
-    );
-  }
-  return parsed.status === "valid" ? parsed.target : undefined;
-}
-
 export async function prepareUpdateCommand(opts: UpdateCommandOptions) {
   // Refuse before preflight can inspect write ownership or admit a live run ledger.
   const runtimeFailure = process.versions.bun
@@ -627,18 +610,15 @@ export async function prepareUpdateCommand(opts: UpdateCommandOptions) {
       `--channel must be "stable", "extended-stable", "beta", or "dev" (got "${opts.channel}")`,
     );
   }
-  let devTarget: DevUpdateTarget | undefined;
-  if (requestedChannel === "dev") {
-    devTarget = readDevUpdateTarget();
-  }
+  const devTarget = requestedChannel === "dev" ? readDevUpdateTarget() : undefined;
 
-  if (!postCoreUpdateResume && opts.dryRun !== true && isGatewayExternallySupervised()) {
-    throw new Error(formatExternalSupervisorUpdateRequired());
-  }
   // The shim can move during preparation; the loaded module owns the executing generation.
   const executingRoot = resolveOpenClawPackageRootSync({ moduleUrl: import.meta.url });
   const discoveredRoot = opts.sourceUpdate?.root ?? (await resolveUpdateRoot());
-  const installKind = await resolveUpdateInstallKind(discoveredRoot, { timeoutMs });
+  const installKind = await resolveMutableUpdateInstallKind(discoveredRoot, opts, timeoutMs);
+  if (!postCoreUpdateResume && opts.dryRun !== true && isGatewayExternallySupervised()) {
+    throw new Error(formatExternalSupervisorUpdateRequired());
+  }
   if (opts.sourceUpdate && installKind !== "git") {
     throw new Error("Doctor source update requires the accepted Git checkout.");
   }
@@ -655,9 +635,22 @@ export async function prepareUpdateCommand(opts: UpdateCommandOptions) {
   await pkgOwnership.assertUnowned(discoveredRoot);
   // A post-core marker cannot bypass pending recovery without the live original
   // owner. Check both roots before config/autostart preparation or history.
-  assertUpdatePackageActivationAdmission(discoveredRoot, {
-    continuation: postCoreUpdateResume ? opts.run?.executorFence : undefined,
-  });
+  const packageActivationNotes: string[] = [];
+  const admitPackageActivation = async (root: string) => {
+    const note = postCoreUpdateResume
+      ? undefined
+      : await settleStalePackageActivationAdmission(root, opts.dryRun);
+    if (note && opts.dryRun) {
+      packageActivationNotes.push(note);
+    } else if (note) {
+      defaultRuntime.error(note);
+    }
+    assertUpdatePackageActivationAdmission(root, {
+      continuation: postCoreUpdateResume ? opts.run?.executorFence : undefined,
+      dryRun: !postCoreUpdateResume && opts.dryRun,
+    });
+  };
+  await admitPackageActivation(discoveredRoot);
   const servicePlan =
     installKind === "package" && !postCoreUpdateResume && !foreground
       ? await resolveManagedServicePackageUpdatePlan({
@@ -669,8 +662,11 @@ export async function prepareUpdateCommand(opts: UpdateCommandOptions) {
   const packageAdmission = {
     continuation: postCoreUpdateResume ? opts.run?.executorFence : undefined,
     serviceRoot: servicePlan?.serviceRoot ?? servicePlan?.rootRedirect?.root,
+    dryRun: !postCoreUpdateResume && opts.dryRun,
   };
-  assertUpdatePackageActivationAdmission(discoveredRoot, packageAdmission);
+  if (packageAdmission.serviceRoot && packageAdmission.serviceRoot !== discoveredRoot) {
+    await admitPackageActivation(packageAdmission.serviceRoot);
+  }
   opts.run?.executorFence?.assertCurrent();
   if (opts.dryRun !== true) {
     await assertOpenClawStateWriteAllowedAtPath({
@@ -713,6 +709,7 @@ export async function prepareUpdateCommand(opts: UpdateCommandOptions) {
     installKind,
     servicePlan,
     pkgOwnership,
+    ...(packageActivationNotes.length ? { packageActivationNotes } : {}),
   };
 }
 

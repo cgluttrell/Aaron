@@ -16,6 +16,8 @@ Completed calls return command output directly. Use `process` only when `exec` r
 
 <ParamField path="command" type="string" required>
 Shell command to run.
+Gateway-hosted commands containing a literal NUL (U+0000) return an error before process launch; correct the command and retry.
+Empty arguments, newlines, and literal backslash-zero text remain valid and are not rewritten.
 </ParamField>
 
 <ParamField path="workdir" type="string" default="cwd">
@@ -83,13 +85,14 @@ Notes:
 - With the default-off [secret egress proxy](/gateway/secrets#secret-egress-proxy), Gateway-hosted exec receives shared-store `secret` entries only as process-local sentinels. The authenticated loopback proxy substitutes plaintext at outbound HTTPS request time. Each managed process has its own proxy grant, which survives the originating turn and is revoked on process exit, cancellation, timeout, or Gateway shutdown.
 - Shared-store `env` entries are intentionally plaintext and reach Gateway-hosted exec from the next agent run. They do not reach sandbox, remote `node`, ACP, or Codex-native shell execution. Under the Codex harness, use `gateway_exec` for this OpenClaw-managed environment path.
 - With a [managed GitHub identity](/gateway/config-tools#tools.github), Gateway-hosted exec validates the selected profile and binds its credential privately at each process launch. An unavailable profile blocks that local execution with reconnect guidance instead of falling back to native keyring credentials. Running shells retain their launch token. Later exec launches observe refreshes. Codex-native shell does not share this launch binding.
+- Sandboxed exec excludes that identity unless `agents.entries.<id>.tools.github.allowInSandbox: true`. This agent-only opt-in supports Docker and Podman, including role-required sandboxes: the profile is mounted read-only at `/openclaw/github`, and commands receive its managed token and Git author. Effective shared scope refuses injection with a warning; security audit warns for every opt-in. See [sandbox GitHub identity](/gateway/config-tools/github-identity#sandbox-opt-in).
 - Secret egress sets `NODE_USE_ENV_PROXY=1` so supported Node.js global `fetch` clients honor the process-scoped proxy. It does not use `NODE_OPTIONS`.
 - For channel-origin runs, OpenClaw also exposes a narrow sender/chat identity JSON payload in `OPENCLAW_CHANNEL_CONTEXT` when the channel provided those ids.
 - `exec` cannot run `openclaw channels login` or `/approve` shell commands: `openclaw channels login` is an interactive channel-auth flow, and `/approve` needs to go through the approval command handler, not a shell. Run channel login in a terminal on the gateway host, or use a channel-specific login agent tool when one exists (for example `whatsapp_login`).
 - Important: sandboxing is **off by default**. If sandboxing is off, implicit `host=auto` resolves to `gateway`. Explicit `host=sandbox` still fails closed instead of silently running on the gateway host. Enable sandboxing or use `host=gateway` with approvals.
 - Python script preflight checks for common shell-syntax mistakes only inspect files inside the effective `workdir` boundary. If a script path resolves outside `workdir`, the file check is skipped. JavaScript source is left to Node, which returns its normal diagnostics and exit code; statements before a runtime error may already have executed. Separate restrictions on ambiguous Python/Node interpreter commands still apply. Preflight skips entirely when `host=gateway` and the effective policy is `security=full` with `ask=off`.
 - For long-running work that starts now, start it once and rely on automatic completion wake when it is enabled and the command emits output or fails. Use `process` for logs, status, input, or intervention. Do not emulate scheduling with sleep loops, timeout loops, or repeated polling.
-- When `tools.exec.notifyOnExit=false`, a running result explicitly says that automatic completion wake is disabled, in both its text and structured `followUp`. If the task needs the result, collect it with `process poll` and a timeout before ending the turn, unless another continuation is already arranged. A running process or active session goal does not arrange that continuation.
+- When `tools.exec.notifyOnExit=false`, a running result explicitly says that automatic completion wake is disabled, in both its text and structured `followUp`. Later `process poll`, `log`, and `list` results preserve that guidance while the command is running, using the policy captured when it started. If the task needs the result, collect it with `process poll` and a timeout before ending the turn, unless another continuation is already arranged. A running process or active session goal does not arrange that continuation.
 - When an approved async command completes, its continuation uses the normal agent run timeout from `agents.defaults.timeoutSeconds`. The follow-up observer can finish waiting while the accepted agent run continues.
 - Subagent sessions do not receive automatic background-exec wakes. Collect the result with `process poll` before yielding without another completion source.
 - The process owner tracks agent-started background commands. Use the returned process session ID to inspect output, poll, or stop a command; its completion can wake the agent.
@@ -160,7 +163,7 @@ Shell `-c` wrappers, `env` with assignments, `xcrun`, BusyBox/Toybox applets, sh
 
 POSIX login or interactive shell wrappers in the requested command never receive auto-review. When binding succeeds, as with `bash -lc 'printf ok'`, they require human approval because their implicit startup files are outside operand binding. Existing binding rejections still take precedence. Interactive forms rejected as code-loading options remain denied. This applies to wrappers in the requested command. The gateway's ordinary shell startup snapshot is unchanged.
 
-Explicit `ask=always`, security-audit suppression changes, and commands above the review candidate limit go directly to human approval.
+Explicit `ask=always` and commands above the review candidate limit go directly to human approval.
 
 Codex app-server command approvals that are not already decided by explicit runtime or native policy use the human approval route. OpenClaw does not run its configured exec reviewer for these requests because Codex does not expose an enforceable resolved executable that can bind the review decision to the command Codex runs.
 
@@ -178,6 +181,8 @@ These paths skip the approval owner that detects strict inline evaluation. Tight
 For ordinary configured full/off execution without prompts for these forms, leave `strictInlineEval` unset or set it to `false`. `askFallback: "full"` does not satisfy strict inline-eval approval when detection runs.
 
 ### PATH handling
+
+Gateway-hosted commands use an `openclaw` launcher tied to the running Gateway's installation. Source checkouts pin any inherited TSX preload to that checkout on both Node and Bun, so the launcher also works from an agent workspace outside the checkout.
 
 - `host=gateway`: merges your login-shell `PATH` into the exec environment. `env.PATH` overrides are rejected for host execution. The daemon itself still runs with a minimal `PATH`:
   - macOS: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`

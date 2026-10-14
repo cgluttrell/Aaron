@@ -41,7 +41,7 @@ import "../test-helpers/fast-openclaw-tools-sessions.js";
 import { withGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import * as inProcessGateway from "./in-process-gateway.js";
 import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
-import * as sessionsSendFollowup from "./sessions-send-followup.js";
+import * as sessionsSendFollowup from "./sessions-send-followup-custody.js";
 import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
 import { createSessionsSendTool } from "./sessions-send-tool.js";
 
@@ -82,7 +82,7 @@ describe("sessions_send dispatch admission", () => {
     setRuntimeConfigSnapshot(config);
     setActivePluginRegistry(createSessionConversationTestRegistry());
     resetGatewayWorkAdmission();
-    vi.mocked(runSessionsSendA2AFlow).mockClear();
+    vi.mocked(runSessionsSendA2AFlow).mockReset();
     registerWatch = vi.spyOn(sessionStateEvents, "registerSessionStateWatch");
     for (const [sessionKey, sessionId] of [
       [requesterSessionKey, "requester-session"],
@@ -177,13 +177,10 @@ describe("sessions_send dispatch admission", () => {
               scopes: owner.connect.scopes ?? [],
             },
             async () => {
-              const keyOnly = sourceKey !== requesterSessionKey;
-              const participants = keyOnly
-                ? createReplyTurnParticipants({
-                    operatorAuthority:
-                      getPluginRuntimeGatewayRequestScope()?.client?.internal?.operatorRunAuthority,
-                  })
-                : undefined;
+              const participants = createReplyTurnParticipants({
+                operatorAuthority:
+                  getPluginRuntimeGatewayRequestScope()?.client?.internal?.operatorRunAuthority,
+              });
               try {
                 return await withGatewayToolCallerIdentity(
                   {
@@ -194,7 +191,7 @@ describe("sessions_send dispatch admission", () => {
                     receiptAuthority: () => true,
                   },
                   () => {
-                    invocationStarted = keyOnly;
+                    invocationStarted = true;
                     return createSessionsSendTool({
                       agentSessionKey: sourceKey,
                       config,
@@ -210,20 +207,18 @@ describe("sessions_send dispatch admission", () => {
                 );
               } finally {
                 returned = true;
-                participants?.close();
+                participants.close();
               }
             },
           ),
       );
-      if (sourceKey !== requesterSessionKey) {
-        await capturing.promise;
-        vi.useFakeTimers();
-        await vi.advanceTimersByTimeAsync(0);
-        vi.useRealTimers();
-        expect(returned).toBe(false);
-        expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
-        allowCapture.resolve();
-      }
+      await capturing.promise;
+      vi.useFakeTimers();
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+      expect(returned).toBe(false);
+      expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
+      allowCapture.resolve();
       const result = await pending;
       expect(result.details).toMatchObject({
         status: "accepted",

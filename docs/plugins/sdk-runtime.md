@@ -34,7 +34,7 @@ register(api) {
 - [Agent and sessions](/plugins/sdk-runtime/agent) — agent identity, directories, session store, transcripts, and sandbox authority.
 - [Model helpers](/plugins/sdk-runtime/models) — host-owned completions, model-selection policy, and provider auth resolution.
 - [Background work](/plugins/sdk-runtime/background-work) — hook agent turns, subagent runs, and native harness completion delivery.
-- [Gateway and nodes](/plugins/sdk-runtime/gateway-and-nodes) — in-process Gateway requests, paired node invocation, and Gateway service events.
+- [Gateway and nodes](/plugins/sdk-runtime/gateway-and-nodes) — in-process Gateway requests, bounded session facts through `gateway.readSessionFacts`, paired node invocation, and Gateway service events.
 - [Media helpers](/plugins/sdk-runtime/media) — speech, media understanding, image/video/music generation, web search, and media utilities.
 - [State and system](/plugins/sdk-runtime/state-and-system) — config snapshot, SQLite-backed plugin state, system utilities, events, and logging.
 - [Channel helpers](/plugins/sdk-runtime/channel) — channel-specific runtime helper groups for chunking, routing, pairing, media, and mentions.
@@ -128,6 +128,45 @@ its managed handles. Already admitted calls and streams have a bounded chance
 to finish before disposal; retaining an old function does not make it a current
 runtime handle.
 
+### Plugin value boundary
+
+OpenClaw admits native plugins when it loads and registers them, using the
+existing [manifest validation](/plugins/manifest) and
+[load policy](/plugins/architecture-internals/load-pipeline). Every loaded native
+plugin uses the same value contract: hook results, tool results, and stream
+events cross by reference. The plugin boundary does not copy, freeze,
+deep-inspect, or attach lazy readers to these values.
+
+Plugin authors must not mutate values after handing them to the host, including
+nested objects and byte buffers. Produce a new value for a later update.
+Registered callables retain their instance scope, receiver binding, and lifecycle
+fencing. Plugin code runs inside a Gateway request scope established for its
+invocation.
+
+Submitting a SessionManager append transfers its ordinary JSON payload to the
+manager by reference. Treat the payload as immutable from submission, including
+while an asynchronous append is pending; nested objects and arrays are frozen.
+Append receipts and transcript views share that immutable payload. Create a new
+value for a later update. Custom JSON
+representations are normalized before transcript redaction and persistence.
+If redaction policy changes after a tool result commits, the runtime creates a
+replacement for the model context while preserving the committed transcript bytes.
+
+An admitted iterator owns its invocation scope and call lease for its lifetime.
+Advancing or closing it executes plugin code in that scope without creating a
+new scope for each event. Completion, cancellation, and stream cleanup settle
+that same lease. If `return()` yields from a generator's `finally` block, a later
+resumption acquires a new lease through the original owner and scope. A retained
+iterator cannot acquire fresh authority after its owner closes.
+
+Native plugins execute in the Gateway process and are not sandboxed. Provenance
+diagnostics and capability-specific trust requirements, such as hook agent turns
+and Gateway scope elevation, still apply. Every loaded plugin can
+use its own [state and ingress queues](/plugins/sdk-runtime/state-and-system#api-runtime-state),
+regardless of provenance. `plugins.allow` permits loading without verifying source provenance. These
+load-time facts belong to the instance until the plugin owner replaces it through
+restart or an explicit reload or installation operation.
+
 Context engines selected by an admitted turn remain owned through that turn's
 commit and engine disposal. Replacing an enabled plugin waits for those consumers
 to close before registering its successor. Disabling or removing a plugin can
@@ -154,6 +193,37 @@ fields are optional in the SDK type because an API host without a managed
 instance may omit them; feature-detect them before relying on instance cleanup.
 The existing `api.lifecycle.registerRuntimeLifecycle(...)` contract remains
 available for plugin-owned host state.
+
+### Instance-bound background context
+
+Managed instances also expose the additive
+`api.lifecycle.runInBackgroundContext<T>(run: () => T): T` capability. It runs
+immediately and returns the callback's value or promise. It detaches the calling
+turn, request, and unrelated async-local context while preserving the instance's
+host resource bindings. Each call selects that exact instance's current adopted
+registry, so a retained plugin sees replacement providers after a reload.
+
+Use it when installing timers, watchers, and listeners, and again when delivering
+each background callback. Keep the runner with the resource that owns it; an old
+manager must not look up a replacement plugin instance. Return asynchronous work
+from the callback so the instance can drain it. Its completion remains independent
+of disposal cleanup, so resource cleanup can safely await it. New calls reject after admission
+closes; already admitted host cleanup retains its teardown authority. The runner
+does not schedule work or cancel native resources: release those in the existing
+cleanup owner. Like the other instance lifecycle fields, it can be absent on an
+API host without a managed instance.
+
+Inspection release reports settled disposal failures without marking the managed
+resources as still retained. Prepared-model shutdown records those failures and
+can finish after cleanup settles. Unfinished disposal and failed host cleanup
+prerequisites still prevent shutdown from reporting a completed resource release.
+
+Stopping or restarting the Gateway preserves persistent plugin session state and
+runs host cleanup hooks with reason `restart`. Disabling or removing a plugin owns
+deleting that state. After admitted cleanup settles, plugin callback failures are
+reported with the plugin and hook name as shutdown warnings; they do not turn a
+normal stop into a failed process exit. Failed session-state cleanup and unfinished
+write-capable work still prevent a clean shutdown.
 
 Cleanup is best effort. Plugins must explicitly release their own timers,
 listeners, sockets, watchers, and child processes in `onDispose` or their
@@ -223,6 +293,21 @@ without this hook, OpenClaw calls the existing `closeAllMemorySearchManagers`
 method, when provided, if the runtime or an embedding adapter retires. This closes
 all of that runtime's managers as best-effort cleanup; it cannot identify dependent
 managers or prevent concurrent manager acquisition.
+
+## Browser meeting transport builders
+
+`MeetingPlatformAdapter.createBrowserAdapterOptions` builds the `browser` and
+`parsing` options for `MeetingPlatformAdapter.create` from platform page scripts,
+permission origins, display names, manual-action prefixes, and retry policy.
+`MeetingPlatformAdapter.createPageScripts` assembles status, transcript, audio
+capture, and leave scripts while the plugin supplies identity and control sources.
+Its `statusPrelude` and `statusCall` descriptors share the factory's `platform`
+metadata, including page globals and audio/manual-action prefixes.
+
+`createStatusPreludeSource` accepts either source strings or callbacks for
+`lifecycleSource` and `manualActionSource`. Callbacks receive shared fragments for
+guest names, preserved identity, virtual audio input, microphone control, and
+manual actions. Existing string-based callers keep their generated source.
 
 ## Browser meeting status ownership
 

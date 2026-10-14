@@ -23,7 +23,6 @@ import {
   leaseQueries,
 } from "./update-managed-service-handoff-database.js";
 import { createManagedHandoffLeaseStore } from "./update-managed-service-handoff-lease.js";
-import { parseReleasedCommandLease } from "./update-managed-service-handoff.released-reader.test-support.js";
 
 const directories = useAutoCleanupTempDirTracker(afterEach);
 afterEach(() => {
@@ -100,9 +99,8 @@ describe.skipIf(process.platform === "win32")("managed command process custody",
               const commands = f.rows().filter((row) => row.install_root.endsWith("-command"));
               expect(commands).toHaveLength(f.roots.length);
               for (const row of commands) {
-                expect(() => parseReleasedCommandLease(row.payload_json)).not.toThrow();
                 expect(JSON.parse(row.payload_json)).toMatchObject({
-                  action: { kind: "update" },
+                  action: { custody: "bound" },
                   executor: { pid },
                 });
               }
@@ -131,9 +129,6 @@ describe.skipIf(process.platform === "win32")("managed command process custody",
     const reservation = retained.custody.reserve([process.execPath, "--version"]);
     expect(f.rows()).toHaveLength(f.roots.length * 2);
     for (const row of f.rows()) {
-      if (row.install_root.endsWith("-command")) {
-        expect(() => parseReleasedCommandLease(row.payload_json)).not.toThrow();
-      }
       const current = f.store.read(row.install_root);
       if (current.kind !== "current") {
         throw new Error("Missing command reservation");
@@ -160,26 +155,37 @@ describe.skipIf(process.platform === "win32")("managed command process custody",
     }
   });
 
-  it("refuses unknown own reservations and receipt identities claimed by another Doctor", () => {
-    const f = fixture();
-    const owner = createManagedCommandProcessCustody({ roots: f.roots, runId: "owner" });
-    const other = createManagedCommandProcessCustody({ roots: f.roots, runId: "other" });
-    const reservation = owner.custody.reserve([process.execPath]);
-    const claims = f.store.readCommandChildren(f.roots);
-    try {
-      expect(() => owner.prepareSettlement(process.pid, [])).toThrow(
-        "Unmatched native command reservation",
-      );
-      expect(() => other.prepareSettlement(process.pid, [])).toThrow("belongs to another Doctor");
-      expect(() =>
-        other.prepareSettlement(process.pid + 1, [{ pid: process.pid, startedAt: null }]),
-      ).toThrow("belongs to another Doctor");
-      expect(f.store.readCommandChildren(f.roots)).toEqual(claims);
-    } finally {
-      reservation.settled();
-      owner.releaseAnchors();
-    }
-  });
+  it.each(["current", "legacy"])(
+    "refuses unknown reservations and foreign receipts for %s updaters",
+    async (driver) => {
+      const f = fixture();
+      const owner = createManagedCommandProcessCustody({
+        roots: f.roots,
+        runId: driver === "legacy" ? "" : "owner",
+        anchorOwner: "doctor:owner",
+      });
+      const other = createManagedCommandProcessCustody({
+        roots: f.roots,
+        runId: driver === "legacy" ? "" : "other",
+        anchorOwner: "doctor:other",
+      });
+      const reservation = owner.custody.reserve([process.execPath]);
+      const claims = f.store.readCommandChildren(f.roots);
+      try {
+        expect(() => owner.prepareSettlement(process.pid, [])).toThrow(
+          "Unmatched native command reservation",
+        );
+        expect(() => other.prepareSettlement(process.pid, [])).toThrow("belongs to another Doctor");
+        expect(() =>
+          other.prepareSettlement(process.pid + 1, [{ pid: process.pid, startedAt: null }]),
+        ).toThrow("belongs to another Doctor");
+        expect(f.store.readCommandChildren(f.roots)).toEqual(claims);
+      } finally {
+        reservation.settled();
+        owner.releaseAnchors();
+      }
+    },
+  );
 
   it("retains every installation after helper death until the tracked group exits, including orphan rows", async () => {
     const f = fixture();
@@ -227,7 +233,7 @@ const command = createManagedCommandProcessCustody({ roots: ${JSON.stringify(nam
 } });
 command.custody.reserve([process.execPath, "-e", "process.stdin.resume()"]).spawned({pid: ${holder.pid}, startedAt: null});
 // Reopen an orphan produced before canonical anchors existed, without using the new producer.
-const orphan = store.acquire(${JSON.stringify(`${f.roots.at(-1)!}/.openclaw-update-child-00000000-0000-4000-8000-000000000001-command`)}, "tracked-owner", {kind:"update"});
+const orphan = store.acquire(${JSON.stringify(`${f.roots.at(-1)!}/.openclaw-update-child-historical-command`)}, "tracked-owner", {kind:"update", custody:"reserved"});
 if (orphan.kind !== "acquired" || !store.bindUpdateChildren([orphan.lease], ${holder.pid})) throw new Error("Historical orphan fixture failed");
 createManagedCommandProcessCustody({ roots: [${JSON.stringify(pendingRoot)}], runId: "pending-owner", databaseIdentity: command.databaseIdentity }).custody.reserve([process.execPath]);
 process.kill(process.pid, "SIGKILL");
@@ -257,7 +263,7 @@ process.kill(process.pid, "SIGKILL");
       expect(commands).toHaveLength(f.roots.length);
       for (const row of commands) {
         expect(JSON.parse(row.payload_json)).toMatchObject({
-          action: { kind: "update" },
+          action: { custody: "bound" },
           helper: { pid: result.pid },
           executor: { pid: holder.pid },
         });

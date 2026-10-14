@@ -111,6 +111,7 @@ const qaLabFiles = [
   "extensions/qa-lab/src/control-ui-openclaw-delegation.real-gateway.e2e.test.ts",
 ] as const;
 const realGatewayFiles = [
+  "activity-run-inspector.real-gateway",
   "agent-file-lifecycle.real-gateway",
   "chat-agent-avatar.real-gateway",
   "chat-collaborator-scroll.real-gateway",
@@ -137,6 +138,7 @@ const realGatewayFiles = [
   "profile-page.real-gateway",
   "provider-browser-login.real-gateway",
   "quota-reset-status.real-gateway",
+  "session-pr-reader-lifetime.real-gateway",
   "session-progress-hovercard.real-gateway",
   "session-roster-request-rate.real-gateway",
   "usage-sessions-owner-attribution",
@@ -653,6 +655,13 @@ describe("Control UI E2E resource ownership", () => {
           fileParallelism: false,
         },
         {
+          file: "ui/src/e2e/session-pr-reader-lifetime.real-gateway.e2e.test.ts",
+          project: "ui-e2e-serial",
+          phase: 1,
+          workers: 1,
+          fileParallelism: false,
+        },
+        {
           file: "ui/src/e2e/session-roster-request-rate.real-gateway.e2e.test.ts",
           project: "ui-e2e-serial-standalone",
           phase: 1,
@@ -661,7 +670,7 @@ describe("Control UI E2E resource ownership", () => {
         },
       ]);
       const parallel = result.files.filter((entry) => entry.phase === 2);
-      expect(parallel).toHaveLength(26);
+      expect(parallel).toHaveLength(27);
       expect(parallel.every((entry) => entry.fileParallelism)).toBe(true);
       expect(parallel.every((entry) => entry.workers === result.rootWorkers)).toBe(true);
       for (const entry of parallel) {

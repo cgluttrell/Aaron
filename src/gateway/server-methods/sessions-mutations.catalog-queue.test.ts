@@ -74,6 +74,30 @@ function patchContext(
   } as unknown as GatewayRequestContext;
 }
 
+function modelConfig(store: string, agents: NonNullable<OpenClawConfig["agents"]>) {
+  const model = makeProviderModelFixture<"openai-completions">({
+    provider: "openai",
+    id: "gpt-5.6-sol",
+    api: "openai-completions",
+    baseUrl: "https://fixture.invalid/v1",
+  });
+  const cfg: OpenClawConfig = {
+    models: {
+      providers: {
+        openai: {
+          api: model.api,
+          baseUrl: model.baseUrl,
+          models: [model].map(({ provider: _provider, ...definition }) => definition),
+        },
+      },
+    },
+    agents: { defaults: { model: "openai/gpt-5.6-sol" }, ...agents },
+    session: { store },
+  };
+  expect(validateConfigObject(cfg)).toMatchObject({ ok: true });
+  return { model, cfg };
+}
+
 function patchRequest(context: GatewayRequestContext) {
   return (params: Record<string, unknown>, respond: ReturnType<typeof vi.fn>) =>
     sessionMutationHandlers["sessions.patch"]!({
@@ -83,6 +107,82 @@ function patchRequest(context: GatewayRequestContext) {
       client: null,
     } as never);
 }
+
+test.each(["sessions.patch", "sessions.patchMany"] as const)(
+  "%s bounds a stalled catalog without committing and permits retry",
+  async (method) => {
+    await withOpenClawTestState({ scenario: "minimal" }, async () => {
+      const targets = (method === "sessions.patchMany" ? ["first", "second"] : ["first"]).map(
+        (name) => ({ key: `agent:main:catalog-deadline-${name}` }),
+      );
+      for (const { key } of targets) {
+        await upsertSessionEntryCore(
+          { agentId: "main", sessionKey: key },
+          { sessionId: key, updatedAt: 1 },
+        );
+      }
+      const entries = () =>
+        targets.map(({ key }) => loadSessionEntry({ agentId: "main", sessionKey: key }));
+      const before = entries();
+      const entered = createDeferredCore();
+      const release = createDeferredCore();
+      const context = patchContext(async () => {
+        entered.resolve();
+        await release.promise;
+        return [];
+      });
+      const respond = vi.fn();
+      const patch = { thinkingLevel: "low", pinned: true };
+      const params =
+        method === "sessions.patchMany" ? { targets, patch } : { ...targets[0], ...patch };
+      const invoke = () =>
+        sessionMutationHandlers[method]!({
+          req: { type: "req", id: "catalog-deadline", method, params },
+          params,
+          respond,
+          context,
+          client: null,
+          isWebchatConnect: () => false,
+        });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+      const pending = invoke();
+      try {
+        await Promise.race([entered.promise, pending]);
+        await vi.advanceTimersByTimeAsync(20_000);
+        release.resolve();
+        await pending;
+        const unavailable = expect.objectContaining({
+          code: "UNAVAILABLE",
+          retryable: true,
+          message: expect.stringMatching(/model catalog.*loading.*retry/i),
+        });
+        expect(respond).toHaveBeenCalledExactlyOnceWith(
+          ...(method === "sessions.patchMany"
+            ? [
+                true,
+                {
+                  outcomes: targets.map(({ key }) => ({ key, ok: false, error: unavailable })),
+                },
+                undefined,
+              ]
+            : [false, undefined, unavailable]),
+        );
+        expect(entries()).toEqual(before);
+      } finally {
+        vi.useRealTimers();
+        release.resolve();
+        await pending;
+      }
+      expect(entries()).toEqual(before);
+      respond.mockClear();
+      await invoke();
+      expect(respond.mock.calls[0]?.[0]).toBe(true);
+      for (const entry of entries()) {
+        expect(entry).toMatchObject({ thinkingLevel: "low", pinnedAt: expect.any(Number) });
+      }
+    });
+  },
+);
 
 test("catalog reload releases the agent writer while preserving same-session ordering", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
@@ -229,7 +329,7 @@ test.each(["identity", "label", "alias", "cleared-selection"] as const)(
           change === "alias"
             ? {
                 session: { mainKey: "work" },
-                agents: { list: [{ id: "main", default: true }] },
+                agents: { entries: { main: {} } },
               }
             : {},
         ),
@@ -353,7 +453,7 @@ test("patchMany prepares singleton agent groups without blocking another session
     const context = patchContext(loadGatewayModelCatalog, {
       agents: {
         defaults: { model: "anthropic/claude-sonnet-4-6" },
-        list: [{ id: "main" }, { id: "secondary" }],
+        entries: { main: {}, secondary: {} },
       },
     });
     const respond = vi.fn();
@@ -583,8 +683,8 @@ test("patch timing covers preparation and lifecycle finalization before cleanup"
     const runMutation = sessionLifecycle.runExclusiveSessionLifecycleMutation;
     const lifecycle = vi
       .spyOn(sessionLifecycle, "runExclusiveSessionLifecycleMutation")
-      .mockImplementation((params) =>
-        runMutation({
+      .mockImplementation((operation, params) =>
+        runMutation(operation, {
           ...params,
           prepare: async (owner) => {
             await params.prepare?.(owner);
@@ -641,30 +741,10 @@ test("patchMany creates one shared physical store through original per-agent dir
       );
     }
     const physicalFile = path.join(await fs.realpath(physical), "shared.sqlite");
-    const model = makeProviderModelFixture<"openai-completions">({
-      provider: "openai",
-      id: "gpt-5.6-sol",
-      api: "openai-completions",
-      baseUrl: "https://fixture.invalid/v1",
+    const { model, cfg } = modelConfig(path.join(aliases, "{agentId}", "shared.sqlite"), {
+      ownership: "explicit",
+      entries: { main: {}, work: {} },
     });
-    const cfg: OpenClawConfig = {
-      models: {
-        providers: {
-          openai: {
-            api: model.api,
-            baseUrl: model.baseUrl,
-            models: [model].map(({ provider: _provider, ...definition }) => definition),
-          },
-        },
-      },
-      agents: {
-        defaults: { model: "openai/gpt-5.6-sol" },
-        ownership: "explicit",
-        entries: { main: {}, work: {} },
-      },
-      session: { store: path.join(aliases, "{agentId}", "shared.sqlite") },
-    };
-    expect(validateConfigObject(cfg)).toMatchObject({ ok: true });
     await state.writeConfig(cfg);
     const context = patchContext(async () => [model], cfg);
     const response = vi.fn();
@@ -741,29 +821,9 @@ test("patchMany creates one shared physical store through original per-agent dir
 test("patchMany retains original RAM facts while its cold durable sibling publishes registration", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
     const storePath = state.statePath("mixed-patch-cold.sqlite");
-    const model = makeProviderModelFixture<"openai-completions">({
-      provider: "openai",
-      id: "gpt-5.6-sol",
-      api: "openai-completions",
-      baseUrl: "https://fixture.invalid/v1",
+    const { model, cfg } = modelConfig(storePath, {
+      entries: { main: {} },
     });
-    const cfg: OpenClawConfig = {
-      models: {
-        providers: {
-          openai: {
-            api: model.api,
-            baseUrl: model.baseUrl,
-            models: [model].map(({ provider: _provider, ...definition }) => definition),
-          },
-        },
-      },
-      agents: {
-        defaults: { model: "openai/gpt-5.6-sol" },
-        entries: { main: {} },
-      },
-      session: { store: storePath },
-    };
-    expect(validateConfigObject(cfg)).toMatchObject({ ok: true });
     await state.writeConfig(cfg);
     const ramKey = "agent:main:dashboard:incognito-mixed-patch";
     const ramPath = resolveIncognitoOpenClawAgentSqlitePath({ agentId: "main", env: state.env });
@@ -843,30 +903,10 @@ test("patchMany excludes a revoked cold-store promotion while its independent st
     const successful = targets[1]!;
     const failedPath = path.join(directory, failed.agentId, "store.sqlite");
     const successfulPath = path.join(directory, successful.agentId, "store.sqlite");
-    const model = makeProviderModelFixture<"openai-completions">({
-      provider: "openai",
-      id: "gpt-5.6-sol",
-      api: "openai-completions",
-      baseUrl: "https://fixture.invalid/v1",
+    const { model, cfg } = modelConfig(path.join(directory, "{agentId}", "store.sqlite"), {
+      ownership: "explicit",
+      entries: { main: {}, work: {} },
     });
-    const cfg: OpenClawConfig = {
-      models: {
-        providers: {
-          openai: {
-            api: model.api,
-            baseUrl: model.baseUrl,
-            models: [model].map(({ provider: _provider, ...definition }) => definition),
-          },
-        },
-      },
-      agents: {
-        defaults: { model: "openai/gpt-5.6-sol" },
-        ownership: "explicit",
-        entries: { main: {}, work: {} },
-      },
-      session: { store: path.join(directory, "{agentId}", "store.sqlite") },
-    };
-    expect(validateConfigObject(cfg)).toMatchObject({ ok: true });
     await state.writeConfig(cfg);
     const context = patchContext(async () => [model], cfg);
     const revoked = new SessionMutationAuthorizationChangedError(

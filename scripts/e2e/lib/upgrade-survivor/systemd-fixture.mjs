@@ -255,6 +255,7 @@ function nativeRuntime() {
     active: pid ? "active" : unsettled ? "activating" : "inactive",
     sub: pid ? "running" : unsettled ? "auto-restart" : "dead",
     generation: counts?.entered ?? 0,
+    invocationId: counts?.invocationId ?? "",
     settled: !pid && !unsettled,
     stopFailed,
     controlGroup: pid || unsettled ? paths.controlGroup || "" : "",
@@ -532,7 +533,11 @@ function run() {
     readUnit(true);
     return;
   }
-  if (["stop-policy", "stop-timeout-ms"].includes(operation) && !args.length) {
+  if (
+    ["stop-policy", "stop-timeout-ms", "stop-context"].includes(operation) &&
+    (!args.length ||
+      (operation === "stop-policy" && args.length === 1 && args[0] === "--invocation-id"))
+  ) {
     // A running generation keeps its loaded policy even if an on-disk edit is
     // invalid or removed. Only a successful reload replaces that snapshot.
     const unit = fs.existsSync(loadedPath)
@@ -544,12 +549,25 @@ function run() {
         console.log(
           `TimeoutStopUSec=${unit.stopTimeoutMs === Infinity ? "infinity" : `${unit.stopTimeoutMs / 1_000}s`}`,
         );
+        if (args[0] === "--invocation-id") {
+          console.log(`InvocationID=${nativeRuntime().invocationId}`);
+        }
       }
     } else {
       if (!unit) {
         fail("Cannot stop an absent fixture unit.");
       }
-      console.log(unit.stopTimeoutMs);
+      if (operation === "stop-context") {
+        console.log(
+          JSON.stringify({
+            stopTimeoutMs: unit.stopTimeoutMs === Infinity ? "Infinity" : unit.stopTimeoutMs,
+            killMode: unit.killMode,
+            controlGroup: runtimePaths().controlGroup || "",
+          }),
+        );
+      } else {
+        console.log(unit.stopTimeoutMs);
+      }
     }
     return;
   }

@@ -12,7 +12,6 @@ import {
   readConfigFileSnapshot,
   defaultRuntime,
   runExec,
-  runUtf8CommandWithTimeout,
   syncPluginsForUpdateChannel,
   updateNpmInstalledPlugins,
   runPostCorePluginConvergenceSpy,
@@ -28,21 +27,6 @@ import {
 } from "./update-cli.deferred-completion.test-support.js";
 
 describe("update-cli child-owned deferred completion", () => {
-  const completionCommandNames = () =>
-    [
-      ...vi.mocked(runUtf8CommandWithTimeout).mock.calls.map(([argv], index) => ({
-        command: argv[2],
-        order: vi.mocked(runUtf8CommandWithTimeout).mock.invocationCallOrder[index] ?? 0,
-      })),
-      ...vi.mocked(runExec).mock.calls.map(([, args], index) => ({
-        command: args[1],
-        order: vi.mocked(runExec).mock.invocationCallOrder[index] ?? 0,
-      })),
-    ]
-      .filter(({ command }) => command === "doctor" || command === "config")
-      .toSorted((left, right) => left.order - right.order)
-      .map(({ command }) => command);
-
   const {
     runPostCoreCommand,
     lastNpmPluginUpdateCall,
@@ -95,9 +79,6 @@ describe("update-cli child-owned deferred completion", () => {
     });
 
     expect(vi.mocked(runExec).mock.calls.some(([, args]) => args.includes("doctor"))).toBe(false);
-    expect(
-      vi.mocked(runUtf8CommandWithTimeout).mock.calls.some(([argv]) => argv.includes("doctor")),
-    ).toBe(false);
     expect(syncPluginsForUpdateChannel).not.toHaveBeenCalled();
     expect(updateNpmInstalledPlugins).not.toHaveBeenCalled();
     expect(mutateConfigFileWithRetry).not.toHaveBeenCalled();
@@ -108,20 +89,17 @@ describe("update-cli child-owned deferred completion", () => {
 
   it("keeps Doctor diagnostics outside JSON during legacy post-core resume", async () => {
     mockNpmPluginOutcomes([], true);
-    vi.mocked(runUtf8CommandWithTimeout).mockResolvedValueOnce({
-      code: 0,
-      signal: null,
-      killed: false,
-      termination: "exit",
-      cleanup: "normal",
-      stdout: "Migration Doctor output\n",
-      stderr: "",
-    });
+    vi.mocked(runExec).mockResolvedValueOnce({ stdout: "Migration Doctor output\n", stderr: "" });
 
     await runPostCoreCommand({ json: true, restart: false });
 
     // Without a parent ownership declaration, the child runs Doctor and final validation.
-    expect(completionCommandNames()).toEqual(["doctor", "doctor", "config"]);
+    expect(
+      vi
+        .mocked(runExec)
+        .mock.calls.filter(([, args]) => ["doctor", "config"].includes(args[1] ?? ""))
+        .map(([, args]) => args[1]),
+    ).toEqual(["doctor", "doctor", "config"]);
     expect(getErrorOutput()).toContain("Migration Doctor output");
     expect(JSON.parse(getLogOutput())).toEqual(lastWriteJsonCall());
     expect(defaultRuntime.writeJson).toHaveBeenCalledOnce();
@@ -178,7 +156,12 @@ describe("update-cli child-owned deferred completion", () => {
       if (mode === "resume") {
         await runPostCoreCommand({ restart: false, json: true });
         // Legacy child completion does not change which downgrade configs may be written.
-        expect(completionCommandNames()).toEqual(valid ? ["doctor", "config"] : ["doctor"]);
+        expect(
+          vi
+            .mocked(runExec)
+            .mock.calls.filter(([, args]) => ["doctor", "config"].includes(args[1] ?? ""))
+            .map(([, args]) => args[1]),
+        ).toEqual(valid ? ["doctor", "config"] : ["doctor"]);
       } else {
         vi.mocked(resolveGatewayInstallEntrypoint).mockResolvedValue(FRESH_POST_UPDATE_ENTRYPOINT);
         if (valid) {

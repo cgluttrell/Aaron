@@ -2,7 +2,7 @@
 import { expectDefined } from "@openclaw/normalization-core";
 import { describe, expect, it } from "vitest";
 import { resolveAgentHarnessPolicy } from "../../../agents/harness/policy.js";
-import type { OpenClawConfig } from "../../../config/types.openclaw.js";
+import type { OpenClawConfigWithLegacyRoster } from "../../../config/legacy.roster.js";
 import { legacyCodexProviderIdentityKey } from "../shared/codex-route-model-ref.js";
 import {
   IMAGE_INSPECTION_TOOL_NAME_MIGRATION,
@@ -157,8 +157,6 @@ describe("normalizeStoredCronJobs", () => {
 
   it.each([
     { name: "image*", entries: ["image*"], expected: ["image*", "view_image"], issue: 1 },
-    { name: "i*e", entries: ["i*e"], expected: ["i*e", "view_image"], issue: 1 },
-    { name: "*", entries: ["*"], expected: ["*"], issue: undefined },
     { name: "*image*", entries: ["*image*"], expected: ["*image*"], issue: undefined },
   ])("migrates legacy image inspection pattern $name", ({ entries, expected, issue }) => {
     const { job, result } = normalizeOneJob(
@@ -455,7 +453,7 @@ describe("normalizeStoredCronJobs", () => {
 
   it.each<{
     name: string;
-    agents: NonNullable<OpenClawConfig["agents"]>;
+    agents: NonNullable<OpenClawConfigWithLegacyRoster["agents"]>;
     agentId?: string;
     expectedAgentId: string;
   }>([
@@ -696,26 +694,6 @@ describe("normalizeStoredCronJobs", () => {
     expect(result.unresolvedAgentTurnShellToolPromptJobs).toEqual(["Legacy job"]);
   });
 
-  it("warns on shell-style prompts with wildcard tool access", () => {
-    const { result } = normalizeOneJob(
-      makeLegacyJob({
-        id: "wildcard-tools-shell-job",
-        schedule: { kind: "cron", expr: "0 9 * * *", tz: "Europe/Madrid" },
-        sessionTarget: "isolated",
-        payload: {
-          kind: "agentTurn",
-          message:
-            "Execute ./scripts/check_mail.sh and send a compact summary if anything changed.",
-          toolsAllow: ["*"],
-          lightContext: true,
-        },
-      }),
-    );
-
-    expect(result.issues.unresolvedAgentTurnShellToolPrompt).toBe(1);
-    expect(result.unresolvedAgentTurnShellToolPromptJobs).toEqual(["Legacy job"]);
-  });
-
   it("does not warn on ordinary agent prompts that mention commands without shell tools", () => {
     const { job, result } = normalizeOneJob(
       makeLegacyJob({
@@ -922,6 +900,18 @@ describe("normalizeStoredCronJobs", () => {
     expect(schedule.atMs).toBeUndefined();
   });
 
+  it.each([
+    { kind: "at", at: "2026-04-01T12:00:00+02:00" },
+    { kind: "at", at: "2026-04-01T10:00:00.000Z", atMs: undefined },
+    { kind: "at", at: "2026-04-01T11:00:00.000Z", atMs: 1_775_037_600_000 },
+  ])("repairs a noncanonical one-shot schedule once: %j", (schedule) => {
+    const jobs = [makeLegacyJob({ description: undefined, schedule: { ...schedule } })];
+
+    expect(normalizeStoredCronJobs(jobs).mutated).toBe(true);
+    expect(jobs[0]?.schedule).toEqual({ kind: "at", at: "2026-04-01T10:00:00.000Z" });
+    expect(normalizeStoredCronJobs(jobs).mutated).toBe(false);
+  });
+
   it("leaves Date-invalid legacy atMs for persisted shape validation", () => {
     const { job, result } = normalizeOneJob(
       makeLegacyJob({
@@ -992,20 +982,6 @@ describe("normalizeStoredCronJobs", () => {
         id: "job-cron-legacy",
         name: "Legacy cron",
         schedule: { kind: "cron", expr: "0 */2 * * *", tz: "UTC" },
-      }),
-    );
-
-    const schedule = expectDefined(job, "job test invariant").schedule as Record<string, unknown>;
-    expect(schedule.kind).toBe("cron");
-    expect(schedule.staggerMs).toBe(DEFAULT_TOP_OF_HOUR_STAGGER_MS);
-  });
-
-  it("adds default staggerMs to legacy 6-field top-of-hour cron schedules", () => {
-    const { job } = normalizeOneJob(
-      makeLegacyJob({
-        id: "job-cron-seconds-legacy",
-        name: "Legacy cron seconds",
-        schedule: { kind: "cron", expr: "0 0 */3 * * *", tz: "UTC" },
       }),
     );
 

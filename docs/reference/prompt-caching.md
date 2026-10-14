@@ -34,6 +34,26 @@ the session and keep both stable. Start a new session for a planned change.
 Invalidating reuse means the next request misses that cached state; it does not
 necessarily delete the provider's older cache entry before its normal expiry.
 
+## Keep replayed tool results stable
+
+OpenClaw applies the same tool-result text cap before the first model request
+and when persisting the result. Subsequent turns therefore replay the same
+bounded text instead of introducing a different truncation notice. Redaction
+still runs before model-visible output is recorded. Large batches can exceed
+the aggregate result budget when reducing them would rewrite already-sent
+history; session pruning and compaction remain the owners of intentional
+history changes.
+
+OpenAI Chat Completions also preserves valid native tool-call IDs during replay
+and disambiguates repeated IDs deterministically. Changing result text or IDs
+between turns can invalidate an otherwise reusable provider prefix. Stable
+request inputs support cache reuse; actual hits still depend on the provider.
+
+Internal browser conversations reuse their opaque session cache key for private
+subagent completions, so the completion does not switch to a different affinity
+key between chat turns. The key remains scoped to the agent, provider, model,
+and conversation and does not expose the conversation identifier.
+
 ## Primary knobs
 
 ### Worker turns
@@ -111,6 +131,7 @@ agents:
 ### Anthropic (direct API and Vertex AI)
 
 - When caching is enabled and the route supports tool cache control, the tool prefix is checkpointed separately from the system prompt.
+- Up to two conversation checkpoints cover recent user messages or tool results. Keeping the previous checkpoint reachable avoids a cache miss when a new turn adds more than the provider's 20-block lookup window. Every conversation checkpoint stays before transient runtime context, including during steering and tool loops.
 - `cacheRetention` is supported for `anthropic` and `anthropic-vertex` providers, and for Claude models on `amazon-bedrock` and custom `anthropic-messages`-compatible endpoints when `cacheRetention` is set explicitly.
 - When unset, OpenClaw seeds `cacheRetention: "short"` for direct Anthropic (`anthropic` and `anthropic-vertex` providers only; other Anthropic-family routes require an explicit value).
 - Native Anthropic Messages responses expose `cache_read_input_tokens` and `cache_creation_input_tokens`, mapped to `cacheRead` and `cacheWrite`.
@@ -275,6 +296,9 @@ separate transient carrier; they do not become permanent first-message context.
 
 - Active exec sessions, subagent state, and media-generation progress travel in compact Runtime Context carriers after the current user message, so changes do not rewrite the system prompt ahead of conversation history. Project Memory facts, channel-specific ACP hints, delegation/orchestration mode, and the current elevated level stay below the system-prompt cache boundary; static recall, safety, and capability guidance stay above it.
 - Delivery instructions live after the system-prompt cache boundary. Native Codex carries the current delivery and target policy in late turn context, so alternating delivery modes does not rebuild its static prompt or message tool catalog when the available capabilities remain unchanged. Actual capability changes still update the catalog.
+- Subagent completion turns reuse the session's generic conversation metadata and direct/group guidance, so native Ollama does not lose the tools-and-history prefix just because the turn arrived through an announcement. Channel formatting follows the resolved delivery account and is omitted for turns without channel delivery. Custom channel-supplied group instructions, changed delivery policy, and explicit lightweight bootstrap contexts can still produce different prompts.
+- User-message metadata stays intact when an active turn becomes history, including conversation context and reply targets. Timestamping uses the message's recorded time so subsequent requests replay the same text.
+- Prompt-hook prepend/append context and model-prompt replacements are captured on their original user transcript record before dispatch. Later requests and reopened sessions replay those bytes while user-visible history keeps the original text. Legacy rows without a recorded projection retain their previous replay behavior; see [stored projection compatibility](/reference/database-schemas/layout#user-turn-model-prompt-projections).
 - Bundled MCP tool catalogs are sorted deterministically (by server name, then tool name) before tool registration, so `listTools()` order changes do not churn the tools block and bust prompt-cache prefixes.
 - Message-tool action enums are sorted after policy filtering, keeping identical capabilities stable across channel discovery order changes.
 - Native Ollama requests sort tools by name so discovery order changes do not churn the tools prefix.
@@ -324,6 +348,8 @@ Run it with:
 ```sh
 OPENCLAW_LIVE_TEST=1 OPENCLAW_LIVE_CACHE_TEST=1 pnpm test:live:cache
 ```
+
+This command selects the existing cache regression test through the shared live runner. Set `OPENCLAW_VITEST_RUNTIME=bun` to run its provider calls on Bun; the default is Node. Provider usage summaries and advisory warnings remain visible, and hard regression floors fail the test.
 
 The baseline file stores the most recently observed live numbers plus the provider-specific regression floors the test checks against. Each run uses fresh per-run session IDs and prompt namespaces so previous cache state does not pollute the current sample. Anthropic and OpenAI use different enforcement: an Anthropic floor miss is a hard regression (test fails), while an OpenAI floor miss is watch-only (recorded as a warning, does not fail the run). They do not share a single cross-provider threshold.
 
@@ -385,7 +411,9 @@ diagnostics:
 
 ### What to inspect
 
-Prompt-cache observations record `input`, `cacheRead`, and `cacheWrite` per completed foreground model request alongside its stable system-prefix, volatile-suffix, and tools fingerprints, and flag cache-read drops from the previous request, including reported zero reads; billing totals remain separate. A flagged drop lists the tracked changes since the last request (`model`, `cacheRetention`, `transport`, `streamStrategy`, `systemPrompt`, `systemPromptSuffix`, `tools`, `aggregateToolResultTruncation`). Observations and warnings require cache tracing (`diagnostics.cacheTrace.enabled` or `OPENCLAW_CACHE_TRACE=1`) or debug logging, and trace results identify each request within its attempt.
+Prompt-cache observations record `input`, `cacheRead`, and `cacheWrite` per completed foreground model request alongside its stable system-prefix, volatile-suffix, and tools fingerprints, and flag cache-read drops from the previous request, including reported zero reads; billing totals remain separate. A flagged drop lists the tracked changes since the last request (`model`, `cacheRetention`, `transport`, `streamStrategy`, `systemPrompt`, `systemPromptSuffix`, `tools`, `aggregateToolResultTruncation`). Trace results require cache tracing (`diagnostics.cacheTrace.enabled` or `OPENCLAW_CACHE_TRACE=1`) and identify each request within its attempt.
+
+OpenClaw also checks that each converted request history extends the previous request in the same session. An undeclared edit, removal, or reorder records `historyRewrite` and warns once for the session. Set `OPENCLAW_PROMPT_CACHE_ASSERT=1` to throw at the first differing message during development or tests. Compaction, pruning, transient runtime-context removal, and image cleanup declare their rewrites as `compaction`, `pruning`, `runtimeContextCarrier`, and `imageCleanup`; model, transport, or retention changes start a new history series. Content-block fingerprints reuse hashes only while every primitive property still matches; unchanged large text and image data are not hashed again. Nested block values and message envelopes are checked on every observation, so in-place edits are detected even when wrappers or content arrays are reused. String-content hashes live with the bounded history baseline. Provider-owned tool schema declarations are fingerprinted once per object identity.
 
 - Cache trace events are JSONL with staged snapshots like `session:loaded`, `prompt:before`, `stream:context`, and `session:after`.
 - Per-turn cache token impact is visible in normal usage surfaces: `cacheRead` and `cacheWrite` show up in `/usage tokens`, `/status`, session usage summaries, and custom `messages.usageTemplate` layouts.

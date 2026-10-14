@@ -6,6 +6,7 @@ import {
   assertOperatorModelAllowed,
   readRunOperatorAuthority,
 } from "../../admitted-run-context.js";
+import { createNativeModelOwnedRuntimeModel } from "../../defaults.js";
 import { FailoverError } from "../../failover-error.js";
 import { AgentHarnessPreflightError } from "../../harness/errors.js";
 import {
@@ -22,18 +23,19 @@ import type { ModelCatalogEntry } from "../../model-catalog.types.js";
 import { resolveModelCandidateChain } from "../../model-fallback-candidates.js";
 import type { ModelRef } from "../../model-selection.js";
 import { resolveSelectedOpenAIRuntimeProvider } from "../../openai-routing.js";
+import {
+  getPreparedModelRuntimeBorrowedSnapshot,
+  getPreparedModelRuntimePluginGeneration,
+} from "../../prepared-model-runtime-generation-scope.js";
 import { assertPreparedModelRuntimeInputCurrent } from "../../prepared-model-runtime.errors.js";
 import type { PreparedModelRuntimeSnapshot } from "../../prepared-model-runtime.js";
+import { capturePreparedModelRuntimeLifetime } from "../../prepared-model-runtime.lifecycle.js";
 import { resolveTieredModel } from "../model-resolution.js";
 import { createEmptyAgentDiscoveryStores } from "../model.js";
 import type { RunEmbeddedAgentInternalParams } from "./internal-params.js";
 import { resolveRequestStreamTransportOverrides } from "./runtime-resolution.js";
 import type { assertAgentHarnessRunAdmission } from "./session-bootstrap.js";
-import {
-  buildBeforeModelResolveAttachments,
-  createNativeModelOwnedRuntimeModel,
-  resolveHookModelSelection,
-} from "./setup.js";
+import { buildBeforeModelResolveAttachments, resolveHookModelSelection } from "./setup.js";
 
 export type PreparedNativeSessionRuntime = {
   harness: AgentHarness;
@@ -255,6 +257,18 @@ export async function resolveEmbeddedRunModelSetup(params: {
     !catalog?.entries.some(ownsSelectedNativeModel) &&
     !catalog?.routeVariants.some(ownsSelectedNativeModel)
   ) {
+    const assertRuntimeCurrent = capturePreparedModelRuntimeLifetime();
+    const generation = getPreparedModelRuntimePluginGeneration();
+    const borrowedSnapshot = generation
+      ? getPreparedModelRuntimeBorrowedSnapshot(generation)
+      : undefined;
+    // Run projections add prompt-project facts while keeping the owner's native operation.
+    const isCurrent =
+      generation &&
+      borrowedSnapshot?.loadNativeModelCatalog ===
+        params.preparedModelRuntime.loadNativeModelCatalog
+        ? () => getPreparedModelRuntimeBorrowedSnapshot(generation) === borrowedSnapshot
+        : params.preparedModelRuntime.isCurrent;
     try {
       catalog = await params.preparedModelRuntime.loadNativeModelCatalog({
         provider,
@@ -265,10 +279,9 @@ export async function resolveEmbeddedRunModelSetup(params: {
       nativeCatalogFailure = { error };
     }
     runParams.abortSignal?.throwIfAborted();
-    assertPreparedModelRuntimeInputCurrent(
-      params.preparedModelRuntime,
-      params.preparedModelRuntime.isCurrent,
-    );
+    params.assertCurrent();
+    assertRuntimeCurrent();
+    assertPreparedModelRuntimeInputCurrent(params.preparedModelRuntime, isCurrent);
   }
   const nativeModelOwned =
     nativeSessionRuntime !== undefined ||

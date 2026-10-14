@@ -60,6 +60,13 @@ caller signal with an operation timeout. Start it before credential preparation
 when authentication shares the request budget, and call its `cleanup` in
 `finally` to release the timer.
 
+## OAuth refresh configuration
+
+`refreshOAuth(credential, config)` receives the caller's effective OpenClaw config
+as an optional second argument. Use that captured config for checks such as
+regional endpoint compatibility instead of reloading global runtime config.
+Existing one-argument hooks remain compatible, and direct callers can omit config.
+
 ## Hook examples
 
 <Tabs>
@@ -269,7 +276,8 @@ Cancelled preparation must reject after cleanup, not report a missing login.
 | `fetchUsageSnapshot`              | Custom usage endpoint                                                                       |
 | `createEmbeddingProvider`         | Provider-owned embedding adapter for memory/search                                          |
 | `buildReplayPolicy`               | Custom transcript replay/compaction policy                                                  |
-| `sanitizeReplayHistory`           | Provider-specific replay rewrites after generic cleanup                                     |
+| `sanitizeReplayHistoryAsync`      | Provider-specific replay rewrites with awaited transcript metadata after generic cleanup    |
+| `sanitizeReplayHistory`           | Deprecated third-party replay compatibility hook; migrate to `sanitizeReplayHistoryAsync`   |
 | `validateReplayTurns`             | Strict replay-turn validation before the embedded runner                                    |
 | `onModelSelected`                 | Post-selection callback (e.g. telemetry)                                                    |
 

@@ -35,7 +35,10 @@ import { throwAgentRunRestartAbortReason } from "../run-termination.js";
 import type { SessionMaintenanceRequest } from "../session-maintenance/run.js";
 import { persistAssistantTranscriptRepairRecord } from "./assistant-transcript-repair.js";
 import { persistAgentSession } from "./attempt-execution.shared.js";
-import type { AgentCommandDeliveryResult } from "./delivery-result.js";
+import {
+  selectSourceDeliverablePayloads,
+  type AgentCommandDeliveryResult,
+} from "./delivery-result.js";
 import { createCommandBudget } from "./maintenance-budget.js";
 import { createCommandMaintenanceFollowup } from "./maintenance.js";
 import type { PreparedAgentCommandExecution } from "./prepare.js";
@@ -314,6 +317,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
           threadId: params.opts.threadId,
           sessionCwd: effectiveCwd,
           config: cfg,
+          runId,
           skipAssistantTurn: assistantTranscriptOwned,
           skipUserTurn:
             suppressUserTurnPersistence ||
@@ -331,7 +335,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
         persistedCliTurnTranscript = transcriptResult.kind === "persisted";
       } catch (error) {
         log.warn(
-          `Turn transcript persistence failed for ${sessionKey ?? sessionId}: ${error instanceof Error ? error.message : String(error)}`,
+          `Turn transcript persistence failed for ${sessionKey ?? sessionId}: ${coerceErrorMessage(error)}`,
         );
         if (
           sessionStore &&
@@ -374,7 +378,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
       storePath,
       suppressVisibleSessionEffects: params.suppressVisibleSessionEffects,
       sessionReboundDuringRun,
-      payloads,
+      payloads: selectSourceDeliverablePayloads(payloads, params.opts),
       deliveryContext: params.currentRunDeliveryContext,
       runOwnedSessionId,
     });
@@ -431,6 +435,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
               model: agentMeta?.model ?? fallbackModel,
               thinkLevel: effectiveTurnThinkLevel,
               auth: params.attempt.maintenanceAuthProfile,
+              senderIsOwner: params.opts.senderIsOwner,
             }),
             sessionId: runOwnedSessionId,
             lifecycleRevision: sessionEntry.lifecycleRevision,
@@ -496,6 +501,7 @@ export async function finalizeEmbeddedAgentCommand(params: {
               agentDir,
               provider: agentMeta?.provider ?? provider,
               model: agentMeta?.model ?? model,
+              cliBackendId: result.meta.executionTrace?.winnerProvider,
               skillsSnapshot,
               messageChannel,
               agentAccountId: runContext.accountId,

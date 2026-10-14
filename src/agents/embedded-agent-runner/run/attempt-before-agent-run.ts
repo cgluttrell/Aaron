@@ -64,10 +64,8 @@ export async function runEmbeddedAttemptBeforeAgentRun(input: {
   ) {
     try {
       await input.withOwnedTranscriptWrite(() =>
-        withSessionManagerWrite(input.sessionManager, () => {
-          input.sessionManager.appendMessage(
-            redactedUserMessage as Parameters<typeof input.sessionManager.appendMessage>[0],
-          );
+        withSessionManagerWrite(input.sessionManager, async () => {
+          await input.sessionManager.appendMessageAsync(redactedUserMessage);
           input.sessionManager.flushPendingPersistence();
         }),
       );

@@ -10,22 +10,24 @@ import { sha256File } from "../infra/directory-durability.js";
 import { isErrno } from "../infra/errors.js";
 import { copyFileHandle } from "../infra/file-descriptor.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { runTasksWithConcurrency } from "../utils/run-with-concurrency.js";
 import { parseControlUiAssetManifest } from "./control-ui-asset-manifest-parse.js";
 import {
   CONTROL_UI_ASSET_MANIFEST_FILENAME,
+  CONTROL_UI_RETAINED_ASSET_MAX_BYTES,
   hashControlUiAssetManifestEntries,
+  isControlUiRetainedAssetPath,
   type ControlUiAssetManifest,
   type ControlUiAssetManifestEntry,
 } from "./control-ui-asset-manifest.js";
-import { isControlUiPrecompressedAssetExtension } from "./control-ui-static.js";
 
 const CONTROL_UI_RETAINED_GENERATION_LIMIT = 3;
-const CONTROL_UI_RETAINED_ASSET_MAX_BYTES = 96 * 1024 * 1024;
 
 const CONTROL_UI_GENERATION_PATTERN = /^[a-f0-9]{64}$/u;
 const CONTROL_UI_STAGING_PATTERN = /^\.staging-[0-9]+-[a-f0-9-]+$/u;
 const CONTROL_UI_STAGING_MAX_AGE_MS = 60 * 60 * 1000;
 const CONTROL_UI_MANIFEST_MAX_BYTES = 4 * 1024 * 1024;
+const CONTROL_UI_ASSET_VERIFICATION_CONCURRENCY = 4;
 const log = createSubsystemLogger("gateway/control-ui-assets");
 
 type RetainedGeneration = {
@@ -55,7 +57,7 @@ async function readCachedGeneration(
   try {
     signal?.throwIfAborted();
     const stats = await fs.lstat(directory);
-    if (stats.isSymbolicLink() || !stats.isDirectory()) {
+    if (!stats.isDirectory()) {
       return null;
     }
     const assetRoot = await openRoot(directory);
@@ -67,13 +69,13 @@ async function readCachedGeneration(
     if (manifest.generation !== path.basename(directory)) {
       return null;
     }
-    for (const asset of manifest.assets) {
-      await verifyAsset({
+    await verifyAssets(manifest.assets, (asset) =>
+      verifyAsset({
         entry: asset,
         signal,
         root: assetRoot,
-      });
-    }
+      }),
+    );
     const currentStats = await fs.lstat(directory);
     signal?.throwIfAborted();
     if (!sameDirectory(stats, currentStats)) {
@@ -94,12 +96,7 @@ async function readCachedGeneration(
 }
 
 function sameDirectory(left: Stats, right: Stats): boolean {
-  return (
-    right.isDirectory() &&
-    !right.isSymbolicLink() &&
-    left.dev === right.dev &&
-    left.ino === right.ino
-  );
+  return right.isDirectory() && left.dev === right.dev && left.ino === right.ino;
 }
 
 function compareGenerations(left: RetainedGeneration, right: RetainedGeneration): number {
@@ -128,12 +125,12 @@ async function readCacheInventory(
   const known = new Map(verified.map((generation) => [generation.generation, generation]));
   for (const entry of entries) {
     signal?.throwIfAborted();
-    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+    if (!entry.isDirectory()) {
       continue;
     }
     const directory = path.join(cacheRealPath, entry.name);
     const stats = await fs.lstat(directory).catch(() => null);
-    if (!stats || !stats.isDirectory() || stats.isSymbolicLink()) {
+    if (!stats?.isDirectory()) {
       continue;
     }
     directories.set(directory, stats);
@@ -163,7 +160,7 @@ async function readAssetManifest(
   signal?.throwIfAborted();
   const stats = await fs.lstat(manifestPath);
   signal?.throwIfAborted();
-  if (stats.isSymbolicLink() || !stats.isFile() || stats.size > CONTROL_UI_MANIFEST_MAX_BYTES) {
+  if (!stats.isFile() || stats.size > CONTROL_UI_MANIFEST_MAX_BYTES) {
     throw new Error(`Invalid Control UI asset manifest: ${manifestPath}`);
   }
   const manifest = parseControlUiAssetManifest(
@@ -176,14 +173,9 @@ async function readAssetManifest(
   return manifest;
 }
 
-// Older documents request only identity URLs: bundled .br/.gz sidecars are not addressable,
-// and a missing retained sidecar is served as identity bytes. Omitting them keeps a prior
-// generation within the byte budget; the retained manifest names its own generation.
 function selectRetainedAssets(manifest: ControlUiAssetManifest): ControlUiAssetManifest {
-  const assets = manifest.assets.filter(
-    (asset) =>
-      !isControlUiPrecompressedAssetExtension(path.posix.extname(asset.path).toLowerCase()),
-  );
+  const assets = manifest.assets.filter((asset) => isControlUiRetainedAssetPath(asset.path));
+  // The retained manifest names its own generation.
   return { ...manifest, generation: hashControlUiAssetManifestEntries(assets), assets };
 }
 
@@ -248,6 +240,21 @@ async function verifyAsset(params: {
   }
 }
 
+async function verifyAssets(
+  assets: ControlUiAssetManifestEntry[],
+  verify: (entry: ControlUiAssetManifestEntry) => Promise<void>,
+): Promise<void> {
+  // Drain active file handles before publication, cancellation, or staging cleanup.
+  const result = await runTasksWithConcurrency({
+    tasks: assets.map((entry) => () => verify(entry)),
+    limit: CONTROL_UI_ASSET_VERIFICATION_CONCURRENCY,
+    errorMode: "stop",
+  });
+  if (result.hasError) {
+    throw result.firstError;
+  }
+}
+
 async function publishGeneration(params: {
   cacheDir: string;
   manifest: ControlUiAssetManifest;
@@ -279,23 +286,21 @@ async function publishGeneration(params: {
   await fs.mkdir(staging, { recursive: false, mode: 0o700 });
   try {
     const sourceRoot = await openRoot(params.root);
-    let preparedDirectory: string | undefined;
-    for (const entry of params.manifest.assets) {
+    const directories = new Set(
+      params.manifest.assets.map((entry) => path.dirname(path.join(staging, entry.path))),
+    );
+    for (const directory of directories) {
       params.signal?.throwIfAborted();
-      const destination = path.join(staging, entry.path);
-      const directory = path.dirname(destination);
-      // This preparer owns staging; adjacent assets can reuse its last created directory.
-      if (directory !== preparedDirectory) {
-        await fs.mkdir(directory, { recursive: true, mode: 0o700 });
-        preparedDirectory = directory;
-      }
-      await verifyAsset({
-        destination,
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    }
+    await verifyAssets(params.manifest.assets, (entry) =>
+      verifyAsset({
+        destination: path.join(staging, entry.path),
         entry,
         signal: params.signal,
         root: sourceRoot,
-      });
-    }
+      }),
+    );
     params.signal?.throwIfAborted();
     await fs.writeFile(
       path.join(staging, CONTROL_UI_ASSET_MANIFEST_FILENAME),

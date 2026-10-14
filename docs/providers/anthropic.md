@@ -424,17 +424,36 @@ see Anthropic's [migration guide](https://platform.claude.com/docs/en/models/fab
 
 Fable 5.1 binds retained thinking to the preceding system prompt, tools, and
 conversation history. Changing that prefix can invalidate later thinking
-blocks. Claude Code manages this history for the CLI runtime. OpenClaw's
-embedded runtime uses append-only context only for prefix-binding models such as
-Fable 5.1, Opus 5.5, and Sonnet 5.5: it persists hidden runtime-context carriers
-after their user turn, keeps earlier carriers and inline inbound metadata in
-place, and preserves consecutive user turns on the Messages API. This also
-applies to matching Claude models on Bedrock, Vertex, and Foundry, although Bedrock Converse still merges
-consecutive user turns. Carriers contain only the delimited context body; the
-instruction to use it privately lives once in the stable system prompt.
-Other Claude models keep transient carriers and normal user-turn merging.
-Transient carriers are the cheaper cache shape when thinking does not bind the
-prefix: old carriers consume no later context or repeated cache-read charges.
+blocks. On direct Anthropic API-key Messages routes, OpenClaw enables
+`inHistorySystemUpdates` for Opus 4.8, Opus 5/5.5, Sonnet 5/5.5, Fable 5/5.1,
+and Mythos 5/5.1. It pins the stable system prefix and appends changed, added,
+or removed prompt sections as system messages after the current user turn.
+Workspace instructions, skills, and permission changes therefore preserve the
+earlier prefix. Changing the provider, model, or transport, or compacting the
+session, starts a new prefix series. After a Gateway restart, the series
+continues only when the current stable prefix matches the last saved rendered
+prefix.
+
+These routes also keep runtime context append-only as turn-scoped system
+messages, without user-message delimiters. OpenClaw sends
+`clear_at: "next_user_message"` with the
+`mid-conversation-system-clear-at-2026-08-21` beta: earlier carriers stay in the
+transcript but consume no input tokens after the next user message. Persistent
+prompt updates need no beta header. Operator system messages follow all other
+context for their user turn, including tool results.
+Tool results and queued extension context also clear turn-scoped messages, so
+OpenClaw renews the current user turn's runtime context after those continuations.
+
+OAuth, proxies, Bedrock, Vertex, and Foundry keep their existing behavior.
+Prefix-binding models such as Fable 5.1, Opus 5.5, and Sonnet 5.5 retain hidden
+user-role runtime-context carriers and inline inbound metadata, preserving
+consecutive user turns on the Messages API; Bedrock Converse still merges
+consecutive user turns. Those carriers contain the delimited context body,
+with interpretation guidance once in the stable system prompt. Routes without
+either capability keep transient carriers and normal user-turn merging.
+Transient carriers remain the cheaper shape on routes without in-history
+system updates when thinking does not bind the prefix: old carriers consume no
+later context or repeated cache-read charges.
 
 Direct Anthropic API-key requests with adaptive thinking send the
 `thinking-binding-controls-2026-08-01` beta and
@@ -490,7 +509,8 @@ Code sessions on the Gateway and on connected node hosts:
 - Claude CLI sessions come from valid project-index records. For unindexed
   transcripts, a bounded metadata fallback recognizes concurrent non-sidechain
   interactive (`cli`) and headless Agent SDK CLI (`sdk-cli`) sessions under
-  `~/.claude/projects/`.
+  `~/.claude/projects/`. Gateway-side discovery also recognizes bidirectional
+  stream-json (`sdk-ts`) sessions; the native macOS node reader does not.
 - Claude Desktop sessions use the Desktop title, activity time, and
   archive state when its metadata points to the same Claude Code session ID.
 - A CLI-only session has no archive flag, so it remains visible while its
@@ -505,7 +525,9 @@ their Desktop title and remain colorless.
 
 No additional OpenClaw config is required for discovery. The Anthropic plugin
 is bundled and enabled by default; a native macOS node advertises the read-only
-Claude session commands when the local `~/.claude/projects/` directory exists.
+Claude session commands when the local Claude projects directory exists
+(`$CLAUDE_CONFIG_DIR/projects/` when `CLAUDE_CONFIG_DIR` is set, otherwise
+`~/.claude/projects/`, matching Gateway-side discovery).
 Approve the node pairing upgrade when those commands first appear.
 
 The sidebar groups rows by their Gateway or paired-node host and shows each
@@ -787,7 +809,11 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
     ```json5
     {
       agents: {
+        ownership: "explicit",
         defaults: {
+          heartbeat: { agentId: "research" },
+          systemAgent: { agentId: "research" },
+          authInheritance: { agentId: "research" },
           model: { primary: "anthropic/claude-opus-4-6" },
           models: {
             "anthropic/claude-opus-4-6": {
@@ -796,10 +822,11 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
           },
         },
         entries: {
-          research: { default: true },
+          research: { workspace: "~/.openclaw/workspace" },
           alerts: { params: { cacheRetention: "none" } },
         },
       },
+      talk: { agentId: "research" },
     }
     ```
 
@@ -860,9 +887,12 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
   </Accordion>
 
   <Accordion title="Server-side compaction">
-    Anthropic server-side compaction is opt-in. For supported `anthropic/*`
-    models using API-key auth directly against `api.anthropic.com`, enable it
-    per model:
+    OpenClaw enables Anthropic server-side compaction by default for direct
+    `api.anthropic.com` requests authenticated with an API key on the models
+    Anthropic documents for threshold compaction: Claude Fable 5.1, Mythos 5.1,
+    Fable 5, Mythos 5, Mythos Preview, Opus 5.5, Opus 5, Opus 4.8, Opus 4.7,
+    Opus 4.6, Sonnet 5.5, Sonnet 5, Sonnet 4.6, and Haiku 5.5. To turn it off
+    for one model:
 
     ```json5
     {
@@ -870,7 +900,7 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
         defaults: {
           models: {
             "anthropic/claude-sonnet-4-6": {
-              params: { anthropicServerCompaction: true },
+              params: { anthropicServerCompaction: false },
             },
           },
         },
@@ -878,20 +908,35 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
     }
     ```
 
+    Set `anthropicServerCompaction: true` to opt in another direct Claude model.
+    Memory flush turns never use server-side compaction, so they can extract
+    durable memories from the unsummarized history.
+
     OpenClaw adds the `compact-2026-01-12` beta header and sends an Anthropic
-    `context_management` compaction edit. When compaction occurs, OpenClaw
-    assembles the streamed summary and stores it with the provider's opaque
-    compaction metadata as hidden replay state. Both survive session reopening
-    and are sent first on the next matching request. Summary text still passes
-    through transcript redaction; opaque metadata is preserved for replay.
-    The full transcript remains local;
-    only the outbound history before the checkpoint is omitted.
-    If Anthropic rejects a stored checkpoint, that turn reports the provider
-    error and the following turn falls back to full local history.
+    `context_management` compaction edit. The edit carries summarization
+    instructions that tell Claude not to call tools while summarizing, because
+    a tool call during summarization returns an empty compaction block. When
+    compaction occurs, OpenClaw assembles the streamed summary and stores it
+    with the provider's opaque compaction metadata as hidden replay state. Both
+    survive session reopening and are sent first on the next matching request.
+    Summary text still passes through transcript redaction; opaque metadata is
+    preserved for replay. The full transcript remains local; only the outbound
+    history before the checkpoint is omitted. An empty compaction block is not
+    stored as a checkpoint, so the next request sends the same history as
+    before and OpenClaw's client-side compaction stays available. If Anthropic
+    rejects a stored checkpoint, that turn reports the provider error and the
+    following turn falls back to full local history.
 
     When `anthropicCompactThreshold` is omitted, OpenClaw uses
-    `max(50000, floor(contextWindow * 0.7))`. To choose a different input-token
-    trigger:
+    `max(50000, floor(budget * 0.7))`, where the budget is the model's
+    `contextTokens` cap when set and its `contextWindow` otherwise. With the
+    default trigger, Anthropic compacts before local preflight compaction
+    would. If a trigger falls inside the local compaction reserve, for example
+    the 50000 minimum on a small window, local compaction may run first; that
+    only skips server compaction, never overflows. An explicit
+    `anthropicServerCompaction: true` delays the outer pre-run check to the
+    trigger; checkpoint safety guards can still compact locally first. To
+    choose a different input-token trigger:
 
     ```json5
     {
@@ -900,7 +945,6 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
           models: {
             "anthropic/claude-sonnet-4-6": {
               params: {
-                anthropicServerCompaction: true,
                 anthropicCompactThreshold: 120000,
               },
             },
@@ -913,11 +957,10 @@ OpenClaw supports Anthropic's prompt caching feature for API-key auth.
     Configured thresholds below `50000` are clamped to `50000`.
 
     <Warning>
-    Anthropic server-side compaction is a beta feature and OpenClaw never
-    enables it automatically. It applies only to direct Anthropic API requests
-    authenticated with an API key. OAuth/subscription tokens, Claude CLI,
-    proxies, Bedrock, Vertex, and Foundry are excluded. OpenClaw does not send
-    `pause_after_compaction` or custom compaction instructions.
+    Anthropic server-side compaction is a beta feature. It applies only to
+    direct Anthropic API requests authenticated with an API key.
+    OAuth/subscription tokens, Claude CLI, proxies, Bedrock, Vertex, and
+    Foundry are excluded. OpenClaw does not send `pause_after_compaction`.
     </Warning>
 
     See Anthropic's [compaction guide](https://platform.claude.com/docs/en/build-with-claude/compaction).

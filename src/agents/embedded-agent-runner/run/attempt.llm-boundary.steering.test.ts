@@ -9,14 +9,18 @@ import {
   createAssistantResultStream,
   testModel,
 } from "../../sessions/agent-session-loop-correctness.test-support.js";
+import { convertToLlm } from "../../sessions/messages.js";
 import { SessionManager } from "../../sessions/session-manager.js";
 import {
   installRuntimeContextMessageForPrompt,
-  installModelPromptTransform,
+  installModelPromptProjection,
   normalizeMessagesForLlmBoundary,
 } from "./attempt-llm-boundary.js";
 import { createUserTranscriptContextRegistry } from "./attempt-user-transcript-context-registry.js";
-import { buildRuntimeContextCustomMessage } from "./runtime-context-prompt.js";
+import {
+  attachSteeringRuntimeContext,
+  buildRuntimeContextCustomMessage,
+} from "./runtime-context-prompt.js";
 
 function createSession() {
   return {
@@ -32,8 +36,8 @@ function createSession() {
 }
 const originalUser = (): UserMessage => ({ role: "user", content: "original", timestamp: 1 });
 const steeringUser = (): UserMessage => ({ role: "user", content: "steering", timestamp: 1 });
-const installPrompt = (session: Parameters<typeof installModelPromptTransform>[0]["session"]) =>
-  installModelPromptTransform({
+const installPrompt = (session: Parameters<typeof installModelPromptProjection>[0]["session"]) =>
+  installModelPromptProjection({
     session,
     transcriptPrompt: "original",
     prependContext: "before",
@@ -43,12 +47,41 @@ const runtimeContext = () =>
   expectDefined(buildRuntimeContextCustomMessage("original context"), "runtime context fixture");
 
 describe("active prompt steering context", () => {
+  it("keeps steering context through tool use and retires it after a settled answer", () => {
+    const first = steeringUser();
+    attachSteeringRuntimeContext(first, { text: "first quoted context" });
+    const second = { ...steeringUser(), timestamp: 2 };
+    attachSteeringRuntimeContext(second, { text: "second quoted context" });
+    const toolUse = createAssistant(testModel, []);
+    toolUse.stopReason = "toolUse";
+
+    expect(JSON.stringify(normalizeMessagesForLlmBoundary([first, toolUse]))).toContain(
+      "first quoted context",
+    );
+    for (const stopReason of ["error", "aborted"] as const) {
+      const failed = createAssistant(testModel, []);
+      failed.stopReason = stopReason;
+      const retry = JSON.stringify(normalizeMessagesForLlmBoundary([first, second, failed]));
+      expect(retry).toContain("first quoted context");
+      expect(retry).toContain("second quoted context");
+    }
+
+    const settled = createAssistant(testModel, [{ type: "text", text: "done" }]);
+    const third = { ...steeringUser(), timestamp: 3 };
+    attachSteeringRuntimeContext(third, { text: "third quoted context" });
+    const next = JSON.stringify(normalizeMessagesForLlmBoundary([first, second, settled, third]));
+    expect(next).not.toContain("first quoted context");
+    expect(next).not.toContain("second quoted context");
+    expect(next).toContain("third quoted context");
+  });
+
   it("keeps keyless context on the original prompt through pre-prompt rebuilding and initial steering", async () => {
     const manager = SessionManager.inMemory();
     const kept = manager.appendMessage({ role: "user", content: "older request", timestamp: 1 });
     const requests: string[] = [];
     const agent = new Agent({
       initialState: { model: testModel, messages: manager.buildSessionContext().messages },
+      convertToLlm: (messages) => convertToLlm(normalizeMessagesForLlmBoundary(messages)),
       streamFn: (model, context) => {
         requests.push(JSON.stringify(context.messages));
         return createAssistantResultStream(
@@ -99,8 +132,13 @@ describe("active prompt steering context", () => {
         ...(mode === "rewritten key" ? { persistedUserIdempotencyKey: "before-hook-key" } : {}),
       });
       session.agent.state.messages.push(original);
+      await session.agent.transformContext(session.messages);
+      const capturedPrompt = session.messages.at(-1);
+      if (capturedPrompt?.role !== "user") {
+        throw new Error("Expected the captured source user prompt");
+      }
       const persisted = manager.appendMessageWithTranscriptAnchor({
-        ...original,
+        ...capturedPrompt,
         ...(mode === "keyless" ? {} : { idempotencyKey: "canonical-key" }),
       });
       contexts.record(original, persisted.message);
@@ -112,7 +150,9 @@ describe("active prompt steering context", () => {
       session.agent.state.messages = manager.buildSessionContext().messages;
       await session.agent.continue();
       const retry = session.messages;
-      const projected = await session.agent.transformContext(retry);
+      const projected = normalizeMessagesForLlmBoundary(
+        await session.agent.transformContext(retry),
+      );
       cleanup();
       cleanupPrompt();
       expect(persisted.message).not.toBe(original);
@@ -120,30 +160,6 @@ describe("active prompt steering context", () => {
       expect(projected.at(-2)).toMatchObject({ content: "before\n\noriginal" });
       expect(projected.at(-1)).toBe(steering.message);
       expect(session.messages).not.toContain(message);
-    },
-  );
-
-  it.each([false, true])(
-    "replays a carrierless keyless prompt only with an unambiguous canonical timestamp (ambiguous=%s)",
-    async (ambiguous) => {
-      const original = originalUser();
-      const manager = SessionManager.inMemory();
-      const session = createSession();
-      const cleanup = installPrompt(session);
-      await session.agent.transformContext([original]);
-      const persisted = manager.appendMessageWithTranscriptAnchor(original);
-      if (ambiguous) {
-        manager.appendMessage(steeringUser());
-      }
-      manager.appendCompaction("Earlier context was summarized.", persisted.entryId, 100);
-      const canonical = manager.buildSessionContext().messages;
-      const projected = await session.agent.transformContext(canonical);
-      cleanup();
-      if (ambiguous) {
-        expect(projected).toEqual(canonical);
-      } else {
-        expect(projected.at(-1)).toMatchObject({ content: "before\n\noriginal" });
-      }
     },
   );
 
@@ -169,7 +185,7 @@ describe("active prompt steering context", () => {
     expect(projected.at(-1)).toBe(kept.message);
   });
 
-  it("preserves the active prompt prefix through steering and retires it on cleanup", () => {
+  it("preserves user metadata through steering and runtime-context cleanup", () => {
     const session = createSession();
     const message = runtimeContext();
     const cleanup = installRuntimeContextMessageForPrompt({ session, message });
@@ -199,7 +215,7 @@ describe("active prompt steering context", () => {
     });
     expect(session.messages).not.toContain(message);
     expect(project()[0]).toMatchObject({
-      content: expect.not.stringContaining("Conversation info:"),
+      content: expect.stringContaining("Conversation info:"),
     });
     session.agent.state.messages.unshift(message);
     expect(project()).not.toContain(message);

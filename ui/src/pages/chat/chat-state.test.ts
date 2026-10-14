@@ -34,7 +34,7 @@ import type { ChatHistoryResult } from "./chat-history-snapshot.ts";
 import { loadChatHistory } from "./chat-history.ts";
 import { makeChatHost } from "./chat-host.test-support.ts";
 import { createChatPageStateContext } from "./chat-page.test-support.ts";
-import { removeQueuedMessage } from "./chat-queue.ts";
+import { removeQueuedMessage, keepVolatileQueuedMessage } from "./chat-queue.ts";
 import { ChatStateController } from "./chat-state-controller.ts";
 import { handlePageGatewayEvent } from "./chat-state-events.ts";
 import type { ChatPageHost } from "./chat-state-host.ts";
@@ -1524,16 +1524,14 @@ describe("canonical session message recovery", () => {
     const { state, request } = createSessionEventState({
       chatMessages: [originalPrompt, abandonedPartial],
       chatRunId: runId,
-      chatQueue: [
-        {
-          id: "placement-local-send-2",
-          text: promptText,
-          createdAt: Date.now(),
-          sendState: "sending",
-          sendRunId: runId,
-          sendAttempts: 1,
-        },
-      ],
+    });
+    keepVolatileQueuedMessage(state, state.sessionKey, {
+      id: "placement-local-send-2",
+      text: promptText,
+      createdAt: Date.now(),
+      sendState: "sending",
+      sendRunId: runId,
+      sendAttempts: 1,
     });
     const expected = [originalPrompt, abandonedPartial, localUser, localFinal].map((message) => ({
       role: message.role,
@@ -1670,7 +1668,7 @@ describe("canonical session message recovery", () => {
             limit: 80,
             maxBytes: 256 * 1024,
           },
-          { signal: expect.any(AbortSignal) },
+          { signal: expect.any(AbortSignal), timeoutMs: 30_000 },
         ),
       );
       await vi.waitFor(() => expect(state.chatLoading).toBe(false));
@@ -1866,7 +1864,7 @@ describe("canonical session message recovery", () => {
       expect(request).toHaveBeenLastCalledWith(
         "chat.history",
         expect.objectContaining({ sessionKey: "global", agentId: "main" }),
-        { signal: expect.any(AbortSignal) },
+        { signal: expect.any(AbortSignal), timeoutMs: 30_000 },
       );
       state.assistantAgentId = "work";
       state.agentsSelectedId = "work";
@@ -2867,7 +2865,7 @@ describe("canonical session message recovery", () => {
           limit: 80,
           maxBytes: 256 * 1024,
         },
-        { signal: expect.any(AbortSignal) },
+        { signal: expect.any(AbortSignal), timeoutMs: 30_000 },
       );
     });
     expect(state.chatRunId).toBe("active-run");
@@ -3002,36 +3000,11 @@ describe("ChatStateController render lifecycle", () => {
     } satisfies ReactiveControllerHost;
   }
 
-  function createInputHistoryState(
-    renderLifecycle: NonNullable<ChatPageHost["renderLifecycle"]>,
-    navigateHistory: ReturnType<typeof vi.fn>,
-  ) {
-    return {
-      settings: undefined,
-      assistantAgentId: null,
-      agentsList: null,
-      hello: null,
-      sessionKey: "agent:main:current",
-      chatLoading: false,
-      chatMessages: [],
-      chatQueue: [],
-      renderLifecycle,
-      handleSendChat: vi.fn().mockResolvedValue(undefined),
-      handleChatDraftChange: vi.fn(),
-      handleChatInputHistoryKey: navigateHistory,
-    } as unknown as ChatPageHost;
-  }
-
-  function createInputHistoryKey(
-    selectionStart: number,
-    selectionEnd: number,
-    valueLength: number,
-  ) {
+  function createInputHistoryKey(selectionStart: number, selectionEnd: number) {
     return {
       key: "ArrowUp" as const,
       selectionStart,
       selectionEnd,
-      valueLength,
       altKey: false,
       ctrlKey: false,
       metaKey: false,
@@ -3663,7 +3636,7 @@ describe("ChatStateController render lifecycle", () => {
     state.realtimeTalkStatus = "listening";
     state.realtimeTalkDetail = "live";
     state.realtimeTalkInputLevel.set(0.8);
-    state.realtimeTalkConversation = [
+    state.realtimeTalkConversationState.entries = [
       { id: "utterance", role: "user", text: "stale", isStreaming: true },
     ];
     state.realtimeTalkVideoStream = {} as MediaStream;
@@ -3680,7 +3653,7 @@ describe("ChatStateController render lifecycle", () => {
     expect(state.realtimeTalkStatus).toBe("idle");
     expect(state.realtimeTalkDetail).toBeNull();
     expect(state.realtimeTalkInputLevel.value).toBe(0);
-    expect(state.realtimeTalkConversation).toEqual([]);
+    expect(state.realtimeTalkConversationState.entries).toEqual([]);
     expect(state.realtimeTalkVideoStream).toBeNull();
     expect(state.realtimeTalkCameraDevices).toEqual([]);
     expect(state.realtimeTalkVideoCapable).toBe(false);
@@ -3777,11 +3750,11 @@ describe("ChatStateController render lifecycle", () => {
   });
 
   it.each([
-    { handled: true, selection: 0, valueLength: 0, decision: "handled:history-up" },
-    { handled: false, selection: 5, valueLength: 10, decision: "blocked:modifier-or-composition" },
+    { handled: true, selection: 0 },
+    { handled: false, selection: 5 },
   ] as const)(
     "invalidates input history only when recall is handled: $handled",
-    ({ handled, selection, valueLength, decision }) => {
+    ({ handled, selection }) => {
       const requestUpdate = vi.fn();
       const controller = new ChatStateController<ChatPageHost>(
         createControllerHost({ requestUpdate }),
@@ -3792,24 +3765,27 @@ describe("ChatStateController render lifecycle", () => {
         handled,
         preventDefault: handled,
         restoreCaret: handled ? "up" : null,
-        decision,
-        historyNavigationActiveBefore: false,
-        historyNavigationActiveAfter: handled,
-        selectionStart: 0,
-        selectionEnd: 0,
-        valueLength: 10,
       });
-      const state = createInputHistoryState(renderLifecycle, navigateHistory);
-      controller.attach(state);
-      const input = createInputHistoryKey(selection, selection, valueLength);
-      const result = state.handleChatInputHistoryKey!(input);
+      const state = createPageState(createChatPageStateContext(), renderLifecycle, {
+        sessionKey: "agent:main:current",
+        dispatchEvent: () => true,
+        querySelector: () => null,
+      });
+      state.handleChatInputHistoryKey = navigateHistory;
+      try {
+        controller.attach(state);
+        const input = createInputHistoryKey(selection, selection);
+        const result = state.handleChatInputHistoryKey!(input);
 
-      expect(result.handled).toBe(handled);
-      expect(navigateHistory).toHaveBeenCalledWith(input);
-      if (handled) {
-        expect(requestUpdate).toHaveBeenCalled();
-      } else {
-        expect(requestUpdate).not.toHaveBeenCalled();
+        expect(result.handled).toBe(handled);
+        expect(navigateHistory).toHaveBeenCalledWith(input);
+        if (handled) {
+          expect(requestUpdate).toHaveBeenCalled();
+        } else {
+          expect(requestUpdate).not.toHaveBeenCalled();
+        }
+      } finally {
+        controller.hostDisconnected();
       }
     },
   );

@@ -18,6 +18,10 @@ export const GATEWAY_RESTART_WAIT_OUTCOMES = [
 
 export type GatewayRestartWaitOutcome = (typeof GATEWAY_RESTART_WAIT_OUTCOMES)[number];
 
+export type GatewayRestartResult = GatewayRestartSnapshot & {
+  outcome: "ready" | "starting" | "failed";
+};
+
 export type UnavailablePluginHealthSummary = {
   id: string;
   reason: string;
@@ -37,6 +41,7 @@ export type GatewayRestartSnapshot = {
   activatedPluginErrors?: PluginHealthErrorSummary[];
   unavailablePlugins?: UnavailablePluginHealthSummary[];
   channelProbeErrors?: Array<{ id: string; error: string }>;
+  channelRuntimeWarnings?: Array<{ id: string; error: string }>;
   expectedVersion?: string;
   versionMismatch?: {
     expected: string;

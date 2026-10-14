@@ -69,6 +69,8 @@ export function createManagedCommandProcessCustody(options: {
     serviceManagerEnv: resolveServiceManagerEnv(),
   });
   const anchorOwner = options.anchorOwner ?? `doctor:${randomUUID()}`;
+  // Legacy updaters supply Doctor custody without a run ID; retain its invocation identity.
+  const commandOwner = options.runId === "" ? anchorOwner : options.runId;
   const parents = new Map(options.parents?.map((parent) => [parent.key, parent]));
   const anchors = new Map<string, ManagedHandoffLease>();
   function releaseAnchors(leases = [...anchors.values()]) {
@@ -101,8 +103,8 @@ export function createManagedCommandProcessCustody(options: {
           }
           const acquired = store.acquire(
             `${root}/${child}`,
-            options.runId,
-            { kind: "update" },
+            commandOwner,
+            { kind: "update", custody: "reserved" },
             false,
             parent.version === 1 ? parent : undefined,
             parent.version === 1 ? undefined : parent,
@@ -188,7 +190,7 @@ export function createManagedCommandProcessCustody(options: {
           );
           continue;
         }
-        if (lease.owner !== options.runId || lease.helper.pid !== helperPid) {
+        if (lease.owner !== commandOwner || lease.helper.pid !== helperPid) {
           throw new Error(
             `Native command custody for PID ${lease.executor.pid} belongs to another Doctor`,
           );

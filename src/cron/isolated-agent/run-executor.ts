@@ -19,7 +19,11 @@ import {
   getGeneratedMediaTaskIdsForSessionKey,
   hasNewGeneratedMediaTaskForSessionKey,
 } from "../../agents/media-generation-activity.js";
-import { findModelInCatalog, modelSupportsInput } from "../../agents/model-catalog-lookup.js";
+import {
+  findModelInCatalog,
+  modelSupportsInput,
+  prepareModelRunCapabilities,
+} from "../../agents/model-catalog-lookup.js";
 import { resolveConfiguredThinkingDefault } from "../../agents/model-thinking-default.js";
 import { rootedAgentRunParams } from "../../agents/rooted-run-params.js";
 import {
@@ -41,6 +45,7 @@ import {
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
 import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { assertCronExecutionRootRuntime } from "../execution-root-runtime.js";
+import { prepareCronRunAdmission } from "../run-admission.js";
 import { resolveCronScheduledToolPolicy } from "../scheduled-tool-policy.js";
 import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import { resolveCronAuthenticatedChannelRequester } from "../tools-allow-provenance.js";
@@ -50,10 +55,7 @@ import {
   resolveCurrentChannelTarget,
 } from "./channel-output-policy.js";
 import { resolveCronPayloadOutcome } from "./helpers.js";
-import {
-  assertCronRuntimeAuthorityCandidate,
-  prepareCronPromptRunAdmission,
-} from "./run-admission.js";
+import { assertCronRuntimeAuthorityCandidate } from "./run-admission.js";
 import { createCronCandidateExecutionResolver } from "./run-candidate-runtime.js";
 import { finalizeCronPromptForResolvedTools } from "./run-delivery-trace.js";
 import {
@@ -217,8 +219,9 @@ function createCronPromptExecutor(
       preparedRunAdmission,
       messageActionTurnCapability,
       close: closePromptAdmission,
-    } = prepareCronPromptRunAdmission({
+    } = prepareCronRunAdmission({
       admissionSource: params.admissionSource,
+      deliveryAttemptFence: params.deliveryAttemptFence,
       cfg: params.cfgWithAgentDefaults,
       agentId: params.agentId,
       runId,
@@ -535,10 +538,7 @@ function createCronPromptExecutor(
                     sourceReplyDeliveryMode,
                     requireExplicitMessageTarget: sourceDelivery.messageTool.requireExplicitTarget,
                   },
-                  toolsAllow: resolveCliRuntimeToolsAllow(
-                    params.agentPayload?.toolsAllow,
-                    params.agentPayload?.toolsAllowIsDefault,
-                  ),
+                  toolsAllow: resolveCliRuntimeToolsAllow(params.agentPayload?.toolsAllow),
                   abortSignal: cliAbortSignal,
                 });
                 const classification = runOptions.classifyResult(candidateResult);
@@ -612,6 +612,12 @@ function createCronPromptExecutor(
           agentDir: params.agentDir,
           provider: providerOverride,
           agentHarnessRuntimeOverride: sessionRuntimeOverride,
+          // Same capability the reply path and agent command prepare: harness-native effort lists
+          // (Codex `max`) reach the runtime model only through it.
+          modelThinkingCapability: prepareModelRunCapabilities(
+            [thinkingCatalog, []],
+            [providerOverride, modelOverride, candidateRuntime],
+          ).modelThinkingCapability,
           requestedRouteResolution: "resolved",
           modelFallbacksOverride: cronFallbacksOverride,
           ...(isSkillCollectionReview
@@ -701,8 +707,8 @@ export async function executeCronRun(params: CronRunExecutionParams): Promise<Cr
     normalizeVerboseLevel(params.agentVerboseDefault) ??
     "off";
   registerAgentRunContext(params.runId, {
-    sessionKey: params.runSessionKey,
     sessionId: params.cronSession.sessionEntry.sessionId,
+    agentId: params.agentId,
     verboseLevel: resolvedVerboseLevel,
   });
   const runStartedAt = params.runStartedAt ?? Date.now();

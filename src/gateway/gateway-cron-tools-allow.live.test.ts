@@ -35,8 +35,7 @@ async function cliJson(instance: OpenClawTestInstance, args: string[]): Promise<
 }
 
 describeLive("cron tool allowlists through live harnesses", () => {
-  // Release-only omission: native Codex exposes model-required code-mode discovery with empty caps.
-  it.each(["openclaw"] as const)(
+  it.each(["openclaw", "codex"] as const)(
     "%s preserves empty caps and applies edited names, groups, globs, and aliases",
     async (runtime) => {
       const instance = await createOpenClawTestInstance({
@@ -192,8 +191,13 @@ describeLive("cron tool allowlists through live harnesses", () => {
             const results = history.messages.filter((message) => message.role === "toolResult");
             expect(assistants.length, JSON.stringify(history)).toBeGreaterThan(0);
             if (cap === "") {
-              expect(calls).toEqual([]);
-              expect(results).toEqual([]);
+              // Codex model metadata (`tool_mode: code_mode_only`) outranks the thread's
+              // `features.code_mode=false`, so Codex always registers `exec`/`wait` with an
+              // empty nested catalog. Allow only those inert probes; any other tool is a leak.
+              const inertProbes = new Set(runtime === "codex" ? ["exec", "wait"] : []);
+              expect(calls.filter((call) => !inertProbes.has(call.name))).toEqual([]);
+              expect(results.filter((result) => !inertProbes.has(result.toolName))).toEqual([]);
+              expect(JSON.stringify(results)).not.toContain(marker);
               expect(JSON.stringify(assistants)).not.toContain(marker);
               const assistantText = assistants
                 .map((message) =>

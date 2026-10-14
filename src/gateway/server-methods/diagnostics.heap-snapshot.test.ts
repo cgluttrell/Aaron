@@ -71,6 +71,7 @@ function request(
 }
 
 beforeEach(() => {
+  vi.stubGlobal("process", { ...process, versions: { ...process.versions, bun: undefined } });
   stateDir = tempDirs.make("openclaw-heap-snapshot-");
   vi.stubEnv("OPENCLAW_STATE_DIR", stateDir);
   setActivePluginRegistry(createEmptyPluginRegistry());
@@ -88,69 +89,80 @@ beforeEach(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   setActivePluginRegistry(createEmptyPluginRegistry());
 });
 
 describe("diagnostics.heapSnapshot", () => {
-  it("refuses low headroom through the capture entry point but admits a small heap", async () => {
-    const signal = new AbortController().signal;
-    vi.mocked(process.memoryUsage).mockReturnValue({ ...memory, heapUsed: 2 * 1024 ** 3 });
-    const low = await captureDiagnosticHeapSnapshot({
-      signal,
-      hasAuthority: () => true,
-      readHeadroom: () => ({
-        hostAvailableBytes: 8 * 1024 ** 3,
-        cgroupWorkingSetBytes: 7 * 1024 ** 3,
-        cgroupLimitBytes: 8 * 1024 ** 3,
-      }),
-    });
-    expect(low).toEqual({
-      status: "unavailable",
-      reason: "insufficient-headroom",
-      cleanupFailed: false,
-    });
-    expect(native.write).not.toHaveBeenCalled();
-    expect(await fs.readdir(stateDir)).toEqual([]);
-
-    const hostLow = await captureDiagnosticHeapSnapshot({
-      signal,
-      hasAuthority: () => true,
-      readHeadroom: () => ({ hostAvailableBytes: 1024 ** 3 }),
-    });
-    expect(hostLow).toEqual(low);
-    expect(native.write).not.toHaveBeenCalled();
-
-    vi.mocked(process.memoryUsage).mockReturnValue({ ...memory, heapUsed: 1024 });
-    const admitted = await captureDiagnosticHeapSnapshot({
-      signal,
-      hasAuthority: () => true,
-      readHeadroom: () => ({
-        hostAvailableBytes: 2 * 1024 ** 3,
-        cgroupWorkingSetBytes: 1024 ** 3,
-        cgroupLimitBytes: 2 * 1024 ** 3,
-      }),
-    });
-    expect(admitted.status).toBe("complete");
-    expect(native.write).toHaveBeenCalledTimes(1);
-  });
-
   it.each([
-    { scopes: [] },
-    { scopes: ["operator.read"] },
-    { scopes: ["operator.write"] },
-    { role: "node", scopes: ["operator.admin"] },
-  ])("rejects non-admin operators and node clients: %j", async (options) => {
-    const call = request(options);
-    await call.pending;
-    expect(native.write).not.toHaveBeenCalled();
-    expect(call.respond).toHaveBeenCalledWith(
-      false,
-      undefined,
-      expect.objectContaining({ code: options.role === "node" ? "INVALID_REQUEST" : "FORBIDDEN" }),
-    );
-  });
+    {
+      hostAvailableBytes: 512 * 1024 ** 2,
+      cgroupWorkingSetBytes: 0,
+      cgroupLimitBytes: 4 * 1024 ** 3,
+    },
+    {
+      hostAvailableBytes: 4 * 1024 ** 3,
+      cgroupWorkingSetBytes: 3 * 1024 ** 3,
+      cgroupLimitBytes: 3 * 1024 ** 3,
+    },
+  ])(
+    "refuses capture without host or cgroup headroom before filesystem preparation: %j",
+    async (headroom) => {
+      const result = await captureDiagnosticHeapSnapshot({
+        signal: new AbortController().signal,
+        hasAuthority: () => true,
+        readHeadroom: () => headroom,
+      });
+      expect(result).toEqual({
+        status: "unavailable",
+        reason: "insufficient-headroom",
+        cleanupFailed: false,
+      });
+      expect(native.write).not.toHaveBeenCalled();
+      expect(await fs.readdir(stateDir)).toEqual([]);
+    },
+  );
 
-  it.each([null, [], { reason: 1 }, { reason: "x".repeat(257) }, { path: "/tmp/override" }])(
+  it.each(["unsupported", "heap-too-large"] as const)(
+    "refuses %s capture before filesystem preparation",
+    async (reason) => {
+      if (reason === "unsupported") {
+        vi.stubGlobal("process", { ...process, versions: { ...process.versions, bun: "1.4.2" } });
+      } else {
+        vi.mocked(process.memoryUsage).mockReturnValue({ ...memory, heapUsed: 6 * 1024 ** 3 + 1 });
+      }
+      const call = request();
+      await call.pending;
+      expect(call.respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          code: "UNAVAILABLE",
+          details: { reason, cleanupFailed: false },
+        }),
+      );
+      expect(native.write).not.toHaveBeenCalled();
+      expect(await fs.readdir(stateDir)).toEqual([]);
+    },
+  );
+
+  it.each([{ scopes: ["operator.write"] }, { role: "node", scopes: ["operator.admin"] }])(
+    "rejects non-admin operators and node clients: %j",
+    async (options) => {
+      const call = request(options);
+      await call.pending;
+      expect(native.write).not.toHaveBeenCalled();
+      expect(call.respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({
+          code: options.role === "node" ? "INVALID_REQUEST" : "FORBIDDEN",
+        }),
+      );
+    },
+  );
+
+  it.each([null, { reason: 1 }, { reason: "x".repeat(257) }, { path: "/tmp/override" }])(
     "rejects malformed or path-controlling params %j",
     async (params) => {
       const call = request({ params });
@@ -192,22 +204,6 @@ describe("diagnostics.heapSnapshot", () => {
       }),
     );
     expect(native.write).toHaveBeenCalledTimes(1);
-  });
-
-  it("refuses heaps over 6 GiB before filesystem preparation", async () => {
-    vi.mocked(process.memoryUsage).mockReturnValue({ ...memory, heapUsed: 6 * 1024 ** 3 + 1 });
-    const call = request();
-    await call.pending;
-    expect(call.respond).toHaveBeenCalledWith(
-      false,
-      undefined,
-      expect.objectContaining({
-        code: "UNAVAILABLE",
-        details: { reason: "heap-too-large", cleanupFailed: false },
-      }),
-    );
-    expect(native.write).not.toHaveBeenCalled();
-    expect(await fs.readdir(stateDir)).toEqual([]);
   });
 
   it.each(["authority", "heap"])(

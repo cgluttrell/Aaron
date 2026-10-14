@@ -25,7 +25,7 @@ function writeGeneratedPluginCatalog(
   providerId: string,
   provider: Record<string, unknown>,
   root: unknown = { providers: {} },
-): string {
+): Promise<string> {
   return writeModelsJsonWithPluginCatalog({
     root,
     pluginRelativePath: join("plugins", providerId, PLUGIN_MODEL_CATALOG_FILE),
@@ -304,8 +304,8 @@ describe("ModelRegistry models.json auth", () => {
     expect(registry.find("custom", "example-model")?.contextTokens).toBeUndefined();
   });
 
-  it("can parse authored models without opening generated plugin catalogs", () => {
-    const modelsPath = writeGeneratedPluginCatalog(
+  it("can parse authored models without opening generated plugin catalogs", async () => {
+    const modelsPath = await writeGeneratedPluginCatalog(
       "zai",
       {
         baseUrl: "https://api.z.ai/api/paas/v4",
@@ -352,6 +352,61 @@ describe("ModelRegistry models.json auth", () => {
 
     expect(registry.getError()).toBeUndefined();
     expect(registry.find("custom", "captured-model")?.name).toBe("Captured Model");
+  });
+
+  it("keeps estimates out of SQLite catalog metadata and reconstructs them on reload", async () => {
+    const provider = "window-fixture";
+    const modelsPath = await writeModelsJsonWithPluginCatalog({
+      root: { providers: {} },
+      pluginRelativePath: "plugins/window-fixture/catalog.json",
+      pluginCatalog: {
+        generatedBy: PLUGIN_MODEL_CATALOG_GENERATED_BY,
+        providers: {
+          [provider]: {
+            api: "openai-responses",
+            baseUrl: "https://models.example/v1",
+            models: [
+              { id: "unknown" },
+              { id: "prompt-only", contextTokens: 777_000 },
+              { id: "reported", contextWindow: 128_000, contextTokens: 777_000 },
+              { id: "authored", contextWindow: 64_000 },
+            ],
+          },
+        },
+      },
+    });
+    const pluginCatalogs = loadPersistedPluginModelCatalogsReadOnly(dirname(modelsPath));
+    expect(pluginCatalogs).toHaveLength(1);
+    const stored = JSON.parse(pluginCatalogs[0]!.contents).providers[provider].models;
+    for (const id of ["unknown", "prompt-only"]) {
+      expect(stored.find((row: { id: string }) => row.id === id)).not.toHaveProperty(
+        "contextWindow",
+      );
+    }
+    expect(pluginCatalogs[0]!.contents).not.toContain("contextWindowSource");
+    const registry = ModelRegistry.create(AuthStorage.inMemory(), modelsPath, {
+      pluginCatalogs,
+      pluginMetadataSnapshot: pluginOwnerSnapshot(provider, provider),
+    });
+    for (const candidate of [registry, registry.fork(AuthStorage.inMemory())]) {
+      expect(candidate.find(provider, "unknown")).toMatchObject({
+        contextWindow: 128_000,
+        contextWindowSource: "synthetic",
+      });
+      expect(candidate.find(provider, "prompt-only")).toMatchObject({
+        contextWindow: 777_000,
+        contextTokens: 777_000,
+        contextWindowSource: "synthetic",
+      });
+      for (const [id, window] of [
+        ["reported", 128_000],
+        ["authored", 64_000],
+      ] as const) {
+        const runtime = candidate.find(provider, id);
+        expect(runtime?.contextWindow).toBe(window);
+        expect(runtime).not.toHaveProperty("contextWindowSource");
+      }
+    }
   });
 
   it("loads only lifecycle-captured generated catalogs when the root catalog is absent", () => {
@@ -409,8 +464,8 @@ describe("ModelRegistry models.json auth", () => {
     expect(registry.getError()).toContain("Failed to load generated plugin model catalogs");
   });
 
-  it("tracks explicit max-token provenance across authored and generated catalogs", () => {
-    const modelsPath = writeGeneratedPluginCatalog(
+  it("tracks explicit max-token provenance across authored and generated catalogs", async () => {
+    const modelsPath = await writeGeneratedPluginCatalog(
       "zai",
       {
         baseUrl: "https://api.z.ai/api/paas/v4",
@@ -442,8 +497,8 @@ describe("ModelRegistry models.json auth", () => {
     });
   });
 
-  it("preserves response-model compatibility from generated catalogs", () => {
-    const modelsPath = writeGeneratedPluginCatalog("openai", {
+  it("preserves response-model compatibility from generated catalogs", async () => {
+    const modelsPath = await writeGeneratedPluginCatalog("openai", {
       baseUrl: "https://api.openai.com/v1",
       api: "openai-responses",
       apiKey: "test-token-placeholder",
@@ -469,10 +524,10 @@ describe("ModelRegistry models.json auth", () => {
     });
   });
 
-  it("loads richer generated catalog metadata without widening runtime inputs", () => {
+  it("loads richer generated catalog metadata without widening runtime inputs", async () => {
     // Generated catalogs can report video/audio support. Keep those rows while
     // projecting their metadata to the runtime execution contract.
-    const modelsPath = writeModelsJsonWithPluginCatalogs({
+    const modelsPath = await writeModelsJsonWithPluginCatalogs({
       root: { providers: {} },
       pluginCatalogs: [
         {
@@ -542,8 +597,8 @@ describe("ModelRegistry models.json auth", () => {
 
   it.each(["persisted", "captured"] as const)(
     "isolates invalid %s plugin catalogs from valid models",
-    (source) => {
-      const modelsPath = writeModelsJsonWithPluginCatalogs({
+    async (source) => {
+      const modelsPath = await writeModelsJsonWithPluginCatalogs({
         root: {
           providers: {
             custom: {
@@ -611,8 +666,8 @@ describe("ModelRegistry models.json auth", () => {
     },
   );
 
-  it("preserves model params from SQLite-cached plugin catalogs", () => {
-    const modelsPath = writeGeneratedPluginCatalog("amazon-bedrock", {
+  it("preserves model params from SQLite-cached plugin catalogs", async () => {
+    const modelsPath = await writeGeneratedPluginCatalog("amazon-bedrock", {
       baseUrl: "https://bedrock-runtime.us-east-1.amazonaws.com",
       api: "bedrock-converse-stream",
       auth: "aws-sdk",
@@ -635,10 +690,10 @@ describe("ModelRegistry models.json auth", () => {
     });
   });
 
-  it("ignores non-generated SQLite plugin catalog entries", () => {
+  it("ignores non-generated SQLite plugin catalog entries", async () => {
     // Plugin catalogs are codegen artifacts; unmarked lookalikes must
     // not extend the provider registry.
-    const modelsPath = writeModelsJsonWithPluginCatalog({
+    const modelsPath = await writeModelsJsonWithPluginCatalog({
       root: { providers: {} },
       pluginRelativePath: join("plugins", "zai", PLUGIN_MODEL_CATALOG_FILE),
       pluginCatalog: {
@@ -662,8 +717,8 @@ describe("ModelRegistry models.json auth", () => {
     expect(registry.find("zai", "glm-5.1")).toBeUndefined();
   });
 
-  it("ignores generated plugin catalog providers without current ownership", () => {
-    const modelsPath = writeGeneratedPluginCatalog("zai", {
+  it("ignores generated plugin catalog providers without current ownership", async () => {
+    const modelsPath = await writeGeneratedPluginCatalog("zai", {
       baseUrl: "https://api.z.ai/api/paas/v4",
       api: "openai-completions",
       apiKey: "ZAI_API_KEY",
@@ -680,8 +735,8 @@ describe("ModelRegistry models.json auth", () => {
     expect(registry.find("zai", "glm-5.1")).toBeUndefined();
   });
 
-  it("ignores generated plugin catalog providers owned by disabled plugins", () => {
-    const modelsPath = writeGeneratedPluginCatalog("zai", {
+  it("ignores generated plugin catalog providers owned by disabled plugins", async () => {
+    const modelsPath = await writeGeneratedPluginCatalog("zai", {
       baseUrl: "https://api.z.ai/api/paas/v4",
       api: "openai-completions",
       apiKey: "ZAI_API_KEY",

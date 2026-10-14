@@ -58,12 +58,13 @@ function interruptionScript(
       ["/infra/gateway-lock-legacy.js", 'export const assertLegacyGatewayStoppedForMaintenance = async () => {};'],
       ["/infra/gateway-lock.js", 'export const acquireGatewayLock = async () => { let active = true; return { assertCurrent(assertPolicy) { if (!active) throw new Error("Fixture Gateway ownership released"); assertPolicy?.(); if (!active) throw new Error("Fixture Gateway ownership released"); }, run(operation) { if (!active) throw new Error("Fixture Gateway ownership released"); return operation(); }, async release() { active = false; } }; };'],
       ["/state/openclaw-state-db-async-lifecycle.js", 'export const createOpenClawDatabaseMaintenanceScope = () => { let closed = false; return { run: run => run(), close: async () => { if (!closed) { globalThis.doctorFixture.record("stores-closed"); closed = true; } } }; };'],
+      ["/state/openclaw-state-maintenance-context.js", 'export const admitOpenClawMaintenanceLiveAuthorityReads = () => {};'],
       ["/cli/update-cli/update-command-service-maintenance.js", 'export const maybeStopManagedServiceBeforeMutableUpdate = params => globalThis.doctorFixture.stop(params); export const revalidateManagedGatewayServiceAfterUpdate = async () => globalThis.doctorFixture.verdict;'],
       ["/commands/doctor-gateway-services.js", 'export const maybeRepairGatewayServiceConfig = cfg => globalThis.doctorFixture.repair(cfg);'],
       ["/daemon/service.js", 'export const resolveGatewayService = () => globalThis.doctorFixture.service; export const readGatewayServiceState = async () => globalThis.doctorFixture.state;'],
       ["/daemon/service-operation-lock.js", 'export const withGatewayServiceOperationLock = async (_env, run) => run(() => {});'],
       ["/cli/update-cli/update-command-service-plan.js", 'export const resolveUpdatedGatewayRestartPort = async () => 19871;'],
-      ["/cli/daemon-cli/restart-health.js", 'export const waitForGatewayHealthyRestart = async () => { globalThis.doctorFixture.record("healthy"); return { healthy: true }; };'],
+      ["/cli/daemon-cli/restart-health.js", 'export const waitForGatewayHealthyRestart = async () => { globalThis.doctorFixture.record("healthy"); return { outcome: "ready", healthy: true }; };'],
     ]);
     registerHooks({ resolve(specifier, context, nextResolve) {
       const resolved = nextResolve(specifier, context);

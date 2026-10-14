@@ -4,20 +4,18 @@ import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { updateSqliteTranscriptEventJsonInTransaction } from "../config/sessions/session-accessor.sqlite-transcript-store.js";
 import { transcriptEventJsonSql } from "../config/sessions/transcript-payload.js";
 import { OPENCLAW_AGENT_SCHEMA_VERSION } from "../state/openclaw-agent-db-contract.js";
+import type { OpenClawAgentDatabase } from "../state/openclaw-agent-db-contract.js";
 import {
   OpenClawAgentDatabaseLeaseActiveError,
   assertAgentDatabaseMaintenanceAuthority,
   assertNoOpenClawAgentDatabaseLeases,
 } from "../state/openclaw-agent-db-lease.js";
+import { withAgentDatabaseMaintenanceLease } from "../state/openclaw-agent-db-maintenance-lease.js";
 import {
   assertOpenClawAgentDatabaseForMaintenance,
   migrateOpenClawAgentDatabaseForMaintenance,
 } from "../state/openclaw-agent-db-maintenance.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../state/openclaw-agent-db.generated.js";
-import {
-  type OpenClawAgentDatabase,
-  withAgentDatabaseMaintenanceLease,
-} from "../state/openclaw-agent-db.js";
 import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "../state/openclaw-state-db.js";
 import type { OpenClawStateLeaseContext } from "../state/openclaw-state-lease.js";
 import {
@@ -29,7 +27,7 @@ import {
 import { openNodeSqliteDatabase } from "./node-sqlite.js";
 import { resolveSqliteInspectionSignal } from "./sqlite-readonly-worker.js";
 import { runSqliteImmediateTransactionSync } from "./sqlite-transaction.js";
-import { createSqliteWalReclamationResult } from "./sqlite-wal-reclamation.js";
+import { createMigrationDatabaseHandle } from "./state-migrations.agent-database.js";
 import {
   resolveAgentDatabaseMigrationTargets,
   type AgentDatabaseMigrationTarget,
@@ -71,23 +69,6 @@ type DatabaseMigrationResult = {
   transcriptSessions: number;
   warnings: string[];
 };
-
-function createMigrationDatabaseHandle(
-  database: DatabaseSync,
-  agentId: string,
-  pathname: string,
-): OpenClawAgentDatabase {
-  return {
-    agentId,
-    db: database,
-    path: pathname,
-    walMaintenance: {
-      checkpoint: () => false,
-      close: () => false,
-      reclaimFreePages: createSqliteWalReclamationResult,
-    },
-  };
-}
 
 function parseMigrationCursor(value: string | null | undefined, pathname: string): MigrationCursor {
   if (!value) {

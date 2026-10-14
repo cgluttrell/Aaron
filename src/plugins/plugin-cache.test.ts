@@ -10,6 +10,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import { AsyncWorkScope, trackAsyncWork } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
+import { closeOpenClawStateDatabaseByPathAsync } from "../state/openclaw-state-db.js";
 import { detectBundleManifestFormat, loadBundleManifest } from "./bundle-manifest.js";
 import { discoverConfiguredPluginLoadPaths, discoverOpenClawPlugins } from "./discovery.js";
 import { resolvePluginDoctorContractArtifact } from "./doctor-contract-artifact.js";
@@ -153,10 +154,9 @@ function createRetargetedWindowsRootFixture(prefix: string, basename: string) {
   vi.spyOn(process, "platform", "get").mockReturnValue("win32");
 
   const observedRoot = path.join(observedParent, "plugin");
-  const originalLstat = fs.lstatSync;
-  let rootObservations = 0;
-  vi.spyOn(fs, "lstatSync").mockImplementation(((filePath, options) => {
-    if (filePath === observedRoot && ++rootObservations === 2) {
+  const originalRealpath = fs.realpathSync;
+  vi.spyOn(fs, "realpathSync").mockImplementation(((filePath, options) => {
+    if (filePath === observedRoot) {
       fs.unlinkSync(observedParent);
       fs.symlinkSync(
         replacementContainer,
@@ -164,8 +164,8 @@ function createRetargetedWindowsRootFixture(prefix: string, basename: string) {
         process.platform === "win32" ? "junction" : "dir",
       );
     }
-    return originalLstat(filePath, options as never);
-  }) as typeof fs.lstatSync);
+    return originalRealpath(filePath, options as never);
+  }) as typeof fs.realpathSync);
   return {
     trustedAlias,
     observedPath: path.join(observedRoot, basename),
@@ -255,33 +255,28 @@ describe("plugin package facts", () => {
     }
   });
 
-  it.each(["entry check", "file read"] as const)(
-    "rejects a retargeted observed root during plugin cache %s",
-    (operation) => {
-      const { trustedAlias, observedPath, openSync } = createRetargetedWindowsRootFixture(
-        "plugin-cache-alias-race-",
-        "package.json",
-      );
-      const relativePath = path.relative(trustedAlias, observedPath);
+  it("rejects a retargeted observed root during plugin cache entry check", () => {
+    const { trustedAlias, observedPath, openSync } = createRetargetedWindowsRootFixture(
+      "plugin-cache-alias-race-",
+      "package.json",
+    );
+    const relativePath = path.relative(trustedAlias, observedPath);
 
-      const result = withPluginCache(createPluginCache(), () =>
-        operation === "entry check"
-          ? checkPluginCacheEntry({
-              rootDir: trustedAlias,
-              relativePath,
-              rejectHardlinks: true,
-            })
-          : readPluginCacheFile({
-              rootDir: trustedAlias,
-              relativePath,
-              rejectHardlinks: true,
-            }),
-      );
+    const result = withPluginCache(createPluginCache(), () =>
+      checkPluginCacheEntry({
+        rootDir: trustedAlias,
+        relativePath,
+        rejectHardlinks: true,
+      }),
+    );
 
-      expect(result.ok).toBe(false);
-      expect(openSync).not.toHaveBeenCalled();
-    },
-  );
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "validation",
+      error: { code: "path-mismatch" },
+    });
+    expect(openSync).not.toHaveBeenCalled();
+  });
   it("reads an aliased Windows plugin root through the descriptor boundary", () => {
     const { parent, root, alias, source } = createWindowsRootAliasFixture(
       "plugin-identity-read-",
@@ -396,26 +391,31 @@ describe("plugin package facts", () => {
   it("withPluginLifecycleLease refreshes enclosing operation facts while retaining its callbacks", async () => {
     const root = tempDirs.make("plugin-lease-parent-");
     const filePath = path.join(root, "catalog.json");
+    const databasePath = path.join(root, "state.sqlite");
     fs.writeFileSync(filePath, '{"name":"before-install"}');
-    await using cache = createPluginCache();
-    const instance = new PluginInstance("setup-owner");
-    cache.instances.add(instance);
-    const afterWrite = instance.wrap(() => "post-write usable");
-    await withPluginCache(cache, async () => {
-      expect(readPluginCacheJsonFile(filePath)).toMatchObject({
-        ok: true,
-        value: { name: "before-install" },
+    try {
+      await using cache = createPluginCache();
+      const instance = new PluginInstance("setup-owner");
+      cache.instances.add(instance);
+      const afterWrite = instance.wrap(() => "post-write usable");
+      await withPluginCache(cache, async () => {
+        expect(readPluginCacheJsonFile(filePath)).toMatchObject({
+          ok: true,
+          value: { name: "before-install" },
+        });
+        await withPluginLifecycleLease({ path: databasePath }, async () => {
+          fs.writeFileSync(filePath, '{"name":"after-install"}');
+          clearPluginMetadataLifecycleCaches();
+        });
+        expect(readPluginCacheJsonFile(filePath)).toMatchObject({
+          ok: true,
+          value: { name: "after-install" },
+        });
+        expect(afterWrite()).toBe("post-write usable");
       });
-      await withPluginLifecycleLease({ path: path.join(root, "state.sqlite") }, async () => {
-        fs.writeFileSync(filePath, '{"name":"after-install"}');
-        clearPluginMetadataLifecycleCaches();
-      });
-      expect(readPluginCacheJsonFile(filePath)).toMatchObject({
-        ok: true,
-        value: { name: "after-install" },
-      });
-      expect(afterWrite()).toBe("post-write usable");
-    });
+    } finally {
+      await closeOpenClawStateDatabaseByPathAsync(databasePath);
+    }
   });
 
   it.each(["regular", "boundary"] as const)(

@@ -40,11 +40,11 @@ import {
 } from "./update-command-dry-run.js";
 import type { RefuseUpdate } from "./update-command-result.js";
 import type { prepareUpdateCommand } from "./update-command-run.js";
+import { resolvePackageRuntimePreflight } from "./update-command-runtime-preflight.js";
 import type {
   ManagedServiceRootRedirect,
   PreManagedServiceStop,
 } from "./update-command-service-context-types.js";
-import { resolvePackageRuntimePreflight } from "./update-command-service-plan.js";
 import type { resolveUpdateCommandTarget } from "./update-command-target.js";
 
 /** Render prepared preview facts without initializing runtime state. */
@@ -52,7 +52,11 @@ export async function previewUpdateCommand(params: {
   target: NonNullable<Awaited<ReturnType<typeof resolveUpdateCommandTarget>>>;
   prepared: Pick<
     Awaited<ReturnType<typeof prepareUpdateCommand>>,
-    "shouldRestart" | "installKind" | "requestedChannel" | "controlPlaneUpdateSentinelMeta"
+    | "shouldRestart"
+    | "installKind"
+    | "requestedChannel"
+    | "controlPlaneUpdateSentinelMeta"
+    | "packageActivationNotes"
   >;
   opts: UpdateCommandOptions;
   runId: string;
@@ -74,6 +78,7 @@ export async function previewUpdateCommand(params: {
         prepared.controlPlaneUpdateSentinelMeta?.completionOwner === "gateway-restart" || undefined,
     }));
   if (preflight) {
+    preflight.preflightNotes.push(...(prepared.packageActivationNotes ?? []));
     if (target.inspectionWarning) {
       preflight.preflightNotes.push(target.inspectionWarning);
     }
@@ -117,6 +122,7 @@ export async function preflightUpdateCommandSchemas(params: {
   updateStepTimeoutMs: number;
   invocationCwd?: string;
   legacyConfigPlan?: LegacyConfigUpdatePlan;
+  callerLegacyConfigPlan?: LegacyConfigUpdatePlan;
   managedServiceRootRedirect: ManagedServiceRootRedirect | null;
   managedServiceRoot?: string;
   channel: UpdateChannel;
@@ -185,6 +191,7 @@ export async function preflightUpdateCommandSchemas(params: {
         managedServiceRootRedirect,
         managedServiceRoot: params.managedServiceRoot,
         legacyConfigPlan: params.legacyConfigPlan,
+        callerLegacyConfigPlan: params.callerLegacyConfigPlan,
         candidateAdmissionChecks,
         expectedForeground:
           params.expectedForeground || run?.completionOwner === "gateway-restart" || undefined,

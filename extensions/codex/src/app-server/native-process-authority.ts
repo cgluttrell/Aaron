@@ -41,13 +41,6 @@ export function getCodexNativeProcessClient(
   return owner;
 }
 
-export function hasCodexNativeBackgroundProcesses(
-  client: CodexAppServerClient,
-  threadId: string,
-): boolean {
-  return clients.get(client)?.hasProcesses(threadId) ?? false;
-}
-
 /** Read the native process owner's live inventory, never infer custody from a start event. */
 export async function readCodexRetainedBackgroundCommands(params: {
   client: CodexAppServerClient;
@@ -114,7 +107,24 @@ export class CodexNativeProcessClient {
       const threadId = readCodexNotificationThreadId(notification.params);
       const turnId = readCodexNotificationTurnId(notification.params);
       const commands = threadId ? this.threads.get(threadId) : undefined;
-      if (!commands || !turnId) {
+      if (!commands) {
+        return;
+      }
+      if (
+        notification.method === "thread/closed" ||
+        notification.method === "thread/archived" ||
+        notification.method === "thread/deleted"
+      ) {
+        // Codex unloads an unsubscribed thread by dropping its listener before
+        // shutdown, so its background terminals end without an item/completed
+        // this connection can observe. The thread-level receipt is final.
+        for (const command of commands.values()) {
+          command.background = undefined;
+          this.closeAdmission(command);
+        }
+        return;
+      }
+      if (!turnId) {
         return;
       }
       if (notification.method === "turn/completed") {
@@ -189,12 +199,6 @@ export class CodexNativeProcessClient {
     commands.set(receipt.itemId, command);
     owner.commands.add(command);
     return command;
-  }
-
-  hasProcesses(threadId: string): boolean {
-    return [...(this.threads.get(threadId)?.values() ?? [])].some(
-      (command) => command.processes.size > 0 || command.background !== undefined,
-    );
   }
 
   claim(metadata: unknown, terminate: () => Promise<void>) {
@@ -310,16 +314,19 @@ export class CodexNativeProcessAuthority {
     }
   }
 
-  ownsCurrentCommand(client: CodexAppServerClient, receipt: NativeCommand): boolean {
-    return this.findCurrentCommand(client, receipt) !== undefined;
+  hasCurrentProcesses(client: CodexAppServerClient, threadId: string): boolean {
+    this.assertCurrent();
+    return [...this.commands].some(
+      (command) =>
+        command.client === clients.get(client) &&
+        command.threadId === threadId &&
+        (command.processes.size > 0 || command.background?.confirmed === true),
+    );
   }
 
-  private findCurrentCommand(
-    client: CodexAppServerClient,
-    receipt: NativeCommand,
-  ): CommandAdmission | undefined {
+  ownsCurrentCommand(client: CodexAppServerClient, receipt: NativeCommand): boolean {
     this.assertCurrent();
-    return [...this.commands].find(
+    return [...this.commands].some(
       (command) =>
         command.client === clients.get(client) &&
         command.threadId === receipt.threadId &&

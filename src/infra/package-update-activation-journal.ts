@@ -29,12 +29,11 @@ import {
   type PackageActivationIntent,
   type PackageActivationRecord,
 } from "./package-update-activation-schema.js";
-import { withPackageRecoverySnapshot } from "./package-update-activation-snapshot.js";
 import {
   withExistingSqliteRollbackDatabase,
   type ExistingSqliteTransaction,
 } from "./sqlite-existing-database.js";
-import { createVerifiedSqliteSnapshot } from "./sqlite-snapshot.js";
+import { prepareSqliteRollbackRecovery } from "./sqlite-rollback-recovery.js";
 export {
   assertPackageActivationLayout,
   isPackageActivationComplete,
@@ -119,7 +118,14 @@ export function openPackageActivationJournal(anchor: string) {
         return operation(db, transact);
       },
     );
-  const decode = (row: ActivationRow | undefined): PackageActivationRecord => {
+  const matchesInstallation = (descriptor: PackageActivationDescriptor) =>
+    descriptor.parentIdentity === parentIdentity &&
+    descriptor.journalParentIdentity === journalParentIdentity &&
+    descriptor.journalIdentity === journalIdentity;
+  const decode = (
+    row: ActivationRow | undefined,
+    completedInstallKey?: string,
+  ): PackageActivationRecord => {
     if (
       !row ||
       row.slot !== 1 ||
@@ -131,11 +137,10 @@ export function openPackageActivationJournal(anchor: string) {
     }
     const descriptor = PackageActivationDescriptorSchema.parse(JSON.parse(row.descriptor_json));
     if (
-      descriptor.parentIdentity !== parentIdentity ||
-      descriptor.journalParentIdentity !== journalParentIdentity ||
-      descriptor.journalIdentity !== journalIdentity ||
       resolvePackageActivationAnchor(descriptor.authority.installKey) !== anchor ||
-      descriptor.parentIdentity !== packageActivationIdentity(path.dirname(anchor), true) ||
+      packageActivationIdentity(parent, true) !== parentIdentity ||
+      (completedInstallKey !== undefined &&
+        descriptor.authority.installKey !== completedInstallKey) ||
       new Set(descriptor.launchers.map((entry) => entry.name)).size !== descriptor.launchers.length
     ) {
       throw new Error("Package publication journal does not match its installation");
@@ -173,13 +178,19 @@ export function openPackageActivationJournal(anchor: string) {
     ) {
       throw new Error("Package publication intent names an unknown launcher.");
     }
-    return {
+    const record = {
       revision: row.revision,
       phase: PackageActivationPhaseSchema.parse(row.phase),
       intent,
       descriptor,
       publications,
     };
+    // Closed history conveys no authority over today's package, helper, or
+    // lease store. Only unfinished recovery needs its original identities.
+    if (!matchesInstallation(descriptor) && !isPackageActivationComplete(anchor, record)) {
+      throw new Error("Package publication journal does not match its installation");
+    }
+    return record;
   };
   const readRow = (db: DatabaseSync) => {
     const sizes = executeSqliteQuerySync(
@@ -226,8 +237,9 @@ export function openPackageActivationJournal(anchor: string) {
     intent: PackageActivationIntent,
     assertCurrent: () => void,
     publications = expected.publications,
+    descriptor = expected.descriptor,
   ): PackageActivationRecord => {
-    const descriptorJsonValue = descriptorJson(expected.descriptor);
+    const descriptorJsonValue = descriptorJson(descriptor);
     const intentJson = JSON.stringify(intentSchema.parse(intent));
     PackageActivationPhaseSchema.parse(phase);
     assertCurrent();
@@ -265,142 +277,106 @@ export function openPackageActivationJournal(anchor: string) {
   };
   return {
     read,
-    async readForRecovery() {
-      const fileFingerprint = (file: string) => {
-        const stat = fs.lstatSync(file, { bigint: true, throwIfNoEntry: false });
-        if (!stat) {
-          return null;
-        }
-        if (!stat.isFile() || stat.nlink !== 1n || (stat.mode & 0o077n) !== 0n) {
-          throw new Error("Package publication journal sidecar is unsafe");
-        }
-        return `${stat.dev}:${stat.ino}:${stat.ctimeNs}:${stat.mtimeNs}:${stat.size}`;
-      };
-      assertFiles();
-      const files = [
-        journalPath,
-        `${journalPath}-journal`,
-        `${journalPath}-wal`,
-        `${journalPath}-shm`,
-      ];
-      const identities = files.map(fileFingerprint);
-      const assertUnchanged = () => {
+    archiveSettled(expected: PackageActivationRecord, assertCurrent: () => void) {
+      const retained = `${anchor}.superseded-${expected.descriptor.operationId}`;
+      const archive = path.join(retained, "control");
+      const assertClosed = () => {
+        assertCurrent();
         assertFiles();
-        if (files.some((file, index) => fileFingerprint(file) !== identities[index])) {
-          throw new Error("Package publication recovery journal changed");
+        assertRecord(expected, read());
+        if (!isPackageActivationComplete(anchor, expected)) {
+          throw new Error("Only completed package settlement evidence can be archived.");
         }
       };
-      let record: PackageActivationRecord;
-      let hot = false;
+      assertClosed();
+      // Capture today's evidence solely for a fenced rename, never for deletion
+      // or restoration. Historical inode/helper fingerprints no longer own it.
+      const source = fs.lstatSync(anchor, { throwIfNoEntry: false });
+      const destination = fs.lstatSync(retained, { throwIfNoEntry: false });
+      if (source && destination) {
+        throw new Error("Package settlement evidence archive already exists.");
+      }
+      let retainedIdentity: string;
+      if (source) {
+        retainedIdentity = packageActivationIdentity(anchor, true);
+        assertClosed();
+        try {
+          fs.renameSync(anchor, retained);
+        } catch (error) {
+          if (
+            fs.lstatSync(anchor, { throwIfNoEntry: false }) ||
+            !fs.lstatSync(retained, { throwIfNoEntry: false }) ||
+            packageActivationIdentity(retained, true) !== retainedIdentity
+          ) {
+            throw error;
+          }
+        }
+      } else {
+        if (!destination) {
+          assertClosed();
+          fs.mkdirSync(retained, { mode: 0o700 });
+        }
+        retainedIdentity = packageActivationIdentity(retained, true);
+      }
+      const assertSettled = () => {
+        assertClosed();
+        if (
+          packageActivationIdentity(retained, true) !== retainedIdentity ||
+          fs.realpathSync(retained) !== retained ||
+          fs.lstatSync(archive, { throwIfNoEntry: false })
+        ) {
+          throw new Error("Package settlement control archive changed or already exists.");
+        }
+      };
+      assertSettled();
+      for (const directory of [control, parent, retained]) {
+        requireDirectorySync(syncDirectorySync(directory), "Package settlement control archive");
+      }
+      assertSettled();
+      // The durable settled receipt disarms recovery before the entire active
+      // control path leaves admission. Preserve its inode and bytes for inspection;
+      // old readers never need to decode a newer historical settlement reason.
       try {
-        record = read();
+        fs.renameSync(control, archive);
       } catch (error) {
-        if (!(error instanceof Error && "errcode" in error && error.errcode === 776)) {
+        // A lost rename acknowledgement must still reach both directory syncs.
+        // Only the exact moved control object, with no active source, can qualify.
+        if (
+          fs.lstatSync(control, { throwIfNoEntry: false }) ||
+          !fs.lstatSync(archive, { throwIfNoEntry: false }) ||
+          assertPrivate(archive, true) !== journalParentIdentity
+        ) {
           throw error;
         }
-        hot = true;
-        assertUnchanged();
-        record = await withPackageRecoverySnapshot(
-          control,
-          assertFiles,
-          async (targetPath, assertSnapshot) => {
-            await createVerifiedSqliteSnapshot({
-              sourcePath: journalPath,
-              targetPath,
-              preserveRowIds: true,
-              validate: (database) => {
-                decode(readRow(database));
-              },
-            });
-            assertSnapshot();
-            const snapshot = openNodeSqliteDatabase(targetPath, { readOnly: true });
-            try {
-              return decode(readRow(snapshot));
-            } finally {
-              snapshot.close();
-            }
-          },
-        );
       }
-      assertUnchanged();
-      return {
-        record,
-        assertUnchanged,
-        admit(assertFence: () => void) {
-          assertUnchanged();
-          assertFence();
-          if (!hot) {
-            assertRecord(record, read());
-            return;
-          }
-          const database = openNodeSqliteDatabase(resolveExistingSqliteFileUri(journalPath));
-          try {
-            assertFiles();
-            assertFence();
-            const mode = database // sqlite-allow-raw -- Read-only hot-journal recovery must verify the native rollback mode.
-              .prepare("PRAGMA journal_mode")
-              .get()?.journal_mode;
-            if (!["delete", "truncate", "persist"].includes(String(mode))) {
-              throw new Error("Package publication recovery requires rollback journal mode");
-            }
-            assertRecord(record, decode(readRow(database)));
-          } finally {
-            database.close();
-          }
-        },
-      };
+      for (const directory of [retained, parent]) {
+        assertCurrent();
+        if (
+          packageActivationIdentity(parent, true) !== parentIdentity ||
+          fs.realpathSync(retained) !== retained ||
+          packageActivationIdentity(retained, true) !== retainedIdentity ||
+          assertPrivate(archive, true) !== journalParentIdentity ||
+          assertPrivate(path.join(archive, PACKAGE_ACTIVATION_JOURNAL), false) !== journalIdentity
+        ) {
+          throw new Error("Package settlement control archive identity changed.");
+        }
+        requireDirectorySync(syncDirectorySync(directory), "Package settlement control archive");
+      }
+      assertCurrent();
     },
-    replaceCompleted(
-      expected: PackageActivationRecord,
-      descriptor: Omit<PackageActivationDescriptor, "journalIdentity">,
-      assertCurrent: () => void,
-    ) {
-      const encoded = descriptorJson({ ...descriptor, journalIdentity });
-      return withDatabase(true, (db, transact) =>
-        transact(
-          () => {
-            assertFiles();
-            assertCurrent();
-            const previous = decode(readRow(db));
-            assertRecord(expected, previous);
-            if (
-              !isPackageActivationComplete(anchor, previous) ||
-              descriptor.journalParentIdentity !== journalParentIdentity ||
-              packageActivationIdentity(preparationSource(descriptor, "anchor"), true) !==
-                descriptor.anchorIdentity ||
-              packageActivationIdentity(preparationSource(descriptor, "helper"), false) !==
-                descriptor.helperIdentity ||
-              previous.descriptor.authority.databasePath !== descriptor.authority.databasePath ||
-              previous.descriptor.authority.databaseIdentity !==
-                descriptor.authority.databaseIdentity ||
-              previous.descriptor.authority.parentIdentity !== descriptor.authority.parentIdentity
-            ) {
-              throw new Error("The previous package receipt is not safely replaceable.");
-            }
-            executeSqliteQuerySync(
-              db,
-              queries(db)
-                .updateTable("package_activation")
-                .set({
-                  revision: previous.revision + 1,
-                  phase: "preparing",
-                  descriptor_json: encoded,
-                  intent_json: JSON.stringify({ kind: "prepare", completed: [], moving: null }),
-                  publications_json: "[]",
-                })
-                .where("slot", "=", 1)
-                .where("revision", "=", previous.revision),
-            );
-          },
-          {
-            withCommit: (commit) => {
-              assertFiles();
-              assertCurrent();
-              commit();
-            },
-          },
-        ),
-      );
+    readForAdmission(installKey: string) {
+      return withDatabase(false, (db) => decode(readRow(db), installKey));
+    },
+    readForRecovery() {
+      return prepareSqliteRollbackRecovery({
+        path: journalPath,
+        scratchRoot: control,
+        assertIdentity: assertFiles,
+        assertFileSafe(file) {
+          assertPrivate(file, false);
+        },
+        read: (db) => decode(readRow(db)),
+      });
     },
     assertCurrent(expected: PackageActivationRecord) {
       assertRecord(expected, read());

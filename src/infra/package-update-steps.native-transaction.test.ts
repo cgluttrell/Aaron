@@ -6,11 +6,9 @@ import { describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { withTestDir } from "../test-helpers/temp-dir.js";
 import { PACKAGE_DIST_INVENTORY_RELATIVE_PATH } from "./package-dist-inventory.js";
-import {
-  runGlobalPackageUpdateSteps,
-  type PackageUpdateTransaction,
-} from "./package-update-steps.js";
+import { runGlobalPackageUpdateSteps } from "./package-update-steps.js";
 import { writePackageRoot } from "./package-update-steps.test-support.js";
+import type { PackageUpdateTransaction } from "./package-update-swap-contract.js";
 import type { ResolvedGlobalInstallTarget } from "./update-global.js";
 
 function readPnpmStageArgs(argv: string[], env?: NodeJS.ProcessEnv, pnpm12 = false) {
@@ -384,7 +382,7 @@ describe.runIf(process.platform !== "win32")("native package transactions", () =
           return;
         }
         if (shimFailure) {
-          const activeRoot = path.join(globalRoot, "new", "node_modules", "openclaw");
+          const activeRoot = path.join(globalRoot, "hash-openclaw", "node_modules", "openclaw");
           expect(result.failedStep).toMatchObject({ name: "package-swap", exitCode: 1 });
           expect(result.activePackageRoot).toBe(activeRoot);
           expect(result.afterVersion).toBe("2.0.0");
@@ -474,7 +472,7 @@ describe.runIf(process.platform !== "win32")("native package transactions", () =
         await expect(fs.readFile(metadata, "utf8")).resolves.toBe("candidate metadata\n");
         await expect(fs.readFile(sibling, "utf8")).resolves.toBe("unrelated package\n");
         await expect(fs.realpath(launcher)).resolves.toBe(
-          path.join(result.activePackageRoot!, "dist", "index.js"),
+          await fs.realpath(path.join(result.activePackageRoot!, "dist", "index.js")),
         );
         if (!retained) {
           throw new Error("transaction missing");

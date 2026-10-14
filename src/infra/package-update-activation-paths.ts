@@ -1,20 +1,39 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { resolveExecutablePath } from "./executable-path.js";
+import type { PackageActivationRuntime } from "./package-update-activation-runtime.types.js";
 import type { PackageActivationRecord } from "./package-update-activation-schema.js";
 
 const PACKAGE_ACTIVATION_PREFIX = ".openclaw.package-activation-";
+// Published openclaw@2026.9.8 recovery helper; newer writers keep full verification.
+export const LEGACY_PACKAGE_RECOVERY_HELPER =
+  "e08dfc1fb3ba7962f9e01d7a6770117c6cd77406b3fa4f7ba94788a670030ba0";
+
+export function packageActivationRuntimeIdentity(file: string): string {
+  const stat = fs.lstatSync(file, { bigint: true });
+  // System runtimes may be root-owned even when the installation is user-owned.
+  if (!stat.isFile() || stat.ino === 0n) {
+    throw new Error("Package recovery requires a regular external runtime executable.");
+  }
+  return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+}
+
+export function capturePackageActivationRuntime(
+  kind: PackageActivationRuntime["kind"],
+  executable: string,
+): PackageActivationRuntime {
+  const resolved = resolveExecutablePath(executable, { useCache: false });
+  if (!resolved) {
+    throw new Error("The selected package recovery executable could not be resolved.");
+  }
+  const runtimePath = fs.realpathSync(resolved);
+  return { kind, path: runtimePath, identity: packageActivationRuntimeIdentity(runtimePath) };
+}
 
 export function resolvePackageActivationAnchor(installKey: string): string {
   const key = createHash("sha256").update(installKey).digest("hex").slice(0, 24);
   return path.join(path.dirname(installKey), `${PACKAGE_ACTIVATION_PREFIX}${key}`);
-}
-
-export function isPackageActivationControlName(name: string): boolean {
-  return (
-    name.startsWith(PACKAGE_ACTIVATION_PREFIX) &&
-    /^[a-f0-9]{24}\.control$/u.test(name.slice(PACKAGE_ACTIVATION_PREFIX.length))
-  );
 }
 
 export function resolvePackageActivationControl(anchor: string): string {
@@ -49,7 +68,9 @@ export function privatePackageActivationIdentity(file: string, directory: boolea
   const value = packageActivationIdentity(file, directory);
   const stat = fs.lstatSync(file);
   if ((stat.mode & 0o077) !== 0 || (!directory && stat.nlink !== 1)) {
-    throw new Error("Package publication recovery permissions are unsafe");
+    throw new Error(
+      `Package publication recovery permissions are unsafe${!directory && stat.nlink !== 1 ? ` (nlink=${stat.nlink}). Run openclaw doctor --fix.` : ""}`,
+    );
   }
   return value;
 }
@@ -68,24 +89,31 @@ export function assertPackageActivationLayout(anchor: string): void {
 
 /** A receipt is a read-only completion fact, never a grant for another effect. */
 export function isPackageActivationComplete(
-  anchor: string,
+  _anchor: string,
   record: PackageActivationRecord,
 ): boolean {
+  if (record.phase === "superseded") {
+    if (
+      record.intent?.kind !== "superseded-by-manual-install" &&
+      record.intent?.kind !== "recovery-lease-identity-changed" &&
+      record.intent?.kind !== "publication-settled-external-change" &&
+      record.intent?.kind !== "recovery-lease-missing"
+    ) {
+      throw new Error("Package supersession fact is missing.");
+    }
+    // Settlement already relinquished rollback custody. Retained evidence may
+    // be inspected, moved, or removed without reviving the closed operation.
+    // Archival is maintenance, not another recovery obligation.
+    return record.intent.settled;
+  }
   if (record.phase !== "anchor-retired" || record.intent?.kind !== "unlink-helper") {
     return false;
   }
   if (record.intent.identity !== record.descriptor.helperIdentity) {
     throw new Error("Final helper unlink identity is invalid.");
   }
-  for (const file of [anchor, resolvePackageActivationHelper(anchor)]) {
-    try {
-      fs.lstatSync(file);
-      return false;
-    } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) {
-        throw error;
-      }
-    }
-  }
+  // The final unlink intent follows verified retirement of rollback custody.
+  // A helper left by an interrupted unlink or a later replacement is cleanup,
+  // not permission to restore an earlier generation or block a new update.
   return true;
 }

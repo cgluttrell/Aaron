@@ -1,4 +1,3 @@
-// User-turn transcript type contracts shared by runtime and queue option types.
 import type { HumanMention } from "@openclaw/gateway-protocol";
 import type { AgentMessage } from "../../packages/agent-core/src/types.js";
 import type { AgentRunTerminalOutcome } from "../agents/agent-run-terminal-outcome.types.js";
@@ -156,6 +155,7 @@ export type UserTurnTranscriptTargetResolver =
   | (() => UserTurnTranscriptTarget | undefined | Promise<UserTurnTranscriptTarget | undefined>);
 
 export type PersistUserTurnTranscriptParams = UserTurnTranscriptTarget & {
+  beforeFreshMessageCommit?: () => void;
   sessionTurnMutation?: SessionTranscriptTurnMutation;
   input?: UserTurnInput;
   message?: PersistedUserTurnMessage;
@@ -194,6 +194,12 @@ export type CreateUserTurnTranscriptRecorderParams = {
   sessionLifecyclePatch?: SessionTranscriptTurnLifecyclePatch;
 };
 
+type UserTurnPersistenceOptions = {
+  target?: UserTurnTranscriptTargetResolver;
+  updateMode?: UserTurnTranscriptUpdateMode;
+  cwd?: string;
+};
+
 export type UserTurnTranscriptRecorder = {
   readonly message: PersistedUserTurnMessage | undefined;
   resolveMessage: () => Promise<PersistedUserTurnMessage | undefined>;
@@ -207,16 +213,31 @@ export type UserTurnTranscriptRecorder = {
     assertCompletionCurrent?: () => void;
   }) => Promise<boolean>;
   getProcessingCompletion?: () => AgentRunTerminalOutcome | undefined;
+  /** Released synchronous SDK contract; internal recorders use completeProcessingAsync. */
   completeProcessing?: (outcome: AgentRunTerminalOutcome) => AgentRunTerminalOutcome | undefined;
+  completeProcessingAsync?: (
+    outcome: AgentRunTerminalOutcome,
+  ) => Promise<AgentRunTerminalOutcome | undefined>;
   getPendingInputMessage?: () => PersistedUserTurnMessage | undefined;
   isPendingInputConsumed?: () => boolean;
   withPendingInput?: <T>(run: () => T) => T;
   finishPendingInput?: (disposition: "cancelled" | "interrupted") => void;
+  /** Join accepted completion and disposition writes before releasing the turn's admission. */
+  waitForPendingInputSettlement?: () => Promise<void>;
   /** Replaces generated current-turn text before runtime persistence/provider submission. */
   replaceTextBeforePersistence?: (text: string) => void;
   /** Confirms exact-run steering provenance after transcript commitment is proven. */
   confirmSteerTargetRunIdForPersistence?: (targetRunId: string) => Promise<void>;
   getPersistedMessage?: () => PersistedUserTurnMessage | undefined;
+  /**
+   * Freeze model-facing text on the canonical user record before its first provider dispatch.
+   * `requestLocal` applies the same redaction but leaves the stored record unchanged.
+   */
+  captureModelPromptProjection?: (
+    text: string,
+    assertCurrent: () => void,
+    options?: { requestLocal?: boolean },
+  ) => Promise<PersistedUserTurnMessage>;
   getAdmissionReceipt: () => UserTurnTranscriptAdmissionReceipt | undefined;
   /** Persistence and `waitForRuntimePersistence` settle the handler's write and reject on its failure. */
   setAdmissionHandler?: (
@@ -234,27 +255,20 @@ export type UserTurnTranscriptRecorder = {
   isBlocked: () => boolean;
   hasRuntimePersistencePending: () => boolean;
   waitForRuntimePersistence: () => Promise<void>;
-  persistApproved: (params?: {
-    target?: UserTurnTranscriptTargetResolver;
-    updateMode?: UserTurnTranscriptUpdateMode;
-    cwd?: string;
-    expectedSessionId?: string;
-    expectedSessionState?: SessionTranscriptTurnExpectedState;
-    sessionLifecyclePatch?: SessionTranscriptTurnLifecyclePatch;
-    /** Allow a later explicit persistence attempt when this attempt appends nothing. */
-    retryIfUnpersisted?: boolean;
-  }) => Promise<UserTurnTranscriptPersistResult | undefined>;
-  persistBlocked: (
-    message: PersistedUserTurnMessage,
-    params?: {
-      target?: UserTurnTranscriptTargetResolver;
-      updateMode?: UserTurnTranscriptUpdateMode;
-      cwd?: string;
+  persistApproved: (
+    params?: UserTurnPersistenceOptions & {
+      expectedSessionId?: string;
+      expectedSessionState?: SessionTranscriptTurnExpectedState;
+      sessionLifecyclePatch?: SessionTranscriptTurnLifecyclePatch;
+      /** Allow a later explicit persistence attempt when this attempt appends nothing. */
+      retryIfUnpersisted?: boolean;
     },
   ) => Promise<UserTurnTranscriptPersistResult | undefined>;
-  persistFallback: (params?: {
-    target?: UserTurnTranscriptTargetResolver;
-    updateMode?: UserTurnTranscriptUpdateMode;
-    cwd?: string;
-  }) => Promise<UserTurnTranscriptPersistResult | undefined>;
+  persistBlocked: (
+    message: PersistedUserTurnMessage,
+    params?: UserTurnPersistenceOptions,
+  ) => Promise<UserTurnTranscriptPersistResult | undefined>;
+  persistFallback: (
+    params?: UserTurnPersistenceOptions,
+  ) => Promise<UserTurnTranscriptPersistResult | undefined>;
 };

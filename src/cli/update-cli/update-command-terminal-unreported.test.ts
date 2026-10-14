@@ -10,7 +10,7 @@ import {
   recordUpdateRunPhase,
 } from "../../infra/update-run-ledger.js";
 import type { UpdateRunResult } from "../../infra/update-runner-types.js";
-import { defaultRuntime } from "../../runtime.js";
+import { defaultRuntime, ExitError } from "../../runtime.js";
 import { closeOpenClawStateDatabaseForTest } from "../../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqliteDir } from "../../state/openclaw-state-db.paths.js";
 import { UpdateCommandRecoveryPendingError } from "./update-command-recovery-error.js";
@@ -24,6 +24,7 @@ import {
   withUpdateCommandTerminalResult,
 } from "./update-command-terminal.js";
 import { withUpdateFailureTriage } from "./update-command-triage.js";
+import { withUpdateCommandRecoveryUnwind } from "./update-command-unwind.js";
 
 const mocks = vi.hoisted(() => ({
   action: vi.fn<typeof import("./update-command-report.js").runInteractiveUpdateFailureAction>(),
@@ -290,10 +291,42 @@ it.each(["lost-authority", "pending-publication", "completed-publication"] as co
           { onResult },
         ),
       ),
-    ).rejects.toMatchObject({ code: 1 });
+    ).rejects.toMatchObject({ code: condition === "completed-publication" ? 0 : 1 });
     expect(getUpdateRun(run.runId, { env })).toEqual(recorded);
     expect(onResult).not.toHaveBeenCalled();
     expect(mocks.action).not.toHaveBeenCalled();
     expect(mocks.diagnose).not.toHaveBeenCalled();
+    if (condition === "completed-publication") {
+      expect(defaultRuntime.error).toHaveBeenCalledWith(
+        expect.stringContaining("Warning: Update succeeded, but result publication failed:"),
+      );
+      expect(defaultRuntime.error).not.toHaveBeenCalledWith(
+        expect.stringContaining("Update recovery remains pending"),
+      );
+    }
+  },
+);
+
+it.each([0, 1])(
+  "treats an already-reported exit %i as the outcome, not a failure",
+  async (code) => {
+    const env = { OPENCLAW_STATE_DIR: dirs.make("update-reported-exit-") };
+    const recorded = createUpdateRun({ trigger: "cli" }, { env });
+    const run = { runId: recorded.runId, env };
+    const exit = new ExitError(code);
+    await expect(
+      withUpdateCommandTerminalResult(async (registerRun) => {
+        registerRun(run);
+        await withUpdateCommandRecoveryUnwind(
+          { run },
+          { triageTarget: { root: env.OPENCLAW_STATE_DIR, env } },
+          async () => {
+            throw exit;
+          },
+        );
+      }),
+    ).rejects.toBe(exit);
+    expect(getUpdateRun(run.runId, { env })).toEqual(recorded);
+    expect(defaultRuntime.error).not.toHaveBeenCalled();
   },
 );

@@ -450,8 +450,7 @@ async function agentCommandInternal(
             sessionAgentId,
             lifecycleGeneration,
             runId,
-            executionWorkspaceDir:
-              sessionEntry?.worktree?.canonicalWorkspaceDir ?? cwd ?? workspaceDir,
+            executionWorkspaceDir: cwd ?? workspaceDir,
             watchSkills,
             isNewSession,
             isSubagentLaneTurn,
@@ -508,7 +507,6 @@ async function agentCommandInternal(
         lifecycleGeneration,
         ingress: admissionIngress,
         suppressVisibleSessionEffects,
-        preserveUserFacingSessionModelState,
         onCommittedSessionId: (committedSessionId) => {
           runOwnedSessionId = committedSessionId;
           compactionSessionIdReporter.onCompactionCommitted(committedSessionId);

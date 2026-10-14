@@ -10,7 +10,6 @@ import {
   type UpdateCommandChildGrant,
 } from "./update-command-executor-children.js";
 import { UpdateCommandRecoveryPendingError } from "./update-command-recovery-error.js";
-export type { UpdateCommandChildGrant } from "./update-command-executor-children.js";
 
 export function resolveUpdateCommandChildBinding(
   grant: UpdateCommandChildGrant,
@@ -191,7 +190,7 @@ export function resolveUpdateCommandChildBinding(
     spawner.version === 3 ||
     (spawner.key !== original.key &&
       (!spawner.key.startsWith(childPrefix) || spawner.owner !== runId)) ||
-    process.ppid !== spawner.executor.pid ||
+    (process.platform !== "win32" && process.ppid !== spawner.executor.pid) ||
     !(grant.originalChildKey ?? grant.childKey).startsWith(
       `${spawner.key}/.openclaw-update-child-`,
     ) ||

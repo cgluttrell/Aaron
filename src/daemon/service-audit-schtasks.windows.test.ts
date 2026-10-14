@@ -61,23 +61,76 @@ it.each(["omitted", "disabled-task", "disabled-trigger", "native-defaults", "mis
   },
 );
 
-it("verifies a refreshed restored task after Windows omits default fields", async () => {
-  const f = await fixture("win32");
-  const execute = native.task.getMockImplementation()!;
-  native.task.mockImplementation(async (args: string[]) => {
-    const result = await execute(args);
-    if (args[0] === "/Create") {
-      f.setTask(omitDefaults(f.task()));
+it.each(["omitted by Windows", "omitted in backup"])(
+  "verifies task defaults %s",
+  async (direction) => {
+    const f = await fixture("win32");
+    if (direction === "omitted by Windows") {
+      const execute = native.task.getMockImplementation()!;
+      native.task.mockImplementation(async (args: string[]) => {
+        const result = await execute(args);
+        if (args[0] === "/Create") {
+          f.setTask(omitDefaults(f.task()));
+        }
+        return result;
+      });
+      await expect(f.install()).resolves.toBeUndefined();
+      await expect(f.capture.hooks.beforeWrite()).resolves.toBeUndefined();
+    } else {
+      const expectedXml = omitDefaults(f.task());
+      await f.capture.hooks.taskPrepared(expectedXml);
+      await expect(f.capture.hooks.taskWritten(expectedXml)).resolves.toBeUndefined();
     }
-    return result;
-  });
-  await expect(f.install()).resolves.toBeUndefined();
-  await expect(f.capture.hooks.beforeWrite()).resolves.toBeUndefined();
-});
+  },
+);
 
-it("verifies restored XML when Windows exports defaults omitted in the backup", async () => {
+it.each([
+  { kind: "same SID", account: "WIN-TEST\\operator", sid: "S-1-5-21-1-2-3-1001" },
+  { kind: "different SID", account: "WIN-TEST\\other-private", sid: "S-1-5-21-1-2-3-1002" },
+  { kind: "unresolvable", account: "WIN-TEST\\unknown-private", sid: undefined },
+])("audits a qualified logon account with $kind", async ({ kind, account, sid }) => {
   const f = await fixture("win32");
-  const expectedXml = omitDefaults(f.task());
-  await f.capture.hooks.taskPrepared(expectedXml);
-  await expect(f.capture.hooks.taskWritten(expectedXml)).resolves.toBeUndefined();
+  const expectedSid = "S-1-5-21-1-2-3-1001";
+  const xml = buildScheduledTaskXml({
+    taskDescription: "OpenClaw Gateway",
+    taskUser: "operator",
+    launchPath: f.sourcePath,
+  })
+    .replace("<UserId>operator</UserId>", `<UserId>${account}</UserId>`)
+    .replace("<UserId>operator</UserId>", `<UserId>${expectedSid}</UserId>`);
+  f.setTask(xml);
+  const identity = {
+    code: 0,
+    stdout: `${expectedSid}\n`,
+    stderr: "",
+    termination: "exit" as const,
+  };
+  native.identity.mockResolvedValueOnce(identity).mockResolvedValue({
+    ...identity,
+    code: sid ? 0 : 1,
+    stdout: sid ? `${sid}\n` : "",
+    stderr: sid ? "" : `Cannot resolve ${account}`,
+  });
+  native.task.mockClear();
+
+  const result = await auditGatewayServiceConfig({
+    ...f,
+    env: { ...f.env, USERDOMAIN: "WORKGROUP" },
+    platform: "win32",
+  });
+
+  expect(result.definitionDriftError).toBeUndefined();
+  expect(result.definitionDrift ?? []).toEqual(
+    kind === "same SID"
+      ? []
+      : [
+          expect.objectContaining({
+            kind: "unknown-edit",
+            key: "Triggers.LogonTrigger.UserId",
+          }),
+        ],
+  );
+  expect(JSON.stringify(result)).not.toContain(account);
+  expect(f.task()).toBe(xml);
+  expect(native.task.mock.calls.every(([args]) => args[0] === "/Query")).toBe(true);
 });

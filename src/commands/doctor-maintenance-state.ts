@@ -1,15 +1,23 @@
 import path from "node:path";
 import { resolveStateDir } from "../config/paths.js";
+import { formatErrorMessage, toErrorObject } from "../infra/errors.js";
 import { resolveGatewayStateOwnerPath } from "../infra/gateway-state-owner.js";
 import { createSqliteReadOnlyWorkerScope } from "../infra/sqlite-readonly-worker.js";
-import { createUpdateDoctorDatabaseWriteCapture } from "../infra/update-doctor-result.js";
+import type { AgentDatabaseMigrationTarget } from "../infra/state-migrations.media-persistence-targets.js";
+import {
+  createUpdateDoctorDatabaseWriteCapture,
+  DoctorMaintenanceRefusalError,
+} from "../infra/update-doctor-result.js";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import {
   createOpenClawDatabaseMaintenanceScope,
+  getOpenClawDatabaseMaintenanceScope,
   type OpenClawDatabaseMaintenanceScope,
 } from "../state/openclaw-state-db-async-lifecycle.js";
 import { closeOpenClawStateDatabaseByPathAsync } from "../state/openclaw-state-db-cache.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { admitOpenClawMaintenanceLiveAuthorityReads } from "../state/openclaw-state-maintenance-context.js";
+import { assertDoctorAgentLeaseAdmission } from "./doctor-agent-lease-refusal.js";
 import { acquireDoctorGatewayMaintenanceOwner } from "./doctor-maintenance-foreground.js";
 import type { DoctorMaintenanceParams } from "./doctor-maintenance-types.js";
 import { sanitizeDoctorNote } from "./doctor/emit-notes.js";
@@ -27,10 +35,12 @@ export function createDoctorMaintenanceState(options: {
 }) {
   const { params, env, settle } = options;
   let resources: OpenClawDatabaseMaintenanceScope | undefined;
+  let resourcesParent: OpenClawDatabaseMaintenanceScope | undefined;
   let inspections: ReturnType<typeof createSqliteReadOnlyWorkerScope> | undefined;
   let owner: Awaited<ReturnType<typeof acquireDoctorGatewayMaintenanceOwner>> | undefined;
   let selectedEnv = env;
   let captureAdmitted = false;
+  let liveAuthorityReadsAdmitted = false;
   const capture = createUpdateDoctorDatabaseWriteCapture(params.databaseGenerations, {
     env,
     root: params.root ?? undefined,
@@ -38,24 +48,21 @@ export function createDoctorMaintenanceState(options: {
     assertCurrent: () => owner!.assertCurrent(options.assertCurrent),
     warn: options.warn,
   });
-  const closeResources = async () => {
+  const closeResources = async (agentRoot?: string | null) => {
+    const drainRoot =
+      agentRoot === null
+        ? undefined
+        : (agentRoot ?? (resourcesParent ? undefined : resolveStateDir(selectedEnv)));
     const failures: unknown[] = [];
-    const closeScope = async (
-      current: { close: () => Promise<void> } | undefined,
-      clear: () => void,
-    ) => {
-      if (!current) {
-        return;
-      }
+    const closeScope = async (close: () => Promise<void>, clear: () => void) => {
       try {
-        await current.close();
+        await close();
         clear();
       } catch (error) {
         // A disposer can fail after retiring only part of its owned batch. Retry
-        // that same sealed scope once so a transient close error cannot leave a
-        // cached database handle behind when the managed Gateway is restored.
+        // that same sealed scope once before restoring the managed Gateway.
         try {
-          await current.close();
+          await close();
           clear();
           failures.push(error);
         } catch (retryError) {
@@ -67,12 +74,48 @@ export function createDoctorMaintenanceState(options: {
         }
       }
     };
-    await closeScope(resources, () => {
-      resources = undefined;
-    });
-    await closeScope(inspections, () => {
-      inspections = undefined;
-    });
+    const currentResources = resources;
+    let resourcesClosed = currentResources === undefined;
+    if (currentResources) {
+      await closeScope(
+        () =>
+          currentResources.close(
+            drainRoot === undefined
+              ? undefined
+              : async () => {
+                  const { closeOpenClawAgentDatabasesAsync } =
+                    await import("../state/openclaw-agent-db-lifecycle.js");
+                  await closeOpenClawAgentDatabasesAsync(drainRoot);
+                },
+          ),
+        () => {
+          resourcesClosed = true;
+        },
+      );
+    }
+    if (inspections) {
+      const current = inspections;
+      await closeScope(
+        () => current.close(),
+        () => {
+          inspections = undefined;
+        },
+      );
+    }
+    await closeScope(
+      async () => {
+        // Auth readers drain after their inspection callers, separately from canonical handles.
+        const { closeAuthProfileReadPool } =
+          await import("../agents/auth-profiles/sqlite-read-pool.js");
+        closeAuthProfileReadPool({ kind: "root", rootPath: resolveStateDir(selectedEnv) });
+      },
+      () => {
+        if (resourcesClosed) {
+          resources = undefined;
+          resourcesParent = undefined;
+        }
+      },
+    );
     if (failures.length === 1) {
       throw failures[0];
     }
@@ -92,6 +135,7 @@ export function createDoctorMaintenanceState(options: {
     owner = acquired;
     try {
       acquired.assertCurrent(options.assertCurrent);
+      resourcesParent = getOpenClawDatabaseMaintenanceScope();
       resources = createOpenClawDatabaseMaintenanceScope({
         schemaMaintenance: true,
         assertDatabaseAccess: acquired.assertDatabaseAccess,
@@ -102,6 +146,11 @@ export function createDoctorMaintenanceState(options: {
           }, access);
         },
       });
+      if (liveAuthorityReadsAdmitted) {
+        resources.run(() =>
+          admitOpenClawMaintenanceLiveAuthorityReads(resolveOpenClawStateSqlitePath(selectedEnv)),
+        );
+      }
       inspections = createSqliteReadOnlyWorkerScope({
         signal: options.signal,
         deadlineOwnedByCaller: false,
@@ -111,9 +160,24 @@ export function createDoctorMaintenanceState(options: {
       owner = undefined;
       throw error;
     }
-    if (capture) {
+    if (capture && !captureAdmitted) {
       await settle(() => resources!.run(() => capture.admit()));
       captureAdmitted = true;
+    }
+  };
+  const assertOwnerCurrent = (databasePath?: string) => {
+    const assertCurrent = () => {
+      owner!.assertCurrent(options.assertCurrent);
+      if (databasePath !== undefined) {
+        owner!.assertDatabaseAccess(databasePath);
+      }
+    };
+    // Post-repair work runs outside the checks callback. Its policy reads must
+    // retain the repair scope's cached handles until that scope has drained.
+    if (resources) {
+      resources.run(assertCurrent);
+    } else {
+      owner!.run(assertCurrent);
     }
   };
   const state = {
@@ -140,7 +204,6 @@ export function createDoctorMaintenanceState(options: {
       const assertCurrent = relocatedMaintenanceOwner
         ? () => relocatedMaintenanceOwner.assertCurrent(options.assertCurrent)
         : options.assertCurrent;
-      assertCurrent?.();
       const acquired = await acquireDoctorGatewayMaintenanceOwner(
         path.resolve(resolveOpenClawStateSqlitePath(selectedEnv)),
         selectedEnv,
@@ -153,7 +216,18 @@ export function createDoctorMaintenanceState(options: {
       );
       await enterResources(acquired);
     },
-    async relocateLegacyRoot() {
+    async prepareRepair() {
+      const beforeStateMutation = params.beforeStateMutation;
+      if (beforeStateMutation) {
+        await resources!.run(() =>
+          beforeStateMutation({ env: selectedEnv, signal: options.signal }),
+        );
+        resources!.assertAdmission();
+      }
+      resources!.run(() =>
+        admitOpenClawMaintenanceLiveAuthorityReads(resolveOpenClawStateSqlitePath(selectedEnv)),
+      );
+      liveAuthorityReadsAdmitted = true;
       const { resolvePendingLegacyStateDirMigrationPaths, prepareLegacyStateDirMigration } =
         await import("../infra/state-migrations.state-dir.js");
       const pending = resolvePendingLegacyStateDirMigrationPaths({ env });
@@ -161,14 +235,11 @@ export function createDoctorMaintenanceState(options: {
       if (!pending || path.resolve(sourceDir) !== path.resolve(pending.source)) {
         return;
       }
-      const { closeOpenClawAgentDatabasesAsync } =
-        await import("../state/openclaw-agent-db-lifecycle.js");
       owner!.assertCurrent(options.assertCurrent);
       const sourceDatabase = resolveOpenClawStateSqlitePath(env);
-      // This runs before the long-lived Doctor callback: closing its own tracked
-      // callback would self-wait. Include CLI/bootstrap resources predating this scope.
-      await closeResources();
-      await closeOpenClawAgentDatabasesAsync(sourceDir);
+      // This runs before the long-lived Doctor callback. Include CLI/bootstrap
+      // resources predating this scope before moving the owned state root.
+      await closeResources(sourceDir);
       await closeOpenClawStateDatabaseByPathAsync(sourceDatabase);
       await settleCapture();
       const migration = owner!.run(() => {
@@ -188,13 +259,132 @@ export function createDoctorMaintenanceState(options: {
         await enterResources(owner!);
       }
       if (migration) {
-        const result = await resources!.run(() => migration.complete());
+        const result = migration.result;
         for (const change of [...result.changes, ...(result.notices ?? [])]) {
           params.runtime.log(sanitizeDoctorNote(change));
         }
         for (const warning of result.warnings) {
           options.warn(sanitizeDoctorNote(warning));
         }
+      }
+    },
+    async repairSqliteNoCow(paths: readonly string[]) {
+      if (paths.length === 0) {
+        return { changes: [], warnings: [] };
+      }
+      const { repairDoctorSqliteNoCow } = await import("./doctor-sqlite-nocow.js");
+      const stateDir = resolveStateDir(selectedEnv);
+      const databasePath = resolveOpenClawStateSqlitePath(selectedEnv);
+      assertOwnerCurrent();
+      await closeResources(stateDir);
+      try {
+        return await owner!.run(async () => {
+          // Agent admission writes through shared state; retain that owner after drainage.
+          await closeOpenClawStateDatabaseByPathAsync(databasePath);
+          await assertDoctorAgentLeaseAdmission(selectedEnv);
+          return repairDoctorSqliteNoCow({
+            paths,
+            stateDir,
+            assertCurrent: () => assertOwnerCurrent(databasePath),
+          });
+        });
+      } finally {
+        // Restoration and update receipts use a fresh scope for the new file identity.
+        await enterResources(owner!);
+      }
+    },
+    async enableSqliteReclamation(agents: readonly AgentDatabaseMigrationTarget[]) {
+      const { enableDoctorSqliteReclamation } = await import("./doctor-sqlite-reclamation.js");
+      const { closeOpenClawAgentDatabaseByPathAsync } =
+        await import("../state/openclaw-agent-db-lifecycle.js");
+      const databasePath = resolveOpenClawStateSqlitePath(selectedEnv);
+      options.signal.throwIfAborted();
+      assertOwnerCurrent();
+      await resources!.run(async () => {
+        for (const agent of agents) {
+          await closeOpenClawAgentDatabaseByPathAsync(agent.path, agent.agentId);
+        }
+      });
+      await closeResources(null);
+      let operationError: Error | undefined;
+      let result: { warnings: string[] } | undefined;
+      try {
+        result = await owner!.run(async () => {
+          await closeOpenClawStateDatabaseByPathAsync(databasePath);
+          await assertDoctorAgentLeaseAdmission(selectedEnv);
+          return enableDoctorSqliteReclamation({
+            env: selectedEnv,
+            agents,
+            signal: options.signal,
+            assertCurrent: () => assertOwnerCurrent(databasePath),
+            log: params.runtime.log,
+          });
+        });
+      } catch (error) {
+        operationError = toErrorObject(error, "SQLite reclamation failed.");
+      }
+      // Keep the original write-capture baseline until final maintenance release.
+      try {
+        await enterResources(owner!);
+      } catch (error) {
+        if (operationError !== undefined) {
+          throw new AggregateError(
+            [operationError, error],
+            "SQLite reclamation and maintenance scope restoration failed.",
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+      if (operationError !== undefined) {
+        throw operationError;
+      }
+      return result!;
+    },
+    async cleanupRetainedRuntimes(inspectService: boolean) {
+      const { captureRetainedNativeWorkerSource } =
+        await import("../infra/worker-native-lifecycle.js");
+      const { retireIdleOpenClawStateReadWorkers } =
+        await import("../state/openclaw-state-read-worker.js");
+      const { prepareRetainedUpdateRuntimeCleanup } = await import("./doctor-retained-runtime.js");
+      assertOwnerCurrent();
+      const cleanup = await state.run(() =>
+        prepareRetainedUpdateRuntimeCleanup(selectedEnv, { inspectService }),
+      );
+      const nativeSource = captureRetainedNativeWorkerSource();
+      // This phase runs after the tracked Doctor callback has settled.
+      let readersRetired: boolean;
+      let brokerRetired: boolean;
+      try {
+        await closeResources();
+        readersRetired = await retireIdleOpenClawStateReadWorkers(nativeSource);
+        brokerRetired = await nativeSource.retireIdleBroker();
+      } catch (cause) {
+        throw new DoctorMaintenanceRefusalError(
+          `Doctor inspection resource cleanup failed: ${formatErrorMessage(cause)}. Resolve this cleanup failure before restarting the Gateway or rerunning openclaw doctor --fix.`,
+          { kind: "data-at-risk", reason: "active-mutation" },
+          { cause },
+        );
+      }
+      try {
+        await owner!.run(() =>
+          cleanup(true, {
+            assertCurrent() {
+              assertOwnerCurrent();
+              owner!.assertDatabaseAccess(resolveOpenClawStateSqlitePath(selectedEnv));
+            },
+            assertResourcesSettled() {
+              // Worker threads share this PID and are invisible to the process census.
+              if (!readersRetired || !brokerRetired || nativeSource.hasActiveWorkers) {
+                throw new Error(
+                  `independent native work in this process (PID: ${process.pid}); let these holders finish, then rerun openclaw doctor --fix`,
+                );
+              }
+            },
+          }),
+        );
+      } finally {
+        await enterResources(owner!);
       }
     },
     async release() {

@@ -14,6 +14,7 @@ import { runExclusiveSessionLifecycleMutation } from "../../sessions/session-lif
 import type { UserModelAccountSelection } from "../model-account-authority.js";
 import { authorizeGatewaySessionCreation, resolveCreatorSandbox } from "../operator-role-policy.js";
 import { ADMIN_SCOPE } from "../operator-scopes.js";
+import { resolveOperatorSessionCreation } from "../session-creation-provenance.js";
 import { recordSessionStatusModelPatchOutcome } from "../session-model-patch-origin.js";
 import { resolvePluginSessionOwnershipError } from "../session-plugin-ownership.js";
 import { resolveRequestedSessionAgentId as resolveRequestedGlobalAgentId } from "../session-request-agent.js";
@@ -24,7 +25,7 @@ import {
   resolveGatewaySessionStoreTargetWithStore,
 } from "../session-utils.js";
 import { gatewayClientSessionCreator } from "./gateway-client-identity.js";
-import { resolveOperatorSessionCreation } from "./session-creation-provenance.js";
+import { createSessionModelCatalogWait } from "./session-model-catalog-wait.js";
 import * as sessionUnreadAck from "./session-unread-ack.js";
 import {
   prepareSessionPatchArchive,
@@ -68,6 +69,7 @@ type ArchiveTransition = Awaited<ReturnType<typeof prepareSessionPatchArchiveTra
 export async function executeSessionPatchMutations(params: {
   client: GatewayClient | null;
   context: GatewayRequestContext;
+  signal?: AbortSignal;
   diagnostics?: SessionPatchDiagnostics;
   operatorAuthority?: Promise<{ authority: AdmittedRunOperatorAuthority } | undefined>;
   patch: Omit<SessionsPatchParams, keyof PatchTargetIdentity>;
@@ -205,9 +207,6 @@ export async function executeSessionPatchMutations(params: {
       outcomes[index] = invalidSessionRequest(initialPlacementPatchError);
       continue;
     }
-    const lifecycleIdentities = Array.from(
-      new Set([key, canonicalKey, ...candidateKeys, initialEntry?.sessionId]),
-    );
     const preparedTarget: PreparedPatchTarget = {
       archiveActor,
       canonicalKey,
@@ -216,7 +215,7 @@ export async function executeSessionPatchMutations(params: {
       ...(initialEntry ? { initialEntry } : {}),
       initialStoreKeys: [...candidateKeys],
       key,
-      lifecycleIdentities,
+      lifecycleIdentities: [key, canonicalKey, ...candidateKeys, initialEntry?.sessionId],
       ...(requestedAgentId ? { requestedAgentId } : {}),
       storePath: resolved.storePath,
       targetAgentId: resolved.agentId,
@@ -247,8 +246,18 @@ export async function executeSessionPatchMutations(params: {
       ? await import("./sessions-patch-sandbox.runtime.js")
       : undefined;
 
+  const catalogWait = createSessionModelCatalogWait(
+    [
+      params.signal,
+      client?.connectionSignal,
+      operatorAuthority?.signal,
+      client?.internal?.operatorRunAuthority?.signal,
+      client?.internal?.operatorAccessAuthority?.signal,
+    ],
+    "The session was not changed",
+  );
   const catalogs = createSessionPatchCatalogPreparation(
-    (agentId) => params.context.loadGatewayModelCatalogSnapshot({ agentId }),
+    (agentId) => catalogWait.run(() => params.context.loadGatewayModelCatalogSnapshot({ agentId })),
     params.diagnostics,
   );
 
@@ -286,7 +295,9 @@ export async function executeSessionPatchMutations(params: {
           }),
       );
       timing?.mark("lifecycleAdmission");
-      await runExclusiveSessionLifecycleMutation({
+      const archived = params.patch.archived;
+      const operation = archived === undefined ? "patch" : archived ? "archive" : "restore";
+      await runExclusiveSessionLifecycleMutation(operation, {
         targets: activePrepared.map((target) => ({
           scope: target.storePath,
           identities: target.lifecycleIdentities,

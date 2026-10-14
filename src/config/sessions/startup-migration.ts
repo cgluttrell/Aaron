@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { formatCliCommand } from "../../cli/command-format.js";
-import { readDeferredPluginSessionImport } from "../../infra/deferred-plugin-session-sources.js";
+import {
+  readDeferredPluginSessionImport,
+  readStaleDeferredPluginSessionImport,
+} from "../../infra/deferred-plugin-session-sources.js";
+import { recordStartupMigrationWarnings } from "../../infra/state-migrations.messages.js";
 import { formatDoctorStateRepairFailure } from "../../infra/state-repair-message.js";
 import { readAgentDatabaseAdmissionRefusal } from "../../state/agent-database-admission.js";
 import {
@@ -25,7 +29,6 @@ import {
 import { AGENT_DATABASE_PREFLIGHT_CONCURRENCY } from "../../state/openclaw-database-preflight-agent-scheduler.js";
 import { runTasksWithConcurrency } from "../../utils/run-with-concurrency.js";
 import { cloneEnvWithPlatformSemantics } from "../config-env-vars.js";
-import { resolveStateDir } from "../paths.js";
 import type { OpenClawConfig } from "../types.openclaw.js";
 import { migrateLegacyMainSessionKeys } from "./legacy-main-session-migration.js";
 import {
@@ -45,7 +48,6 @@ import {
 import {
   resolveAllAgentSessionStoreTargetsSync,
   resolveConfiguredAgentDatabaseTargets,
-  resolveSessionStoreTargets,
 } from "./targets.js";
 
 export type SessionStartupMigrationLogger = Record<"info" | "warn", (message: string) => void>;
@@ -64,23 +66,8 @@ export function assertSessionStoreMigrationComplete(params: {
   ).filter(
     (target) => !target.agentId || !readAgentDatabaseAdmissionRefusal(target.agentId, { env }),
   );
-  const legacyRootStore = path.join(resolveStateDir(env), "sessions", "sessions.json");
-  const legacyTargets = fs.existsSync(legacyRootStore)
-    ? resolveSessionStoreTargets(params.cfg, { allAgents: true }, readOptions).map((target) => ({
-        agentId: target.agentId,
-        sqlitePath: resolveSqliteTargetFromSessionStorePath(target.storePath, {
-          agentId: target.agentId,
-          ...readOptions,
-        }).path,
-        storePath: legacyRootStore,
-      }))
-    : [];
-  const sources: readonly { agentId?: string; storePath: string; sqlitePath?: string }[] = [
-    ...(legacyTargets.length > 0 ? legacyTargets : [{ storePath: legacyRootStore }]),
-    ...targets,
-  ];
-  const sourcesByPath = new Map<string, Array<(typeof sources)[number]>>();
-  for (const target of sources) {
+  const sourcesByPath = new Map<string, typeof targets>();
+  for (const target of targets) {
     const sourcePath = path.resolve(target.storePath);
     sourcesByPath.set(sourcePath, [...(sourcesByPath.get(sourcePath) ?? []), target]);
   }
@@ -107,7 +94,7 @@ export function assertSessionStoreMigrationComplete(params: {
     });
   const legacyStore = legacySources.find(([storePath, candidates]) => {
     type SourceOwner = {
-      target: { agentId: string; storePath: string; sqlitePath?: string };
+      target: { agentId: string; storePath: string };
       destination: string;
       retained: boolean;
       imported: boolean;
@@ -117,16 +104,26 @@ export function assertSessionStoreMigrationComplete(params: {
       if (!target.agentId) {
         return true;
       }
-      const destination =
-        target.sqlitePath ??
-        resolveSqliteTargetFromSessionStorePath(target.storePath, {
-          agentId: target.agentId,
-          ...readOptions,
-        }).path;
+      const destination = resolveSqliteTargetFromSessionStorePath(target.storePath, {
+        agentId: target.agentId,
+        ...readOptions,
+      }).path;
       const deletion =
         classifyDeletion?.(storePath, target.agentId) ??
         classifyDeletion?.(destination, target.agentId);
-      const retained = deletion !== undefined && deletion !== "unavailable";
+      const staleImport = readStaleDeferredPluginSessionImport({
+        target: { ...target, agentId: target.agentId },
+        sqlitePath: destination,
+        env,
+      });
+      if (staleImport) {
+        recordStartupMigrationWarnings([
+          `Session import receipt belongs to another database; serving live SQLite at ${destination}. Run openclaw doctor --fix to recover retained history.`,
+        ]);
+      }
+      // A foreign receipt leaves recovery inputs protected, not a migration veto on this database.
+      const retained =
+        (deletion !== undefined && deletion !== "unavailable") || Boolean(staleImport);
       owners.set(`${target.agentId}\0${destination}`, {
         target: { ...target, agentId: target.agentId },
         destination,

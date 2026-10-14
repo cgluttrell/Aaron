@@ -164,7 +164,8 @@ export async function runNativeMaintenanceUpdate(
     packageUpdateNodeRunner: undefined,
     devTarget: undefined,
   });
-  command.finish.mockReset().mockImplementation(async ({ result }) => {
+  command.finish.mockReset().mockImplementation(async ({ result }, options) => {
+    await options?.beforeFinalization?.();
     if (result.status === "error") {
       throw new Error(`${result.reason}: ${result.steps.at(-1)?.stderrTail}`);
     }

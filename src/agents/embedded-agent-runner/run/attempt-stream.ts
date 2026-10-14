@@ -1,4 +1,4 @@
-import type { OpenAIResponsesCompactionRejection } from "@openclaw/ai/transports";
+import type { CompactionReplayRejection } from "@openclaw/ai/transports";
 import { resolveDiagnosticModelContentCapturePolicy } from "../../../infra/diagnostic-llm-content.js";
 import { DEFAULT_UNDICI_STREAM_TIMEOUT_MS } from "../../../infra/net/undici-global-dispatcher.js";
 import type { DiagnosticEmbeddedRunOwner } from "../../../logging/diagnostic-run-activity.js";
@@ -56,12 +56,12 @@ import { wrapStreamFnWithMessageTransform } from "./message-transform-stream-wra
 import { wrapStreamObjectSettlement } from "./stream-wrapper.js";
 
 type CompactionReplayStreamOptions = NonNullable<Parameters<StreamFn>[2]> & {
-  onCompactionRejected?: (checkpoint: OpenAIResponsesCompactionRejection) => void;
+  onCompactionRejected?: (checkpoint: CompactionReplayRejection) => void;
 };
 
 function wrapStreamFnWithCompactionReplayRepair(
   streamFn: StreamFn,
-  onRejected: (checkpoint: OpenAIResponsesCompactionRejection) => Promise<void>,
+  onRejected: (checkpoint: CompactionReplayRejection) => Promise<void>,
 ): StreamFn {
   return async (model, context, options) => {
     const trackRepair = captureAsyncWorkTracker();
@@ -117,6 +117,7 @@ export function installEmbeddedAttemptStreamGuards(
     state: { systemPromptText },
     transcriptPolicy,
     transport: {
+      compactionReplayEnabled,
       effectiveAgentTransport,
       effectivePromptCacheRetention,
       streamStrategy,
@@ -140,7 +141,7 @@ export function installEmbeddedAttemptStreamGuards(
   }
   const repairRejectedReplay = async (
     kind: "compaction" | "thinking",
-    checkpoint?: OpenAIResponsesCompactionRejection,
+    checkpoint?: CompactionReplayRejection,
   ): Promise<void> => {
     try {
       const repairParams = {
@@ -184,36 +185,33 @@ export function installEmbeddedAttemptStreamGuards(
       );
     }
   };
-  const cacheObservabilityEnabled = Boolean(cacheTrace) || log.isEnabled("debug");
-  const cacheObserver = cacheObservabilityEnabled
-    ? createPromptCacheRequestObserver(
-        {
-          sessionId: attempt.sessionId,
-          sessionKey: attempt.sessionKey,
-          promptCacheKey: attempt.promptCacheKey,
-          cacheRetention: effectivePromptCacheRetention,
-          streamStrategy,
-          transport: effectiveAgentTransport,
-        },
-        (observation, snapshot) => {
-          if (observation.broke) {
-            const changes =
-              observation.changes?.map((change) => `${change.code}(${change.detail})`).join(", ") ??
-              "no tracked cache input change";
-            log.warn(
-              `[prompt-cache] cache read dropped ${observation.previousCacheRead} -> ${observation.cacheRead} ` +
-                `runId=${attempt.runId} request=${observation.requestIndex} for ${snapshot.provider}/${snapshot.modelId} via ${streamStrategy}; ${changes}`,
-            );
-          }
-          cacheTrace?.recordStage("cache:result", { options: { ...observation } });
-        },
-        (request) => {
-          cacheTrace?.recordStage("cache:state", {
-            options: { ...request, previousCacheRead: request.previousCacheRead ?? undefined },
-          });
-        },
-      )
-    : undefined;
+  const cacheObserver = createPromptCacheRequestObserver(
+    {
+      sessionId: attempt.sessionId,
+      sessionKey: attempt.sessionKey,
+      promptCacheKey: attempt.promptCacheKey,
+      cacheRetention: effectivePromptCacheRetention,
+      streamStrategy,
+      transport: effectiveAgentTransport,
+    },
+    (observation, snapshot) => {
+      if (observation.broke) {
+        const changes =
+          observation.changes?.map((change) => `${change.code}(${change.detail})`).join(", ") ??
+          "no tracked cache input change";
+        log.warn(
+          `[prompt-cache] cache read dropped ${observation.previousCacheRead} -> ${observation.cacheRead} ` +
+            `runId=${attempt.runId} request=${observation.requestIndex} for ${snapshot.provider}/${snapshot.modelId} via ${streamStrategy}; ${changes}`,
+        );
+      }
+      cacheTrace?.recordStage("cache:result", { options: { ...observation } });
+    },
+    (request) => {
+      cacheTrace?.recordStage("cache:state", {
+        options: { ...request, previousCacheRead: request.previousCacheRead ?? undefined },
+      });
+    },
+  );
   if (cacheTrace) {
     cacheTrace.recordStage("session:loaded", {
       messages: session.messages,
@@ -279,11 +277,15 @@ export function installEmbeddedAttemptStreamGuards(
     );
   }
 
-  if (isOpenAIResponsesApi) {
+  // Responses and eligible Anthropic routes replay provider checkpoints; a rejected one must be
+  // stripped from its transcript owner or every later turn resends it.
+  if (isOpenAIResponsesApi || compactionReplayEnabled) {
     session.agent.streamFn = wrapStreamFnWithCompactionReplayRepair(
       session.agent.streamFn,
       (checkpoint) => repairRejectedReplay("compaction", checkpoint),
     );
+  }
+  if (isOpenAIResponsesApi) {
     session.agent.streamFn = wrapStreamFnWithMessageTransform(
       session.agent.streamFn,
       sanitizeOpenAIResponsesReplayForStream,
@@ -446,17 +448,15 @@ export function installEmbeddedAttemptStreamGuards(
     );
   }
   return {
-    onModelRequest: cacheObserver?.onModelRequest,
-    onModelUsage: cacheObserver
-      ? (usage: NormalizedUsage | undefined) => {
-          // Async-tool fragments also end messages. result() marks the terminal
-          // response before core commits its final fragment with normalized usage.
-          if (modelResponseTerminal) {
-            modelResponseTerminal = false;
-            cacheObserver.onModelUsage(usage);
-          }
-        }
-      : undefined,
-    getPromptCacheObservation: cacheObserver?.getObservation,
+    onModelRequest: cacheObserver.onModelRequest,
+    onModelUsage: (usage: NormalizedUsage | undefined) => {
+      // Async-tool fragments also end messages. result() marks the terminal
+      // response before core commits its final fragment with normalized usage.
+      if (modelResponseTerminal) {
+        modelResponseTerminal = false;
+        cacheObserver.onModelUsage(usage);
+      }
+    },
+    getPromptCacheObservation: cacheObserver.getObservation,
   };
 }

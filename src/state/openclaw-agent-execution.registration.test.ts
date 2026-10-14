@@ -1,3 +1,4 @@
+import "../test-utils/prepare-compiled-subprocesses.js";
 import { serialize } from "node:v8";
 import type { MessagePort } from "node:worker_threads";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -29,6 +30,7 @@ const edge = vi.hoisted(() => {
     agentId: "main",
     path: "/synthetic/agent.sqlite",
     db: { isOpen: true, isTransaction: false },
+    walMaintenance: { stop: async () => {} },
   };
   return {
     database,
@@ -114,10 +116,15 @@ vi.mock("./openclaw-agent-db-lifecycle.js", () => ({
   closeOpenClawAgentDatabaseByPath: edge.nativeClose,
   retainAgentDatabase: () => edge.releaseAgent,
 }));
-vi.mock("./openclaw-state-db.js", () => ({ openOpenClawStateDatabase: () => ({}) }));
+vi.mock("./openclaw-state-db.js", () => ({
+  openOpenClawStateDatabase: () => ({ db: { isOpen: true, isTransaction: false } }),
+}));
 vi.mock("./openclaw-state-db-cache.js", () => ({
   requireOpenClawStateDatabaseIdentity: () => ({ key: "file:state" }),
-  retainOpenClawStateDatabase: () => ({ release: edge.releaseShared }),
+  retainOpenClawStateDatabase: () => ({
+    release: edge.releaseShared,
+    releaseAsync: edge.releaseShared,
+  }),
 }));
 const input: AgentDatabaseExecutionOpen = {
   leaseId: "fixture",
@@ -174,6 +181,7 @@ function retireFailedReply(
         committed: undefined,
         settlement: undefined,
         waitForSettlement: edge.forbidden,
+        observeRequests: edge.forbidden,
         service: edge.forbidden,
         bindDatabaseAuthority: edge.forbidden,
         finish() {},
@@ -185,25 +193,29 @@ function retireFailedReply(
     reject,
     detach() {},
   };
-  receiveSqliteWorkerReply({ current: job, worker: { postMessage: edge.forbidden } }, reply, {
-    fail(error, currentError, openOutcome) {
-      if (!(error instanceof Error)) {
-        throw error;
-      }
-      settleFailedSqliteWorkerJobs({
-        current: job,
-        queued: [],
-        queuedError: new SqliteWorkerError("retired", "unavailable"),
-        error,
-        currentError,
-        openOutcome,
-        retire: () => retired.promise,
-        finish: settleSqliteWorkerJob,
-      });
+  receiveSqliteWorkerReply(
+    { current: job, actors: new Set(), worker: { postMessage: edge.forbidden } },
+    reply,
+    {
+      fail(error, currentError, openOutcome) {
+        if (!(error instanceof Error)) {
+          throw error;
+        }
+        settleFailedSqliteWorkerJobs({
+          current: job,
+          queued: [],
+          queuedError: new SqliteWorkerError("retired", "unavailable"),
+          error,
+          currentError,
+          openOutcome,
+          retire: () => retired.promise,
+          finish: settleSqliteWorkerJob,
+        });
+      },
+      finish: edge.forbidden,
+      dispatch: edge.forbidden,
     },
-    finish: edge.forbidden,
-    dispatch: edge.forbidden,
-  });
+  );
   return { retired, completion, reject, settleNative };
 }
 
@@ -266,7 +278,7 @@ it("settles eager native factory creation synchronously", async () => {
   });
   const backend = createSqliteWorkerBackend(input, { databasePath: input.databasePath });
   expect(backend).not.toBeInstanceOf(Promise);
-  expect(backend.close()).toBeUndefined();
+  await backend.close();
   expect(edge.database.db.isOpen).toBe(false);
   expect(edge.releaseAgent).toHaveBeenCalledOnce();
   expect(edge.releaseShared).toHaveBeenCalledOnce();

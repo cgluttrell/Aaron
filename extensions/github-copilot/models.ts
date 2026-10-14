@@ -58,6 +58,8 @@ export function resolveCopilotForwardCompatModel(
     input: staticOverride?.input ?? ["text", "image"],
     cost: staticOverride?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: staticOverride?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    // Only the unknown-model estimate is replaceable; curated static sizing stays authoritative.
+    ...(staticOverride?.contextWindow === undefined ? { contextWindowSource: "synthetic" } : {}),
     ...(staticOverride?.contextTokens !== undefined
       ? { contextTokens: staticOverride.contextTokens }
       : {}),
@@ -69,9 +71,6 @@ export function resolveCopilotForwardCompatModel(
   } as ProviderRuntimeModel);
 }
 
-// Subset of the Copilot /models response shape that we depend on. We only read
-// fields we need; everything else is preserved as `unknown` so upstream changes
-// don't break parsing.
 type CopilotApiModelEntry = {
   id?: string;
   name?: string;
@@ -85,7 +84,6 @@ type CopilotApiModelEntry = {
   };
   capabilities?: {
     type?: string;
-    family?: string;
     limits?: {
       max_context_window_tokens?: number;
       max_output_tokens?: number;
@@ -95,7 +93,6 @@ type CopilotApiModelEntry = {
       vision?: boolean;
       tool_calls?: boolean;
       streaming?: boolean;
-      structured_outputs?: boolean;
       reasoning_effort?: string[] | null;
     };
   };
@@ -152,8 +149,8 @@ function compareCopilotStarterCandidates(
     return categoryDelta;
   }
   const contextDelta =
-    (right.contextWindow ?? DEFAULT_CONTEXT_WINDOW) -
-    (left.contextWindow ?? DEFAULT_CONTEXT_WINDOW);
+    (right.contextWindow ?? Math.max(right.contextTokens ?? 0, DEFAULT_CONTEXT_WINDOW)) -
+    (left.contextWindow ?? Math.max(left.contextTokens ?? 0, DEFAULT_CONTEXT_WINDOW));
   if (contextDelta !== 0) {
     return contextDelta;
   }
@@ -196,21 +193,18 @@ function mergeCopilotCompat(
   base: ModelDefinitionConfig["compat"] | undefined,
   reasoningEfforts: string[] | null | undefined,
 ): ModelDefinitionConfig["compat"] | undefined {
-  const supportedReasoningEfforts = Array.isArray(reasoningEfforts)
-    ? [
-        ...new Set(
-          reasoningEfforts
-            .map((effort) => normalizeOptionalLowercaseString(effort))
-            .filter((effort): effort is string => Boolean(effort)),
-        ),
-      ]
-    : [];
   if (!Array.isArray(reasoningEfforts)) {
     return base;
   }
   return {
     ...base,
-    supportedReasoningEfforts,
+    supportedReasoningEfforts: [
+      ...new Set(
+        reasoningEfforts
+          .map((effort) => normalizeOptionalLowercaseString(effort))
+          .filter((effort): effort is string => Boolean(effort)),
+      ),
+    ],
   };
 }
 
@@ -240,8 +234,8 @@ function mapCopilotApiModelToDefinition(
   const supportsVision = supports?.vision === true;
   const input: CopilotCatalogModel["input"] = supportsVision ? ["text", "image"] : ["text"];
 
-  const contextWindow =
-    asPositiveSafeInteger(limits?.max_context_window_tokens) ?? DEFAULT_CONTEXT_WINDOW;
+  const nativeContextWindow = asPositiveSafeInteger(limits?.max_context_window_tokens);
+  // Catalogs retain provider facts; runtime construction supplies an estimate for omissions.
   const contextTokens = asPositiveSafeInteger(limits?.max_prompt_tokens);
   const maxTokens = asPositiveSafeInteger(limits?.max_output_tokens) ?? DEFAULT_MAX_TOKENS;
   const compat = mergeCopilotCompat(resolveCopilotModelCompat(id), supports?.reasoning_effort);
@@ -255,7 +249,7 @@ function mapCopilotApiModelToDefinition(
     reasoning,
     input,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow,
+    ...(nativeContextWindow !== undefined ? { contextWindow: nativeContextWindow } : {}),
     ...(contextTokens !== undefined ? { contextTokens } : {}),
     maxTokens,
     ...(thinkingLevelMap ? { thinkingLevelMap } : {}),
@@ -337,10 +331,7 @@ export async function fetchCopilotModelCatalog(
     for (const rawEntry of data) {
       const entry = asCopilotApiModelEntry(rawEntry);
       const def = mapCopilotApiModelToDefinition(entry);
-      if (!def) {
-        continue;
-      }
-      if (seen.has(def.id)) {
+      if (!def || seen.has(def.id)) {
         continue;
       }
       seen.add(def.id);

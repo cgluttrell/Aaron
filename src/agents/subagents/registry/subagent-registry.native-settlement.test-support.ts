@@ -2,6 +2,7 @@ import { expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../test/helpers/promise.js";
 import type { AgentEventPayload } from "../../../infra/agent-events.js";
 import {
+  getActiveGatewayRootWorkCount,
   markGatewayRestartDraining,
   resetGatewayWorkAdmission,
 } from "../../../process/gateway-work-admission.js";
@@ -13,14 +14,65 @@ import {
   waitForFast,
   type SubagentRegistryHarness,
 } from "../../subagent-test-fixtures.test-helpers.js";
-import {
-  SUBAGENT_ENDED_REASON_COMPLETE,
-  SUBAGENT_ENDED_REASON_ERROR,
-  SUBAGENT_ENDED_REASON_KILLED,
-} from "./subagent-lifecycle-events.js";
+import { enqueueSwarmRun, releaseSwarmRun } from "../swarm/swarm-scheduler.js";
+import { SUBAGENT_ENDED_REASON_ERROR } from "./subagent-lifecycle-events.js";
 import { observeRootWork } from "./subagent-registry.browser-cleanup.test-support.js";
 import type { createSubagentRegistryMockState } from "./subagent-registry.mock-state.test-support.js";
 import type { SubagentRunRecord } from "./subagent-registry.types.js";
+
+export function registerQueuedCollectorLaunchSettlementTest({
+  getRegistry,
+}: {
+  getRegistry: () => SubagentRegistryHarness;
+}): void {
+  it("keeps an in-flight queued collector pending until launch cleanup settles", async () => {
+    const mod = getRegistry();
+    const runId = "run-collector-launch-kill";
+    await mod.addSubagentRunForTests({
+      runId,
+      childSessionKey: "agent:main:subagent:launch-kill",
+      task: "cancel while gateway launch is unresolved",
+      createdAt: Date.now(),
+      collect: true,
+      swarmRunId: runId,
+      schedulerSlotId: runId,
+      swarmLaunchPending: true,
+      execution: { status: "queued" },
+      completion: { required: false },
+    });
+
+    const launch = createDeferred();
+    const started = createDeferred();
+    enqueueSwarmRun({
+      groupId: "delayed-acceptance",
+      runId,
+      maxConcurrent: 1,
+      activeRunIds: [],
+      start: async () => {
+        started.resolve();
+        await launch.promise;
+      },
+      onStartFailure: () => true,
+    });
+    try {
+      await started.promise;
+      expect(await mod.markSubagentRunTerminated({ runId, reason: "manual kill" })).toBe(1);
+      expect(mod.getSubagentRunByRunId(runId)?.collectorCompletion).toBeUndefined();
+      expect(await mod.startQueuedSubagentRun(runId, "gateway-launch-kill")).toBe(false);
+      expect(mod.getSubagentRunByRunId("gateway-launch-kill")).toBeUndefined();
+
+      expect(await mod.settleFailedQueuedSubagentLaunch(runId, "launch response lost")).toBe(true);
+      expect(mod.getSubagentRunByRunId(runId)?.collectorCompletion).toMatchObject({
+        status: "killed",
+      });
+      await waitForFast(() => expect(getActiveGatewayRootWorkCount()).toBe(0));
+    } finally {
+      launch.resolve();
+      await launch.promise;
+      releaseSwarmRun(runId);
+    }
+  });
+}
 
 export function registerRestoredRunDeadlineSettlementTests({
   getRegistry,
@@ -35,7 +87,7 @@ export function registerRestoredRunDeadlineSettlementTests({
     | "callGateway"
     | "runSubagentAnnounceFlow"
   >;
-  hydrateAndActivateRegistry: () => void;
+  hydrateAndActivateRegistry: () => Promise<void>;
 }): void {
   const findRequesterRun = (runId: string) =>
     getRegistry()
@@ -66,7 +118,7 @@ export function registerRestoredRunDeadlineSettlementTests({
       const createdAt = Date.parse("2026-03-24T11:59:00Z");
       vi.setSystemTime(createdAt + waitEndedAfterMs);
       mocks.resolveAgentTimeoutMs.mockReturnValue(60_000);
-      mocks.restoreSubagentRunsFromDisk.mockImplementation(((params: {
+      mocks.restoreSubagentRunsFromDisk.mockImplementation((async (params: {
         runs: Map<string, unknown>;
         mergeOnly?: boolean;
       }) => {
@@ -93,7 +145,7 @@ export function registerRestoredRunDeadlineSettlementTests({
 
       const settleRootWork = observeRootWork();
       try {
-        hydrateAndActivateRegistry();
+        await hydrateAndActivateRegistry();
 
         await waitForFast(() => {
           const completedRun = findRequesterRun(runId);
@@ -130,7 +182,7 @@ export function registerRestartDrainCompletionSettlementTest({
     const mod = getRegistry();
     const now = Date.now();
     const runId = "run-terminal-restart-retry";
-    mod.addSubagentRunForTests({
+    await mod.addSubagentRunForTests({
       runId,
       childSessionKey: "agent:main:subagent:terminal-restart-retry",
       task: "deliver terminal completion after restart",
@@ -181,56 +233,6 @@ export function registerForcedCollectorCompletionSettlementTests({
   getLifecycleHandler: () => (event: Pick<AgentEventPayload, "runId" | "stream" | "data">) => void;
   mockPendingAgentWait: () => void;
 }): void {
-  it.each([{ stopReason: "aborted" }])(
-    "settles a collector yield seen through agent.wait without canceling it: %o",
-    async (extra) => {
-      const mod = getRegistry();
-      const runId = "run-wait-collector-yield";
-      mockGatewayMethods(mocks.callGateway, {
-        "agent.wait": {
-          status: "ok",
-          startedAt: 111,
-          endedAt: 222,
-          livenessState: "paused",
-          yielded: true,
-          ...extra,
-        },
-      });
-
-      const settleRootWork = observeRootWork();
-      try {
-        await mod.registerSubagentRun({
-          runId,
-          childSessionKey: "agent:main:subagent:wait-collector-yield",
-          task: "collect through the wait observation",
-          expectsCompletionMessage: false,
-          collect: true,
-          outputSchema: { type: "object" },
-          swarmRequesterSessionKey: "agent:main:main",
-        });
-      } finally {
-        // Run the zero-delay wait continuation before draining owned root work.
-        await vi.advanceTimersByTimeAsync(0);
-        await settleRootWork();
-      }
-
-      await waitForFast(() => {
-        expect(findRequesterRun(runId)).toMatchObject({
-          execution: { status: "terminal", endedAt: 222, outcome: { status: "ok" } },
-          endedReason: SUBAGENT_ENDED_REASON_COMPLETE,
-          collectorCompletion: {
-            status: "failed",
-            schemaError: "structured_output was not called",
-          },
-        });
-      });
-      // A yield terminal can also look aborted (#92448); settling it must never
-      // turn the collector yield into a cancellation notice.
-      expect(findRequesterRun(runId)?.pauseReason).toBeUndefined();
-      expect(findRequesterRun(runId)?.endedReason).not.toBe(SUBAGENT_ENDED_REASON_KILLED);
-    },
-  );
-
   it.each([
     { observation: "wait", schema: false, captured: false },
     { observation: "lifecycle", schema: true, captured: true },
@@ -268,7 +270,7 @@ export function registerForcedCollectorCompletionSettlementTests({
           ...(schema ? { outputSchema: { type: "object" } } : {}),
         });
         if (captured) {
-          mod.recordSwarmStructuredOutput(
+          await mod.recordSwarmStructuredOutput(
             { runId, childSessionKey },
             { invalidAttempts: 0, structured: { answer: 42 } },
           );

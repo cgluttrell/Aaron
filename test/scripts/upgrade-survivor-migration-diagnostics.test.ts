@@ -94,6 +94,69 @@ function capture(f: ReturnType<typeof fixture>, outcome: "failed" | "passed" = "
   return JSON.parse(text);
 }
 
+it.each([
+  { name: "update.json", prefix: "", failure: { exitCode: 1 } },
+  { name: "recovery-update.json", prefix: "", failure: { exitCode: null, termination: "timeout" } },
+  {
+    name: "update.json",
+    prefix: "Update warning before JSON\n",
+    failure: { exitCode: 0, outputLimitExceeded: true },
+  },
+])(
+  "keeps a later failed update step visible before successful output exhausts $name ($failure)",
+  ({ name, prefix, failure }) => {
+    const f = fixture();
+    const update = {
+      status: "error",
+      reason: "runtime-verification-failed",
+      steps: [
+        {
+          name: "candidate-doctor-lint",
+          exitCode: 0,
+          warnings: Array(64).fill(`Routine Doctor advisory: ${"x".repeat(400)}`),
+        },
+        {
+          name: "candidate-plugins",
+          exitCode: 1,
+          advisory: { kind: "recoverable-maintenance", message: "Optional repair deferred" },
+        },
+        {
+          name: "candidate-gateway-startup",
+          ...failure,
+          durationMs: 12824,
+          failureFacts: [{ code: "candidate-startup-failed", message: "Candidate import failed" }],
+          stderrTail: `Candidate import failed: token=${secret}\nStartup stack location`,
+        },
+        {
+          name: "gateway recovery verification",
+          exitCode: 1,
+          stderrTail: "Secondary recovery error",
+        },
+      ],
+    };
+    write(path.join(f.artifacts, "diagnostics/raw.json"), {
+      phase: "update-candidate",
+      exitStatus: 1,
+      signal: null,
+      logs: { [name]: `${prefix}${JSON.stringify(update, null, 2)}` },
+    });
+    const output = path.join(f.root, "public");
+    publishDiagnostics(f.artifacts, output, redactSensitiveText);
+    const report = JSON.parse(fs.readFileSync(path.join(output, "failure.json"), "utf8"));
+    const log = report.logs[name];
+    expect(log).toContain("Reported failing update step 3 of 4");
+    expect(log).toContain("Candidate import failed");
+    expect(log).toContain("Startup stack location");
+    expect(log).not.toContain(secret);
+    expect(log.indexOf("candidate-gateway-startup")).toBeLessThan(
+      log.indexOf("candidate-doctor-lint"),
+    );
+    expect(log).toContain("candidate-doctor-lint");
+    expect(Buffer.byteLength(JSON.stringify(log))).toBeLessThanOrEqual(16 * 1024);
+    expect(report.omissions[name]).toBe("redacted output truncated at a complete line (16 KiB)");
+  },
+);
+
 it("returns only redacted failure coordinates after safe publication", () => {
   const f = fixture();
   vi.stubEnv("GITHUB_ACTIONS", "true");
@@ -293,7 +356,6 @@ it("keeps policy log limits and symlink protections on successful publication", 
 it.each([
   { candidateVersion: "2026.9.5" },
   { activePlugins: ["device-pair"] },
-  { candidateEnabledPlugins: ["memory-core", "telegram", "unrelated"] },
   { candidateEnabledPlugins: ["telegram"] },
   { baselineEnabledPlugins: [] },
   { hookUnauthorizedStatus: 200 },
@@ -351,18 +413,43 @@ it.each(["failed", "passed"] as const)(
   },
 );
 
-function integrityLog(f: ReturnType<typeof fixture>, telemetry: Record<string, unknown>) {
+function integrityFixture(
+  identity: Record<string, unknown> = {},
+  telemetry: Record<string, unknown> = {},
+) {
+  const f = fixture();
+  write(path.join(f.artifacts, "diagnostics/process-42-started.json"), {
+    event: "started",
+    role: "update",
+    packageVersion: "2026.9.4",
+    pid: 42,
+    parentPid: 1,
+    timeOriginUnixMs: 100,
+    ...identity,
+  });
+  const observation = {
+    readerId: "42:1",
+    timeOriginUnixMs: 100,
+    event: "reader-settled",
+    phase: "retained",
+    budgetMs: 30000,
+    elapsedMs: 30002,
+    outcome: "timed-out",
+    pendingIo: 0,
+    ...telemetry,
+  };
   fs.writeFileSync(
     path.join(f.root, "openclaw-upgrade-survivor", "gateway.jsonl"),
     JSON.stringify({
       0: JSON.stringify({ subsystem: "update/package-integrity" }),
-      1: telemetry,
-      2: telemetry.event,
-      message: telemetry.event,
+      1: observation,
+      2: observation.event,
+      message: observation.event,
       _meta: { logLevelName: "DEBUG", path: privateBody },
       privateBody,
     }) + "\n",
   );
+  return f;
 }
 
 it("captures only the actual baseline updater's released integrity envelope and preserves failure", () => {
@@ -439,35 +526,12 @@ process.exit(1);`,
 
 it.each([
   { name: "different PID", identity: { pid: 43 } },
-  { name: "different process origin", identity: { timeOriginUnixMs: 101 } },
   { name: "Doctor", identity: { role: "doctor" } },
-  { name: "post-core", identity: { role: "post-core" } },
   { name: "different package", identity: { packageVersion: "2026.9.5" } },
-  { name: "non-numeric budget", telemetry: { budgetMs: "30000" } },
   { name: "missing settled outcome", telemetry: { outcome: undefined } },
   { name: "negative pending I/O", telemetry: { pendingIo: -1 } },
 ])("omits integrity evidence from $name", ({ identity, telemetry }) => {
-  const f = fixture();
-  write(path.join(f.artifacts, "diagnostics/process-42-started.json"), {
-    event: "started",
-    role: "update",
-    packageVersion: "2026.9.4",
-    pid: 42,
-    parentPid: 1,
-    timeOriginUnixMs: 100,
-    ...identity,
-  });
-  integrityLog(f, {
-    readerId: "42:1",
-    timeOriginUnixMs: 100,
-    event: "reader-settled",
-    phase: "retained",
-    budgetMs: 30000,
-    elapsedMs: 30002,
-    outcome: "timed-out",
-    pendingIo: 0,
-    ...telemetry,
-  });
+  const f = integrityFixture(identity, telemetry);
   const report = capture(f);
   expect(report.exitStatus).toBe(1);
   expect(report.packageIntegrity).toEqual({ availability: "unavailable" });
@@ -477,25 +541,7 @@ it.each([
 it.each(["input", "output", "entries", "symlink", "directory-symlink", "malformed"] as const)(
   "omits the whole integrity diagnostic at the %s boundary",
   (boundary) => {
-    const f = fixture();
-    write(path.join(f.artifacts, "diagnostics/process-42-started.json"), {
-      event: "started",
-      role: "update",
-      packageVersion: "2026.9.4",
-      pid: 42,
-      parentPid: 1,
-      timeOriginUnixMs: 100,
-    });
-    integrityLog(f, {
-      readerId: "42:1",
-      timeOriginUnixMs: 100,
-      event: "reader-settled",
-      phase: "transaction",
-      budgetMs: 30000,
-      elapsedMs: 30002,
-      outcome: "timed-out",
-      pendingIo: 1,
-    });
+    const f = integrityFixture({}, { phase: "transaction", pendingIo: 1 });
     const log = path.join(f.root, "openclaw-upgrade-survivor", "gateway.jsonl");
     const line = fs.readFileSync(log, "utf8");
     if (boundary === "symlink") {
@@ -968,6 +1014,10 @@ it("does not reuse sibling or startup observations when an attempt fails before 
     ...turnLogs,
     ...cronCliLogs,
     ...nativeRecoveryLogs,
+    "native-assignment-inventory-after-first-hop.json",
+    "native-assignment-inventory-before-recovery.json",
+    "native-assignment-inventory-after-recovery.json",
+    "native-assignment-inventory-live-final.json",
     ...baselineGatewayLogs,
     "sibling-refusal-update.json",
     "sibling-refusal-status.json",

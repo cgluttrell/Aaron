@@ -17,7 +17,7 @@ const parser = createNativeTypeScriptParser();
 afterAll(() => parser.close());
 
 function parseFixture(content: string, fileName = "source.ts") {
-  return [content, fileName, parser.parseSourceFile(fileName, content)] as const;
+  return [fileName, parser.parseSourceFile(fileName, content)] as const;
 }
 
 const guardScriptPath = fileURLToPath(
@@ -80,9 +80,10 @@ describe("export name collision guard", () => {
     expect([...result.exportedNames]).toEqual(["importedValue", "remoteValue"]);
   });
 
-  it("exempts only the exact handoff loader substitution", () => {
+  it("exempts only the exact sealed recovery loader substitutions", () => {
     const name = "loadFreeBsdProcessIdentityNative";
     const paths = [
+      "src/infra/package-update-activation-native-loader.ts",
       "src/infra/update-managed-service-handoff-native-loader.ts",
       "src/shared/freebsd-process-identity-native.ts",
     ];

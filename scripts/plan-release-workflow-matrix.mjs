@@ -3,6 +3,7 @@ import { isDirectRunUrl } from "./lib/direct-run.mjs";
 import { parseLaneSelection } from "./lib/docker-e2e-plan.mts";
 import { allReleasePathLanes } from "./lib/docker-e2e-scenarios.mts";
 import { createPluginPrereleaseTestPlan } from "./lib/plugin-prerelease-test-plan.mts";
+import { parseUpgradeSurvivorBaselineSpecs } from "./lib/upgrade-survivor-policy.mjs";
 import { planTargetedDockerLaneGroups } from "./plan-targeted-docker-lane-groups.mjs";
 
 export const RELEASE_PACKAGE_ACCEPTANCE_LANES =
@@ -18,13 +19,15 @@ const DOCKER_E2E_CHUNKS = [
   {
     chunk_id: "package-update-openai",
     label: "package/update OpenAI",
-    timeout_minutes: 60,
+    // Four weight-3 npm lanes serialize at limit 5: 105m + tool/setup/upload margin.
+    timeout_minutes: 135,
     profiles: "beta minimum stable full",
   },
   {
     chunk_id: "package-update-restart-auth",
     label: "package/update restart auth",
-    timeout_minutes: 55,
+    // The admitted lane has a 62m budget; retain setup and upload headroom.
+    timeout_minutes: 75,
     profiles: "beta minimum stable full",
   },
   {
@@ -451,7 +454,6 @@ export function createReleaseSourceSelection(options = {}) {
   const releaseProfile = options.releaseProfile ?? "stable";
   const includeOpenWebUI = isEnabled(options.includeOpenWebUI);
   const prepareOnly = isEnabled(options.prepareOnly);
-  const consumers = [];
   const codexSuites = [];
   const docker = [];
   const baseline = options.upgradeSurvivorBaseline ?? "";
@@ -471,8 +473,9 @@ export function createReleaseSourceSelection(options = {}) {
         profile: "release-path",
         releaseProfile,
         chunk: row.chunk_id,
+        ...(row.docker_lanes ? { lanes: parseLaneSelection(row.docker_lanes) } : {}),
         includeOpenWebUI,
-        baselines,
+        baselines: row.published_upgrade_survivor_baselines ?? baselines,
         scenarios,
       });
     }
@@ -506,14 +509,11 @@ export function createReleaseSourceSelection(options = {}) {
       if (row.suite_id.startsWith("live-codex-harness")) {
         codexSuites.push(row.suite_id);
       }
-      if (row.suite_id.startsWith("live-gateway-") || row.suite_id.startsWith("live-cli-")) {
-        consumers.push("live-cli-backend");
-      }
     }
   }
   return {
     docker,
-    consumers: [...new Set(consumers)],
+    consumers: [],
     codexSuites,
     fsSafeNative: prepareOnly || docker.length > 0,
     preparationLanes,
@@ -563,11 +563,38 @@ export function createReleaseWorkflowMatrixPlan(options = {}) {
         options.liveSuiteFilter === entry.suite_id ||
         options.liveSuiteFilter === entry.suite_group),
   );
+  const baselines = parseUpgradeSurvivorBaselineSpecs(options.upgradeSurvivorBaselines);
+  // Keep the npm-weighted host envelope intact: baseline upgrades get separate
+  // runners instead of raising the resource limits on one migration runner.
+  const dockerChunks = DOCKER_E2E_CHUNKS.flatMap((entry) => {
+    if (entry.chunk_id !== "package-update-migrations" || baselines.length < 2) {
+      return [entry];
+    }
+    const shards = [
+      Object.assign({}, entry, {
+        label: "package/update channel switching",
+        shard_id: `${entry.chunk_id}-channel-switch`,
+        docker_lanes: "update-channel-switch",
+        published_upgrade_survivor_baselines: "",
+      }),
+    ];
+    for (const [index, baseline] of baselines.entries()) {
+      shards.push(
+        Object.assign({}, entry, {
+          label: `package/update migration ${baseline}`,
+          shard_id: `${entry.chunk_id}-baseline-${index + 1}`,
+          docker_lanes: "published-upgrade-survivor",
+          published_upgrade_survivor_baselines: baseline,
+        }),
+      );
+    }
+    return shards;
+  });
 
   return {
     liveDocker: { count: liveDocker.length, matrix: { include: liveDocker } },
     dockerE2e: planProfileMatrix(
-      DOCKER_E2E_CHUNKS,
+      dockerChunks,
       releaseProfile,
       dockerE2eEnabled,
       "release-path Docker E2E chunks disabled by input selection",
@@ -637,6 +664,7 @@ if (isDirectRunUrl(process.argv[1], import.meta.url)) {
     liveModelsOnly: process.env.LIVE_MODELS_ONLY,
     prepareOnly: process.env.PREPARE_ONLY,
     releaseProfile: process.env.RELEASE_TEST_PROFILE || undefined,
+    upgradeSurvivorBaselines: process.env.PUBLISHED_UPGRADE_SURVIVOR_BASELINES,
   });
 
   writeOutputs(plan);

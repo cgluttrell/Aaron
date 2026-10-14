@@ -1,9 +1,11 @@
-// Bundles MCP metadata exposed by plugins for package output.
 import path from "node:path";
 import { isStringRecord } from "@openclaw/normalization-core/record-coerce";
 import { normalizeLowercaseStringOrEmpty } from "@openclaw/normalization-core/string-coerce";
 import { resolveMcpTransportConfig } from "../agents/mcp-transport-config.js";
-import { resolveOpenClawMcpTransportAlias } from "../config/mcp-config-normalize.js";
+import {
+  resolveConfiguredMcpTransport,
+  resolveOpenClawMcpTransportAlias,
+} from "../config/mcp-config-normalize.js";
 import { applyMergePatch } from "../config/merge-patch.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isPathInside } from "../infra/path-guards.js";
@@ -12,15 +14,13 @@ import {
   extractBundleServerMap,
   loadEnabledBundleConfig,
   readBundleJsonObject,
-  resolveBundleJsonOpenFailure,
 } from "./bundle-config-shared.js";
 import {
   AGENT_BUNDLE_MANIFEST_RELATIVE_PATH,
   CLAUDE_BUNDLE_MANIFEST_RELATIVE_PATH,
   CODEX_BUNDLE_MANIFEST_RELATIVE_PATH,
   CURSOR_BUNDLE_MANIFEST_RELATIVE_PATH,
-  mergeBundlePathLists,
-  normalizeBundlePathList,
+  resolveBundleComponentPaths,
 } from "./bundle-manifest.js";
 import { encodePluginInstallDirName } from "./install-paths.js";
 import { resolveActivePluginInstallRoots } from "./install-root-context.js";
@@ -85,11 +85,7 @@ function resolveBundleMcpConfigPaths(params: {
   if (params.bundleFormat === "agent") {
     return pluginCacheExistsSync(path.join(params.rootDir, "mcp.json")) ? ["mcp.json"] : [];
   }
-  const declared = normalizeBundlePathList(params.raw.mcpServers);
-  const defaults = pluginCacheExistsSync(path.join(params.rootDir, ".mcp.json"))
-    ? [".mcp.json"]
-    : [];
-  return mergeBundlePathLists(defaults, declared);
+  return resolveBundleComponentPaths(params.raw.mcpServers, params.rootDir, [".mcp.json"]);
 }
 
 export function extractMcpServerMap(raw: unknown): Record<string, BundleMcpServerConfig> {
@@ -101,13 +97,18 @@ function normalizeImportedMcpServers(servers: Record<string, BundleMcpServerConf
     Object.entries(servers).map(([name, server]) => {
       const type = normalizeLowercaseStringOrEmpty(server.type);
       const importedTransport = type === "stdio" ? "stdio" : resolveOpenClawMcpTransportAlias(type);
-      const configuredTransport = normalizeLowercaseStringOrEmpty(server.transport) || undefined;
       if (!importedTransport) {
         // Keep unknown types for CLI validation without admitting them as implicit SSE.
-        return [name, type ? { ...server, transport: configuredTransport ?? type } : server];
+        return [
+          name,
+          type ? { ...server, transport: resolveConfiguredMcpTransport(server) ?? type } : server,
+        ];
       }
       const { type: _type, ...canonical } = server;
-      return [name, { ...canonical, transport: configuredTransport ?? importedTransport }];
+      return [
+        name,
+        { ...canonical, transport: resolveConfiguredMcpTransport(server) ?? importedTransport },
+      ];
     }),
   );
 }
@@ -374,12 +375,7 @@ function loadBundleFileBackedMcpConfig(params: {
   const result = readBundleJsonObject({
     rootDir,
     relativePath: params.relativePath,
-    onOpenFailure: (failure) =>
-      resolveBundleJsonOpenFailure({
-        failure,
-        relativePath: params.relativePath,
-        allowMissing: params.bundleFormat !== "agent",
-      }),
+    allowMissing: params.bundleFormat !== "agent",
   });
   if (!result.ok) {
     return {
@@ -458,12 +454,7 @@ function loadBundleMcpConfig(params: {
   const manifestLoaded = readBundleJsonObject({
     rootDir: params.rootDir,
     relativePath: manifestRelativePath,
-    onOpenFailure: (failure) =>
-      resolveBundleJsonOpenFailure({
-        failure,
-        relativePath: manifestRelativePath,
-        allowMissing: params.bundleFormat === "claude",
-      }),
+    allowMissing: params.bundleFormat === "claude",
   });
   if (!manifestLoaded.ok) {
     return {
@@ -575,7 +566,6 @@ export function loadEnabledBundleMcpConfig(params: {
             }),
           )
         : undefined,
-    createDiagnostic: (pluginId, message) => ({ pluginId, message }),
   });
   return {
     config: { mcpServers: loaded.config.mcpServers },

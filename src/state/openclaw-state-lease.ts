@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { isSqliteLockError } from "../infra/sqlite-error-diagnostics.js";
 import { createSqliteLifecycleAggregateError } from "../infra/sqlite-lifecycle-errors.js";
+import { scheduleAbsoluteDeadline } from "../utils/absolute-deadline.js";
 import {
   getOpenClawDatabaseMaintenanceScope,
   type OpenClawDatabaseMaintenanceScope,
@@ -35,7 +36,6 @@ import { registerProcessExitLeaseCleanup } from "./openclaw-state-lease-process-
 import {
   prepareLeaseDatabase,
   resolveLeaseDatabasePath,
-  acquireLease,
   renewOpenClawStateLease as renew,
   verifyOpenClawStateLeaseOwnership as verifyLeaseOwnership,
   releaseOpenClawStateLease as release,
@@ -43,7 +43,10 @@ import {
   type OpenClawStateLeaseOwnerIdentity as LeaseIdentity,
 } from "./openclaw-state-lease-storage.js";
 import { createOpenClawStateLeaseWorkerOwner } from "./openclaw-state-lease-worker-owner.js";
-import { createOpenClawStateLeaseWorkerStorage } from "./openclaw-state-lease-worker-storage.js";
+import {
+  acquireLease,
+  createOpenClawStateLeaseWorkerStorage,
+} from "./openclaw-state-lease-worker-storage.js";
 import type { OpenClawStateWorkerContext } from "./openclaw-state-worker-context.types.js";
 
 export type {
@@ -134,7 +137,7 @@ async function runStateLeaseOwnerInScope<T>(
     ? AbortSignal.any([validated.signal, leaseLost.signal])
     : leaseLost.signal;
   const heartbeatMs = Math.max(250, Math.min(30_000, Math.floor(validated.leaseMs / 3)));
-  let expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  let cancelExpiry: (() => void) | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
   let runTimerRenewal: ReturnType<typeof AsyncLocalStorage.snapshot> | undefined;
   const abortLost = (cause?: unknown) => {
@@ -334,14 +337,13 @@ async function runStateLeaseOwnerInScope<T>(
       });
     });
     const scheduleExpiry = () => {
-      if (expiryTimer) {
-        clearTimeout(expiryTimer);
-      }
-      expiryTimer = setTimeout(
+      cancelExpiry?.();
+      cancelExpiry = scheduleAbsoluteDeadline(
+        confirmedExpiresAt ?? Date.now(),
         () => abortLost(),
-        Math.max(1, (confirmedExpiresAt ?? Date.now()) - Date.now()),
+        undefined,
+        { unref: true },
       );
-      expiryTimer.unref?.();
     };
     const renewAndSchedule = () => {
       confirmedExpiresAt = renew({
@@ -546,6 +548,25 @@ async function runStateLeaseOwnerInScope<T>(
           signal: operationSignal,
           renew: renewOperation,
           assertOwned: assertOperationOwned,
+          ...(workerHeartbeat
+            ? {
+                assertOwnedAsync: async () => {
+                  assertActive();
+                  const nativeHeartbeat = workerHeartbeat;
+                  if (!nativeHeartbeat) {
+                    abortLost();
+                    throw leaseLost.signal.reason;
+                  }
+                  const expiresAt = await nativeHeartbeat.verify();
+                  assertActive();
+                  nativeHeartbeat.assertRunning();
+                  if (expiresAt <= Date.now()) {
+                    abortLost();
+                    assertActive();
+                  }
+                },
+              }
+            : {}),
           assertOwnedInTransaction: assertOperationOwned,
         };
         workerOperations = createOpenClawStateLeaseWorkerOwner({
@@ -615,9 +636,9 @@ async function runStateLeaseOwnerInScope<T>(
     validated.signal?.removeEventListener("abort", stopWorker);
     operationSignal.removeEventListener("abort", stopTimer);
     clearInterval(heartbeat);
-    clearTimeout(expiryTimer);
+    cancelExpiry?.();
     heartbeat = undefined;
-    expiryTimer = undefined;
+    cancelExpiry = undefined;
     runTimerRenewal = undefined;
   });
 }

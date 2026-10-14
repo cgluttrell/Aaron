@@ -1,4 +1,3 @@
-// Memory Core plugin module implements the concrete memory index manager.
 import { formatErrorMessage, toErrorObject } from "openclaw/plugin-sdk/error-runtime";
 import {
   createSubsystemLogger,
@@ -20,12 +19,12 @@ import {
 import { normalizeAgentId } from "openclaw/plugin-sdk/routing";
 import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
 import { withOpenClawAgentDatabaseWrite } from "openclaw/plugin-sdk/sqlite-runtime";
-import { runInMemoryBackgroundContext } from "./background-context.js";
 import type { MemoryCoreAcquireLocalService } from "./embedding-local-service.js";
 import type { EmbeddingProvider } from "./embeddings.js";
 import { getMemoryManagerLifecycle } from "./lifecycle.js";
 import { MemoryIndexDatabase } from "./manager-database-context.js";
 import { memoryDatabaseTableExists } from "./manager-db-kernel.js";
+import { isMemoryEmbeddingOperationError } from "./manager-embedding-errors.js";
 import {
   resolveEffectiveMemorySearchSettings,
   resolveMemoryEmbeddingProviderRequirement,
@@ -33,10 +32,7 @@ import {
   type MemoryEmbeddingProviderRequirement,
 } from "./manager-provider-lifecycle.js";
 import { getLocalEmbeddingRuntimeFacts } from "./manager-provider-runtime-facts.js";
-import {
-  createPendingMemoryProviderLifecycle,
-  type MemoryProviderLifecycleState,
-} from "./manager-provider-state.js";
+import type { MemoryProviderLifecycleState } from "./manager-provider-state.js";
 import {
   MemoryManagerRegistry,
   type MemoryManagerProviderFactory,
@@ -59,6 +55,7 @@ import {
   hasTargetedSessionSyncParams,
 } from "./manager-sync-control.js";
 import { resolvePersistedMemoryVectorIndexState } from "./manager-vector-rebuild-state.js";
+import type { MemoryCoreRuntimeHost } from "./runtime-host.js";
 
 const log = createSubsystemLogger("memory");
 
@@ -81,6 +78,13 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
   protected readonly cacheKey: string;
   protected readonly purpose: MemoryIndexManagerPurpose;
   protected override readonly acquireLocalService?: MemoryCoreAcquireLocalService;
+  private readonly backgroundRunner?: MemoryCoreRuntimeHost["runInBackgroundContext"];
+  protected readonly runInBackgroundContext = <T>(run: () => T): T => {
+    if (!this.backgroundRunner) {
+      throw new Error("Memory background work requires a plugin lifecycle owner");
+    }
+    return this.backgroundRunner(run);
+  };
   protected override readonly memoryFiles?: MemoryWorkspaceFiles;
   protected readonly cfg: OpenClawConfig;
   protected readonly agentId: string;
@@ -88,7 +92,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
   protected readonly settings: ResolvedMemorySearchConfig;
   protected readonly providerRequirement: MemoryEmbeddingProviderRequirement;
   private closePromise: Promise<void> | null = null;
-  private closeTeardownComplete = false;
+  private publishedDatabaseReleased = false;
   protected providerUnavailableReason?: string;
   protected override providerLifecycle: MemoryProviderLifecycleState;
   protected batch: MemoryEmbeddingBatchConfig;
@@ -110,6 +114,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
     purpose?: MemoryIndexManagerPurpose;
     inspectSources?: boolean;
     acquireLocalService?: MemoryCoreAcquireLocalService;
+    runInBackgroundContext?: MemoryCoreRuntimeHost["runInBackgroundContext"];
     maintenanceSource?: MemoryIndexManager;
   }): Promise<MemoryIndexManager | null> {
     const source = params.maintenanceSource;
@@ -165,6 +170,8 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
                     providerRequirement,
                     purpose,
                     acquireLocalService: params.acquireLocalService,
+                    runInBackgroundContext:
+                      source?.backgroundRunner ?? params.runInBackgroundContext,
                     maintenanceSource: source,
                     databaseOptions,
                   });
@@ -200,8 +207,12 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
                 throw error;
               }
             },
-            reuse: ({ closing, closed, db, memoryFiles: files }) =>
-              !closing && !closed && db.isOpen && files === memoryFiles,
+            reuse: ({ closing, closed, db, memoryFiles: files, backgroundRunner }) =>
+              !closing &&
+              !closed &&
+              db.isOpen &&
+              files === memoryFiles &&
+              backgroundRunner === (source?.backgroundRunner ?? params.runInBackgroundContext),
           };
         },
       },
@@ -219,6 +230,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
     providerRequirement: MemoryEmbeddingProviderRequirement;
     purpose: MemoryIndexManagerPurpose;
     acquireLocalService?: MemoryCoreAcquireLocalService;
+    runInBackgroundContext?: MemoryCoreRuntimeHost["runInBackgroundContext"];
     maintenanceSource?: MemoryIndexManager;
     databaseOptions: Parameters<typeof withOpenClawAgentDatabaseWrite>[0] & { path: string };
   }) {
@@ -229,6 +241,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
     const dbPath = params.databaseOptions.path;
     this.cacheKey = params.cacheKey;
     this.acquireLocalService = params.acquireLocalService;
+    this.backgroundRunner = params.runInBackgroundContext;
     this.purpose = params.purpose;
     this.cfg = params.cfg;
     this.agentId = params.agentId;
@@ -239,7 +252,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
       store: { ...effectiveSettings.store, databasePath: dbPath },
     };
     this.providerRequirement = params.providerRequirement;
-    this.providerLifecycle = createPendingMemoryProviderLifecycle(this.settings.provider);
+    this.providerLifecycle = { mode: "pending", requestedProvider: this.settings.provider };
     for (const memorySource of effectiveSettings.sources) {
       this.sources.add(memorySource);
     }
@@ -307,11 +320,15 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
       }
       this.batch = this.resolveBatchConfig();
       if (!transient) {
-        runInMemoryBackgroundContext(() => {
+        this.runInBackgroundContext(() => {
           this.ensureWatcher();
           this.ensureSessionListener();
           this.ensureIntervalSync();
-          this.ensureSessionStartupCatchup();
+          void this.runInBackgroundContext(() => this.ensureSessionStartupCatchup()).catch(
+            (err: unknown) => {
+              log.warn("memory session startup catch-up failed: " + String(err));
+            },
+          );
         });
       }
     } catch (err) {
@@ -346,7 +363,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
       runMemorySearchMaintenance({
         reason: params.reason,
         takeDirtyGeneration: () => this.takeSearchMaintenanceRequest(),
-        restoreDirtyGeneration: (generation) => this.restoreReindexRetryState(generation),
+        restoreDirtyGeneration: (generation) => this.adoptReindexRetryState(generation),
         acquireManager: () =>
           MemoryIndexManager.get({
             cfg: this.cfg,
@@ -481,7 +498,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
         const canDegrade =
           this.providerRequirement.mode === "optional" &&
           (options?.allowEmbeddingBootstrapFallback || hadBootstrapFailure) &&
-          this.shouldFallbackOnError(err);
+          isMemoryEmbeddingOperationError(err);
         if (!canDegrade) {
           throw err;
         }
@@ -507,7 +524,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
     this.syncing = this.syncOutcomes.track(run, true).finally(() => {
       this.syncing = null;
     });
-    return this.syncing ?? Promise.resolve();
+    return this.syncing;
   }
 
   status(): MemoryProviderStatus {
@@ -619,6 +636,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
         lastProvider: this.batchFailure.lastProvider,
       },
       custom: {
+        watcher: this.memoryWatcherHealth,
         llamaCppRuntime: getLocalEmbeddingRuntimeFacts(this.provider),
         searchMode: providerInfo.searchMode,
         providerState: this.providerLifecycle,
@@ -636,7 +654,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
       return;
     }
     const closeOperation = this.withPublishedDatabase(() =>
-      this.closeTeardownComplete ? this.retryFailedClose() : this.closeOnce(),
+      this.publishedDatabaseReleased ? this.retryFailedClose() : this.closeOnce(),
     );
     this.closePromise = closeOperation;
     try {
@@ -651,9 +669,27 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
   }
 
   private async retryFailedClose(): Promise<void> {
+    const errors: unknown[] = [];
+    // A retained observer failure must not strand independently owned resources.
+    await this.closeWatchResources().catch((error: unknown) => errors.push(error));
     const retirementErrors = await this.drainPendingProviderRetirements();
     if (this.providersPendingRetirement.size > 0) {
-      throw toErrorObject(retirementErrors.at(-1), "Embedding provider retirement failed");
+      errors.push(toErrorObject(retirementErrors.at(-1), "Embedding provider retirement failed"));
+    }
+    if (!this.publishedDatabaseReleased) {
+      try {
+        await this.publishedDatabase.closePublicationWorker();
+        this.publishedDatabase.release();
+        this.publishedDatabaseReleased = true;
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+    if (errors.length > 1) {
+      throw new AggregateError(errors, "Memory manager cleanup failed");
     }
   }
 
@@ -664,7 +700,6 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
     this.closed = true;
     const pendingProviderInit = this.providerInitPromise;
     const pendingFallbackInit = this.fallbackProviderInitPromise;
-    await this.closeWatchResources();
     const reportPendingWorkError = (err: unknown) => {
       log.warn(`memory close: pending manager work failed: ${formatErrorMessage(err)}`);
     };
@@ -672,13 +707,7 @@ export class MemoryIndexManager extends MemorySearchOrchestration implements Mem
     await pendingFallbackInit?.catch(reportPendingWorkError);
     // Initialization may attach sync work; observe its promise only after it settles.
     await this.syncing?.catch(reportPendingWorkError);
-    try {
-      await this.retryFailedClose();
-    } finally {
-      await this.publishedDatabase.closePublicationWorker();
-      this.publishedDatabase.release();
-      this.closeTeardownComplete = true;
-    }
+    await this.retryFailedClose();
   }
 }
 

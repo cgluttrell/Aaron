@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { safeParseJsonRecord } from "@openclaw/normalization-core/json-coercion";
 import { hasErrnoCode } from "../../infra/errors.js";
 import {
   createUpdateDoctorProcessCustody,
@@ -67,19 +67,15 @@ export async function inspectUpdateDoctorChildSupport(
     );
   }
   assertCurrent();
-  let contract: unknown;
-  try {
-    contract = JSON.parse(result.stdout);
-  } catch {
-    // A broken check is not evidence of an older, supported CLI contract.
-  }
+  // A broken check is not evidence of an older, supported CLI contract.
+  const contract = safeParseJsonRecord(result.stdout);
   if (
     result.code !== 0 ||
     result.termination !== "exit" ||
     result.cleanup !== "normal" ||
     result.outputLimitExceeded ||
     result.outputErrorStream ||
-    !isRecord(contract) ||
+    !contract ||
     !parseOpenClawSchemaVersions(contract)
   ) {
     throw new UpdateCommandRecoveryPendingError("Target Doctor capability could not be inspected.");

@@ -273,6 +273,131 @@ describe("openai completions DSML", () => {
     expect(JSON.stringify(events)).not.toContain("DSML");
   });
 
+  it.each(["tool_calls", "calls", " calls"])(
+    "recovers streamed DSML %s parameter tool calls",
+    async (kind) => {
+      const model = createDeepSeekCompletionsModel();
+      const output = createAssistantOutput(model);
+      const events: CapturedStreamEvent[] = [];
+
+      const marker = kind.startsWith(" ") ? "｜｜DSML｜｜ " : "｜｜DSML｜｜";
+      const wrapper = kind.trim();
+      const content = `<${marker}${wrapper}><${marker}invoke name="session_status"><${marker}parameter name="sessionKey" string="true">current</${marker}parameter></${marker}invoke></${marker}${wrapper}>`;
+      await processCompletionsStream(
+        streamChunks([
+          ...Array.from(content, (char) => makeCompletionsChunk({ content: char })),
+          makeCompletionsChunk({}, "stop"),
+        ]),
+        output,
+        model,
+        { push: (event) => events.push(event as CapturedStreamEvent) },
+      );
+
+      expect(output.stopReason).toBe("toolUse");
+      expect(output.content).toEqual([
+        {
+          type: "toolCall",
+          id: expect.stringMatching(/^call_[0-9a-f]{24}$/),
+          name: "session_status",
+          arguments: { sessionKey: "current" },
+        },
+      ]);
+      expect(JSON.stringify(events)).not.toContain("DSML");
+    },
+  );
+
+  it("hides reported calls markup with slashless closing tags without executing it", async () => {
+    const model = createDeepSeekCompletionsModel();
+    const output = createAssistantOutput(model);
+    const events: CapturedStreamEvent[] = [];
+    const content =
+      'before <｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="write">' +
+      '<｜｜DSML｜｜ parameter name="path" string="true">/tmp/unexecuted' +
+      "<｜｜DSML｜｜ parameter><｜｜DSML｜｜ invoke><｜｜DSML｜｜ calls>";
+
+    await processCompletionsStream(
+      streamChunks([
+        ...Array.from(content, (char) => makeCompletionsChunk({ content: char })),
+        makeCompletionsChunk({}, "stop"),
+      ]),
+      output,
+      model,
+      { push: (event) => events.push(event as CapturedStreamEvent) },
+    );
+
+    expect(output.content).toEqual([{ type: "text", text: "before " }]);
+    expect(output.stopReason).toBe("stop");
+    expect(JSON.stringify(events)).not.toContain("DSML");
+  });
+
+  it.each(["calls", "tool_calls"])(
+    "hides DSML %s in direct mode without recovering tools",
+    async (kind) => {
+      const model = createDeepSeekCompletionsModel();
+      const output = createAssistantOutput(model);
+      const events: CapturedStreamEvent[] = [];
+      const content =
+        `before <｜｜DSML｜｜ ${kind}><｜｜DSML｜｜ invoke name="write">` +
+        '<｜｜DSML｜｜ parameter name="path" string="true">/tmp/unexecuted</｜｜DSML｜｜ parameter>' +
+        `</｜｜DSML｜｜ invoke></｜｜DSML｜｜ ${kind}> after`;
+
+      await processCompletionsStream(
+        streamChunks([
+          ...Array.from(content, (char) => makeCompletionsChunk({ content: char })),
+          makeCompletionsChunk({}, "stop"),
+        ]),
+        output,
+        model,
+        { push: (event) => events.push(event as CapturedStreamEvent) },
+        { mode: "direct", beforeContentBlock() {}, provisionalCommentaryTags: new Map() },
+      );
+
+      expect(output.content).toEqual([{ type: "text", text: "before  after" }]);
+      expect(output.stopReason).toBe("stop");
+      expect(JSON.stringify(events)).not.toContain("DSML");
+    },
+  );
+
+  it.each([
+    { name: "__proto__", value: "scalar value", duplicate: true },
+    { name: "constructor", value: "scalar value", duplicate: true },
+    { name: "text", value: "scalar value", duplicate: true },
+    { name: "text", value: "", duplicate: false },
+    { name: "text", value: "", duplicate: true },
+    { name: "text", value: " \t ", duplicate: false },
+  ])(
+    "preserves DSML parameter $name as an own scalar argument ($value, duplicate: $duplicate)",
+    async ({ name, value, duplicate }) => {
+      const model = createDeepSeekCompletionsModel();
+      const output = createAssistantOutput(model);
+      const content =
+        '<|DSML|tool_calls><|DSML|invoke name="echo">' +
+        (duplicate
+          ? `<|DSML|parameter name="${name}" string="true">first value</|DSML|parameter>`
+          : "") +
+        `<|DSML|parameter name="${name}" string="true">${value}</|DSML|parameter>` +
+        "</|DSML|invoke></|DSML|tool_calls>";
+
+      await processCompletionsStream(
+        streamChunks([makeCompletionsChunk({ content }, "stop")]),
+        output,
+        model,
+        { push() {} },
+      );
+
+      expect(output.stopReason).toBe("toolUse");
+      expect(output.content).toHaveLength(1);
+      const call = output.content.find((block) => block.type === "toolCall");
+      expect(call).toMatchObject({ type: "toolCall", name: "echo" });
+      expect(call?.arguments).toStrictEqual({ [name]: value });
+      expect(Object.getOwnPropertyDescriptor(call?.arguments, name)).toMatchObject({
+        value,
+        enumerable: true,
+      });
+      expect(Object.getPrototypeOf(call?.arguments)).toBe(Object.prototype);
+    },
+  );
+
   it("rejects an oversized DeepSeek DSML block when the crossing chunk contains its close", async () => {
     const model = createDeepSeekCompletionsModel();
     const output = createAssistantOutput(model);

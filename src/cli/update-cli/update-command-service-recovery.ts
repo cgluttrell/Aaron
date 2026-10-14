@@ -1,4 +1,3 @@
-import { Writable } from "node:stream";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { theme } from "../../../packages/terminal-core/src/theme.js";
 import { resolveStateDir } from "../../config/paths.js";
@@ -19,6 +18,7 @@ import {
 import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import { hasCommandProcessCleanupError } from "../../process/exec-result.js";
 import { defaultRuntime } from "../../runtime.js";
+import { createNullWriter } from "../../shared/null-writer.js";
 import { resolveOpenClawStateSqlitePath } from "../../state/openclaw-state-db.paths.js";
 import { formatCliCommand } from "../command-format.js";
 import {
@@ -56,11 +56,7 @@ import {
   resolveUpdatedGatewayRestartPort,
 } from "./update-command-service-plan.js";
 
-const QUIET_SERVICE_STDOUT = new Writable({
-  write(_chunk, _encoding, callback) {
-    callback();
-  },
-});
+const QUIET_SERVICE_STDOUT = createNullWriter();
 
 export async function recoverLaunchAgentAndRecheckGatewayHealth(params: {
   onGatewayStartAttempted?: () => void;
@@ -169,7 +165,7 @@ export function formatPostUpdateGatewayRecoveryInstructions(
   const beforeVersion = normalizeOptionalString(result.before?.version);
   if (isPackageManagerUpdateMode(result.mode) && beforeVersion) {
     lines.push(
-      `Rollback: reinstall OpenClaw ${beforeVersion} with the same package manager, then rerun \`${formatCliCommand("openclaw gateway install --force")}\`.`,
+      `Rollback: reinstall OpenClaw ${beforeVersion} with the same package manager, then rerun \`${installCommand}\`.`,
     );
   }
   return lines;
@@ -195,12 +191,13 @@ export function refuseUnsettledDoctorRecovery(
   return false;
 }
 
-export async function admitMigratedGatewayRecovery(
+export async function admitInstalledGatewayRecovery(
   params: Pick<
     FinishUpdateParams,
     | "root"
     | "opts"
     | "shouldRestart"
+    | "coreAlreadyCurrent"
     | "preManagedServiceStop"
     | "packageTransaction"
     | "originalManagedServiceRuntime"
@@ -219,15 +216,20 @@ export async function admitMigratedGatewayRecovery(
   }
   const settlement = result.steps.findLast((step) => step.name === "doctor process settlement");
   const databaseRollback = result.steps.findLast((step) => step.name === "database rollback");
-  const doctor = result.steps.findLast((step) => step.command === "openclaw doctor");
-  const doctorInterrupted = doctor?.termination !== undefined && doctor.termination !== "exit";
+  // Current-core maintenance has no package rollback, but still owns its Doctor park.
+  const currentCore =
+    params.coreAlreadyCurrent === true &&
+    !params.packageTransaction &&
+    result.status === "error" &&
+    settlement !== undefined;
   if (
-    result.reason !== "state-migrated-no-rollback" ||
+    (!currentCore && result.reason !== "state-migrated-no-rollback") ||
+    (params.coreAlreadyCurrent && result.recovery?.serviceRestartSafe === false) ||
     params.originalManagedServiceRuntime ||
     !params.shouldRestart ||
     !params.preManagedServiceStop?.stopped ||
     databaseRollback?.exitCode === 0 ||
-    (!settlement && (!databaseRollback || doctorInterrupted)) ||
+    (!settlement && !databaseRollback) ||
     (result.recovery?.serviceRestartSafe === false &&
       result.recovery.reason === "source-rollback-failed")
   ) {

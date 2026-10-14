@@ -1,4 +1,3 @@
-// `openclaw plugins update` command implementation for tracked npm plugins and hook packs.
 import { isDeepStrictEqual } from "node:util";
 import type { PluginsRefreshResult } from "../../packages/gateway-protocol/src/schema/plugins.js";
 import { theme } from "../../packages/terminal-core/src/theme.js";
@@ -41,6 +40,7 @@ import {
 import { loadInstalledPluginIndex } from "../plugins/installed-plugin-index.js";
 import { createInstalledPluginOwnershipResolver } from "../plugins/installed-plugin-package-ownership.js";
 import { configReferencesNpmInstallPath } from "../plugins/installs.js";
+import { VERSION_BOUND_RUNTIME_PLUGIN_IDS } from "../plugins/official-runtime-plugins.js";
 import { createPluginCache, withPluginCache } from "../plugins/plugin-cache.js";
 import {
   withPluginLifecycleLease,
@@ -51,6 +51,7 @@ import {
   pluginPackageUpdateMayMutateConfig,
   reconcilePluginPackageUpdateConfig,
 } from "../plugins/plugin-package-update.js";
+import { resolveOfficialPluginCohortNpmSpecs } from "../plugins/plugin-version-drift.js";
 import { refreshPluginRegistryAfterConfigMutation } from "../plugins/registry-refresh.js";
 import {
   isPluginInstallRecordUpdateSource,
@@ -63,6 +64,7 @@ import { VERSION } from "../version.js";
 import { formatCliCommand } from "./command-format.js";
 import { resolveInstallPolicyWarningAcknowledgementCliOptions } from "./install-policy-warning-acknowledgement.js";
 import { resolvePluginCapabilityConsentCliOptions } from "./plugin-capability-consent.js";
+import { createPluginInstallLogger } from "./plugins-command-helpers.js";
 import { resolvePluginLifecycleGateway } from "./plugins-lifecycle-client.js";
 import { logPluginUpdateOutcomes } from "./plugins-update-outcomes.js";
 import {
@@ -135,15 +137,6 @@ function shouldPreserveEmptyPlugins(params: {
   );
 }
 
-function projectUpdaterResultOntoSourceConfig(params: {
-  runtimeBase: OpenClawConfig;
-  sourceBase: OpenClawConfig;
-  updatedConfig: OpenClawConfig;
-}): OpenClawConfig {
-  const updatePatch = createMergePatch(params.runtimeBase, params.updatedConfig);
-  return applyMergePatch(params.sourceBase, updatePatch) as OpenClawConfig;
-}
-
 export type RunPluginUpdateCommandParams = {
   ids: string[];
   opts: {
@@ -177,9 +170,11 @@ export async function runPluginUpdateCommand(params: RunPluginUpdateCommandParam
     await gateway("plugins.list", {});
   }
   let changed = false;
+  let activationDeferred = false;
   const update = withPluginLifecycleLease({}, (lease) =>
-    runPluginUpdateCommandUnlocked(params, lease, () => {
+    runPluginUpdateCommandUnlocked(params, lease, (deferred) => {
       changed = true;
+      activationDeferred ||= deferred;
     }),
   );
   let updateFailure: { error: unknown } | undefined;
@@ -188,7 +183,7 @@ export async function runPluginUpdateCommand(params: RunPluginUpdateCommandParam
   });
   // The runtime owner takes the same lease. Old callbacks retain their captured
   // package graph while this explicit application waits for ownership.
-  if (changed) {
+  if (changed && !activationDeferred) {
     if (gateway) {
       try {
         const result = await gateway<PluginsRefreshResult>("plugins.refresh", {});
@@ -228,7 +223,7 @@ export async function runPluginUpdateCommand(params: RunPluginUpdateCommandParam
 async function runPluginUpdateCommandUnlocked(
   params: RunPluginUpdateCommandParams,
   lease?: PluginLifecycleLeaseContext,
-  onMetadataChanged?: () => void,
+  onMetadataChanged?: (activationDeferred: boolean) => void,
 ): Promise<0 | 1> {
   const assertOwned = lease?.assertOwned.bind(lease);
   if (!params.opts.dryRun) {
@@ -263,8 +258,7 @@ async function runPluginUpdateCommandUnlocked(
   // mutation-start snapshot so concurrent config changes cannot be resurrected.
   const cfg = mutationSnapshot?.snapshot.runtimeConfig ?? getRuntimeConfig();
   const sourceCfg = mutationSnapshot?.snapshot.sourceConfig ?? cfg;
-  const persistedPluginInstallRecords = await loadInstalledPluginIndexInstallRecords();
-  const pluginInstallRecords = persistedPluginInstallRecords;
+  const pluginInstallRecords = await loadInstalledPluginIndexInstallRecords();
   const cfgWithPluginInstallRecords = withPluginInstallRecords(cfg, pluginInstallRecords);
   const sourceCfgWithPluginInstallRecords = withPluginInstallRecords(
     sourceCfg,
@@ -301,10 +295,7 @@ async function runPluginUpdateCommandUnlocked(
     configChannel: configuredUpdateChannel,
     currentVersion: VERSION,
   });
-  const logger = {
-    info: (msg: string) => defaultRuntime.log(msg),
-    warn: (msg: string) => defaultRuntime.log(msg.includes("╭─") ? msg : theme.warn(msg)),
-  };
+  const logger = createPluginInstallLogger();
   if (params.opts.dangerouslyForceUnsafeInstall) {
     defaultRuntime.log(theme.warn(DEPRECATED_DANGEROUS_FORCE_UNSAFE_UPDATE_WARNING));
   }
@@ -477,6 +468,12 @@ async function runPluginUpdateCommandUnlocked(
                 officialPluginUpdateChannel,
                 syncOfficialPluginInstalls: params.opts.all ? true : undefined,
                 coreVersion: VERSION,
+                versionBoundPluginIds: VERSION_BOUND_RUNTIME_PLUGIN_IDS,
+                npmInstallSpecOverrides: resolveOfficialPluginCohortNpmSpecs({
+                  gatewayVersion: VERSION,
+                  installRecords: pluginInstallRecords,
+                  config: cfgWithPluginInstallRecords,
+                }),
                 ...installPolicyWarningAcknowledgement,
                 ...resolvePluginCapabilityConsentCliOptions({
                   acceptCapabilities: params.opts.acceptCapabilities,
@@ -545,7 +542,7 @@ async function runPluginUpdateCommandUnlocked(
           installOwners: packageUpdateIds,
         });
         if (
-          !isDeepStrictEqual(currentInstallRecords, persistedPluginInstallRecords) ||
+          !isDeepStrictEqual(currentInstallRecords, pluginInstallRecords) ||
           !currentSnapshot.ok ||
           !isDeepStrictEqual([...currentSnapshot.value], [...packageUpdateSnapshot])
         ) {
@@ -560,11 +557,10 @@ async function runPluginUpdateCommandUnlocked(
       const nextPluginInstallRecords = pluginResult.config.plugins?.installs ?? {};
       const shouldPersistPluginInstallIndex =
         pluginResult.changed || Object.keys(pluginInstallRecords).length > 0;
-      const sourceShapedUpdateConfig = projectUpdaterResultOntoSourceConfig({
-        runtimeBase: cfgWithPluginInstallRecords,
-        sourceBase: sourceCfgWithPluginInstallRecords,
-        updatedConfig: hookResult.config,
-      });
+      const sourceShapedUpdateConfig = applyMergePatch(
+        sourceCfgWithPluginInstallRecords,
+        createMergePatch(cfgWithPluginInstallRecords, hookResult.config),
+      ) as OpenClawConfig;
       // Plugin install records live in the persisted index. Preserve an authored
       // empty plugins section so include ownership does not become a false mutation.
       let nextConfig = withoutPluginInstallRecords(sourceShapedUpdateConfig, {
@@ -617,7 +613,7 @@ async function runPluginUpdateCommandUnlocked(
             isDeepStrictEqual(nextConfig, sourceSnapshot?.snapshot.sourceConfig ?? sourceCfg)
           ) {
             await commitPluginInstallRecordsOnly({
-              previousInstallRecords: persistedPluginInstallRecords,
+              previousInstallRecords: pluginInstallRecords,
               nextInstallRecords: nextPluginInstallRecords,
               nextConfig,
               verifyConfigFresh: async () => {
@@ -629,7 +625,7 @@ async function runPluginUpdateCommandUnlocked(
             });
           } else {
             await commitPluginInstallRecordsWithConfig({
-              previousInstallRecords: persistedPluginInstallRecords,
+              previousInstallRecords: pluginInstallRecords,
               nextInstallRecords: nextPluginInstallRecords,
               nextConfig,
               baseHash: sourceSnapshot?.snapshot.hash,
@@ -646,7 +642,10 @@ async function runPluginUpdateCommandUnlocked(
       };
       await (migration ? migration.publish(nextConfig, commit) : commit());
       packageUpdatePersisted = true;
-      onMetadataChanged?.();
+      onMetadataChanged?.(Boolean(migration?.activationWarning));
+      if (migration?.activationWarning) {
+        logger.warn(migration.activationWarning);
+      }
       await settlePluginInstallTransactions(deferredInstallTransactions, "commit").catch(() =>
         logger.warn("Plugin update committed, but cleanup failed. Run openclaw plugins doctor."),
       );

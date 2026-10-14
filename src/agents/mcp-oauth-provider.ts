@@ -205,6 +205,7 @@ export async function createMcpOAuthClientProvider(params: {
       // only an explicit login may start registration with another issuer.
       if (!canReuseStoredTokens(store)) {
         assertAuthorizationRedirectAllowed();
+        return undefined;
       }
       const clientInformation = store.clientInformation;
       // Re-register an unused client when the callback changes. Saved tokens remain

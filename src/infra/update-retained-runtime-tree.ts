@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { collectPluginSafetyInspectedFiles } from "../plugins/plugin-safety-inspected-files.js";
 import { runTasksWithConcurrency } from "../utils/run-with-concurrency.js";
+import { createFileCopyWithCloneFallback } from "./fs-safe-file-copy.js";
 import { root as openRoot } from "./fs-safe.js";
 import { hasNodeErrorCode } from "./path-guards.js";
 import {
@@ -10,10 +11,12 @@ import {
   assertUpdateCandidatePluginLinkTarget,
   publishUpdateCandidatePluginTreeLinks,
   resolveUpdateCandidatePluginTreeTargets,
-  type UpdateCandidatePluginTreeEntry,
   verifyUpdateCandidatePluginTree,
 } from "./update-candidate-plugin-tree-links.js";
-import type { UpdateCandidatePluginTreePlan } from "./update-candidate-plugin-tree.js";
+import type {
+  UpdateCandidatePluginEntry,
+  UpdateCandidatePluginTreePlan,
+} from "./update-candidate-plugin-tree-schema.js";
 import { relocateRuntimeEntry } from "./update-runtime-relocation.js";
 
 // Relocation rewrites these members in place; a hard link would edit the live package.
@@ -42,6 +45,7 @@ export async function linkUpdateCandidatePluginTrees(
     candidateRoot: string;
     assertCurrent: () => void;
     onProgress?: () => void | Promise<void>;
+    onMaterialized?: () => void;
   },
 ): Promise<{ linked: number; copied: number }> {
   const targets = resolveUpdateCandidatePluginTreeTargets(plan, params);
@@ -49,14 +53,14 @@ export async function linkUpdateCandidatePluginTrees(
   // Linking bumps the source inode's change time. Later entries that share that
   // inode (pnpm store hard links) must match the recorded post-link fingerprint.
   const linkedInodes = new Map<string, string>();
-  const assertEntryStat = (entry: UpdateCandidatePluginTreeEntry, current: BigIntStats) => {
+  const assertEntryStat = (entry: UpdateCandidatePluginEntry, current: BigIntStats) => {
     const expected =
       entry.kind === "file" && linkedInodes.has(`${entry.dev}:${entry.ino}`)
         ? { ...entry, ctimeNs: linkedInodes.get(`${entry.dev}:${entry.ino}`)! }
         : entry;
     assertUpdateCandidatePluginEntryStat(expected, current);
   };
-  const assertEntry = async (entry: UpdateCandidatePluginTreeEntry) => {
+  const assertEntry = async (entry: UpdateCandidatePluginEntry) => {
     await params.onProgress?.();
     assertEntryStat(entry, await fs.lstat(entry.path, { bigint: true }));
     if (entry.kind === "symlink" && (await fs.readlink(entry.path)) !== entry.link) {
@@ -90,20 +94,20 @@ export async function linkUpdateCandidatePluginTrees(
     await preparing;
   };
   let destinationRoot: ReturnType<typeof openRoot> | undefined;
+  const copyFile = createFileCopyWithCloneFallback();
   const copyEntry = async (
-    entry: Extract<UpdateCandidatePluginTreeEntry, { kind: "file" }>,
+    entry: Extract<UpdateCandidatePluginEntry, { kind: "file" }>,
     destination: string,
   ) => {
     const root = await (destinationRoot ??= openRoot(privateRoot));
     // copyIn owns portable create-only publication; recheck the inventory before
     // its private stage is published.
-    await root.copyIn(path.relative(privateRoot, destination), entry.path, {
+    await copyFile(root, path.relative(privateRoot, destination), entry.path, {
       overwrite: false,
       // The entry loop already prepares each destination parent.
       mkdir: false,
       // Process-lifetime scratch like the unsynced hard-link path, never a recovery backup.
       durable: false,
-      clone: "auto",
       maxBytes: entry.size,
       mode: entry.mode | 0o600,
       sourceHardlinks: "allow",
@@ -129,7 +133,7 @@ export async function linkUpdateCandidatePluginTrees(
   // OverlayFS hard links can copy lower-layer files up, changing birthtime (or
   // inode identity). Copy instead of relaxing the admitted file fingerprint.
   const copyDevices = new Map<string, boolean>();
-  const requiresCopy = async (entry: UpdateCandidatePluginTreeEntry) => {
+  const requiresCopy = async (entry: UpdateCandidatePluginEntry) => {
     if (process.platform !== "linux") {
       return false;
     }
@@ -141,8 +145,8 @@ export async function linkUpdateCandidatePluginTrees(
     return copy;
   };
   const counts = { linked: 0, copied: 0 };
-  const directories: Array<Extract<UpdateCandidatePluginTreeEntry, { kind: "directory" }>> = [];
-  const materialize = async (entry: UpdateCandidatePluginTreeEntry) => {
+  const directories: Array<Extract<UpdateCandidatePluginEntry, { kind: "directory" }>> = [];
+  const materialize = async (entry: UpdateCandidatePluginEntry) => {
     await assertEntry(entry);
     const destination = destinationFor(entry.path);
     const directory = entry.kind === "directory" ? destination : path.dirname(destination);
@@ -150,6 +154,7 @@ export async function linkUpdateCandidatePluginTrees(
     await prepareDirectory(directory, entry.kind === "directory" ? entry.mode | 0o700 : 0o700);
     if (entry.kind === "directory") {
       directories.push(entry);
+      params.onMaterialized?.();
       return;
     }
     if (entry.kind === "symlink") {
@@ -168,6 +173,7 @@ export async function linkUpdateCandidatePluginTrees(
         path.resolve(path.dirname(destination), await fs.readlink(destination)),
         { privateRoot, candidateRoot },
       );
+      params.onMaterialized?.();
       return;
     }
     if (
@@ -177,6 +183,7 @@ export async function linkUpdateCandidatePluginTrees(
     ) {
       await copyEntry(entry, destination);
       counts.copied += 1;
+      params.onMaterialized?.();
       return;
     }
     params.assertCurrent();
@@ -188,6 +195,7 @@ export async function linkUpdateCandidatePluginTrees(
       }
       await copyEntry(entry, destination);
       counts.copied += 1;
+      params.onMaterialized?.();
       return;
     }
     // The private name must reference the inventoried inode, never a newer file.
@@ -204,8 +212,9 @@ export async function linkUpdateCandidatePluginTrees(
     assertUpdateCandidatePluginEntryStat({ ...entry, ctimeNs: linked.ctimeNs.toString() }, linked);
     linkedInodes.set(`${entry.dev}:${entry.ino}`, linked.ctimeNs.toString());
     counts.linked += 1;
+    params.onMaterialized?.();
   };
-  const files: Array<Extract<UpdateCandidatePluginTreeEntry, { kind: "file" }>> = [];
+  const files: Array<Extract<UpdateCandidatePluginEntry, { kind: "file" }>> = [];
   const inodes = new Set<string>();
   const drain = async () => {
     const result = await runTasksWithConcurrency({
@@ -251,6 +260,7 @@ export async function linkUpdateCandidatePluginTrees(
   for (const entry of directories.toSorted((left, right) => right.path.length - left.path.length)) {
     params.assertCurrent();
     await fs.chmod(destinationFor(entry.path), entry.mode);
+    params.onMaterialized?.();
   }
   return counts;
 }

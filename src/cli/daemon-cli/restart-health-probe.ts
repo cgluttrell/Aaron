@@ -77,6 +77,7 @@ export type GatewayReachability = {
   activatedPluginErrors: PluginHealthErrorSummary[];
   unavailablePlugins: UnavailablePluginHealthSummary[];
   channelProbeErrors: Array<{ id: string; error: string }>;
+  channelRuntimeWarnings?: Array<{ id: string; error: string }>;
   probeError?: string;
   staleConnection?: GatewayStaleConnectionReason;
 };
@@ -195,37 +196,44 @@ function readActivatedPluginErrors(health: unknown): PluginHealthErrorSummary[] 
       activated: true,
       error: entry.error,
     };
-    if (typeof entry.activationSource === "string") {
-      error.activationSource = entry.activationSource;
-    }
-    if (typeof entry.activationReason === "string") {
-      error.activationReason = entry.activationReason;
-    }
-    if (typeof entry.failurePhase === "string") {
-      error.failurePhase = entry.failurePhase;
+    for (const key of ["activationSource", "activationReason", "failurePhase"] as const) {
+      if (typeof entry[key] === "string") {
+        error[key] = entry[key];
+      }
     }
     return [error];
   });
 }
 
-function readChannelProbeErrors(health: unknown): Array<{ id: string; error: string }> {
+function readChannelProbeFailures(health: unknown) {
+  const errors: GatewayReachability["channelProbeErrors"] = [];
+  const warnings: GatewayReachability["channelProbeErrors"] = [];
   const channels = asOptionalRecord(asOptionalRecord(health)?.channels);
-  if (!channels) {
-    return [];
-  }
-  const errors: Array<{ id: string; error: string }> = [];
-  for (const [id, summary] of Object.entries(channels)) {
+  for (const [id, summary] of Object.entries(channels ?? {})) {
+    const accounts = Object.entries(asOptionalRecord(asOptionalRecord(summary)?.accounts) ?? {});
+    for (const [accountId, value] of accounts.length ? accounts : Object.entries({ "": summary })) {
+      const account = asOptionalRecord(value);
+      if (account?.enabled === false || account?.configured === false) {
+        continue;
+      }
+      if (account?.running === false || account?.healthState === "not-running") {
+        warnings.push({
+          id: accountId ? `${id}/${accountId}` : id,
+          error:
+            typeof account.lastError === "string" && account.lastError.trim()
+              ? account.lastError
+              : "not running",
+        });
+      }
+    }
     const probe = asOptionalRecord(asOptionalRecord(summary)?.probe);
     if (probe?.ok !== false) {
       continue;
     }
     const error = probe.error;
-    errors.push({
-      id,
-      error: typeof error === "string" && error.trim() ? error : "probe failed",
-    });
+    errors.push({ id, error: typeof error === "string" && error.trim() ? error : "probe failed" });
   }
-  return errors;
+  return { errors, warnings };
 }
 
 function readUnavailablePlugins(health: unknown): UnavailablePluginHealthSummary[] {
@@ -305,7 +313,9 @@ export async function confirmGatewayReachable(params: {
     result.reachable = true;
     result.activatedPluginErrors = readActivatedPluginErrors(health);
     result.unavailablePlugins = readUnavailablePlugins(health);
-    result.channelProbeErrors = readChannelProbeErrors(health);
+    const { errors, warnings } = readChannelProbeFailures(health);
+    result.channelProbeErrors = errors;
+    result.channelRuntimeWarnings = warnings.length ? warnings : undefined;
   } catch (error) {
     params.signal?.throwIfAborted();
     // Only a correlated Gateway rejection proves protocol reachability. Bare socket

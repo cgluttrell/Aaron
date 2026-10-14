@@ -28,8 +28,8 @@ describe("Windows CI whole-file placement", () => {
     expect(shards.flatMap((shard) => shard.targets).toSorted(compareFiles)).toEqual(
       inventory.toSorted(compareFiles),
     );
-    // The native package-swap fixture rounds four shards to 425s.
-    expect(shards.every((shard) => shard.predicted_seconds < 426)).toBe(true);
+    // The Windows long-path identity regression (#162332) rounds every shard to 428s; retain the approved tiny budget bump.
+    expect(shards.every((shard) => shard.predicted_seconds < 429)).toBe(true);
     expect(
       shards.filter(
         (shard) =>

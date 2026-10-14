@@ -1,7 +1,7 @@
 /* @vitest-environment jsdom */
 
 import { expectDefined } from "@openclaw/normalization-core";
-import { html, render } from "lit";
+import { html, nothing, render } from "lit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../../../test/helpers/promise.js";
 import { makeChatHost } from "../chat-host.test-support.ts";
@@ -115,6 +115,11 @@ describe("chat transcript controller", () => {
     transcript.hostConnected();
     transcript.hostUpdated();
     await flushDeferredRowPrune();
+    for (const observer of resizeObservers) {
+      for (const row of transcriptRows(container)) {
+        observer.emitTarget(row, 800, 100);
+      }
+    }
     render(renderChatThread(props, transcript), container);
 
     expect(transcriptSize(container)).toBe(200);
@@ -138,6 +143,13 @@ describe("chat transcript controller", () => {
       { kind: "content" as const, key: "group:next", content: html`<div>next</div>` },
     ];
     const { container, renderRows } = await mountTestTranscript("pane-mcp-rows", initialRows);
+    for (const observer of resizeObservers) {
+      for (const row of transcriptRows(container)) {
+        observer.emitTarget(row, 800, 180);
+      }
+    }
+    renderRows(initialRows);
+    expect(transcriptSize(container)).toBe(540);
     stubMcpAppLifecycle(container, () => teardownPending.promise);
 
     renderRows(regroupedRows);
@@ -167,6 +179,15 @@ describe("chat transcript controller", () => {
       "group:reply",
       "group:next",
     ]);
+    // New rows receive their first sizes; the retained reply must keep its own.
+    for (const observer of resizeObservers) {
+      for (const row of committedRows) {
+        if (row.dataset.virtualRowKey !== "group:reply") {
+          observer.emitTarget(row, 800, 180);
+        }
+      }
+    }
+    renderRows(regroupedRows);
     // The old tool's 40px delivery must not resize the retained reply key.
     expect(transcriptSize(container)).toBe(540);
   });
@@ -940,5 +961,79 @@ describe("chat transcript controller", () => {
     } finally {
       transcript.hostDisconnected();
     }
+  });
+
+  it("does not introduce a typing command while native reader movement is pending", async () => {
+    const flushFrames = stubAnimationFrames();
+    const rows = numberedContentRows(12);
+    const { container, renderRows, transcript } = await mountTestTranscript(
+      "typing-interrupt",
+      rows,
+    );
+    try {
+      const total = transcriptSize(container);
+      Object.defineProperties(container, {
+        clientHeight: { configurable: true, value: 600 },
+        scrollHeight: { configurable: true, value: total + 88 },
+      });
+      for (const observer of resizeObservers) {
+        observer.emitTarget(container, 800, 600);
+      }
+      container.scrollTop = total + 88 - 600;
+      container.dispatchEvent(new Event("scroll"));
+      // Reader movement can reach the DOM before the offset observer runs.
+      container.scrollTop -= 100;
+      const readerOffset = container.scrollTop;
+      const scrollTo = vi.fn();
+      container.scrollTo = scrollTo;
+      renderRows([
+        ...rows,
+        { kind: "content", key: "presence:typing", content: html`<div>Typing</div>` },
+      ]);
+      expect(scrollTo).not.toHaveBeenCalled();
+      container.dispatchEvent(new WheelEvent("wheel", { deltaY: -100 }));
+      expect(scrollTo).not.toHaveBeenCalled();
+      container.scrollTop -= 100;
+      container.dispatchEvent(new Event("scroll"));
+      scrollTo.mockClear();
+      Object.defineProperty(container, "scrollHeight", { configurable: true, value: total + 188 });
+      flushFrames();
+      expect(scrollTo).not.toHaveBeenCalled();
+      expect(container.scrollTop).toBe(readerOffset - 100);
+    } finally {
+      transcript.hostDisconnected();
+    }
+  });
+
+  it("re-attaches the virtualizer when a foreign host re-stamps the transcript", async () => {
+    const transcript = createTestTranscript();
+    const props = threadProps("pane-foreign-stamp");
+    const chatFace = document.body.appendChild(document.createElement("div"));
+    render(renderChatThread(props, transcript), chatFace);
+    transcript.hostConnected();
+    transcript.hostUpdated();
+    await flushDeferredRowPrune();
+    const chatScroller = chatFace.querySelector<HTMLElement>(".chat-thread");
+    expect(chatScroller).not.toBeNull();
+    expect(observedElements.has(chatScroller!)).toBe(true);
+
+    // Dashboard face: the pane unmounts the transcript and finishes its update.
+    render(nothing, chatFace);
+    transcript.hostUpdated();
+    await flushDeferredRowPrune();
+
+    // Split restore: the sidebar region — a different Lit host that receives
+    // the chat template as a property — stamps the transcript in its own
+    // update cycle. The pane does not update again, so attachment must follow
+    // the ref-recorded DOM identity rather than the pane's render cycle.
+    const dock = document.body.appendChild(document.createElement("div"));
+    render(renderChatThread(props, transcript), dock);
+    await flushDeferredRowPrune();
+
+    const dockScroller = dock.querySelector<HTMLElement>(".chat-thread");
+    expect(dockScroller).not.toBeNull();
+    expect(observedElements.has(dockScroller!)).toBe(true);
+    expect(transcriptRows(dock).length).toBeGreaterThan(0);
+    transcript.hostDisconnected();
   });
 });

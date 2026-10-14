@@ -3,12 +3,15 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { requireDirectorySync, syncDirectory } from "./directory-durability.js";
-import { hasErrnoCode } from "./errors.js";
+import { formatErrorMessage, hasErrnoCode } from "./errors.js";
+import { retainMutationAuthority } from "./mutation-authority.js";
 import {
   completePackageActivationCustody,
   packageActivationIdentityOrAbsent as entryIdentity,
   inspectPackageActivationCustody,
+  settlePackageActivationCustody,
 } from "./package-update-activation-custody.js";
 import {
   packageActivationIdentity,
@@ -17,10 +20,19 @@ import {
   type PackageActivationJournal,
   type PackageActivationPhase,
   type PackageActivationRecord,
-  encodePackageActivationLauncher,
   isPackageActivationComplete,
 } from "./package-update-activation-journal.js";
-import { readPackageActivationRecordStatus as packageActivationStatus } from "./package-update-activation-status.js";
+import {
+  assertPackageActivationSelectedLaunchers as assertSelectedLaunchers,
+  matchesPackageActivationLauncher as matchesLauncher,
+  verifyPackageActivationSelectedLaunchers as verifySelectedLaunchers,
+} from "./package-update-activation-launcher.js";
+import { LEGACY_PACKAGE_RECOVERY_HELPER } from "./package-update-activation-paths.js";
+import {
+  assertPackageActivationActionAllowed,
+  readPackageActivationRecordStatus as packageActivationStatus,
+  selectedPackageRetirementGeneration,
+} from "./package-update-activation-status.js";
 import {
   activateStagedNpmPackageRoot,
   copyPackagePathEntry,
@@ -29,23 +41,38 @@ import {
 } from "./package-update-filesystem.js";
 import {
   createPackageIntegrityReader,
+  packageIntegrityDifferences,
+  PackageIntegrityMismatchError,
   type PackageIntegrityFingerprint,
 } from "./package-update-integrity.js";
 import { assertManagedUpdateLeaseDatabaseIdentity } from "./update-managed-service-handoff-database.js";
 
+const log = createSubsystemLogger("update/package-integrity");
+
 export function createPublicationOwner(
   anchor: string,
   journal: PackageActivationJournal,
-  assertion: () => void,
+  assertOwner: () => void,
   initial = journal.read(),
   assertJournalCurrent: (expected: PackageActivationRecord) => void = journal.assertCurrent.bind(
     journal,
   ),
 ) {
+  const assertion = retainMutationAuthority(assertOwner);
   let record = initial;
   const descriptor = record.descriptor;
+  // Published 2026.9.8 records use the historical digest and cannot reseal metadata drift.
+  const legacy = descriptor.helperDigest === LEGACY_PACKAGE_RECOVERY_HELPER;
+  const trees: { legacyWarning?: string } = {};
   let retirementSelected: "previous" | "candidate" | undefined;
   const live = descriptor.authority.installKey;
+  const matchesSelected = (selected: "previous" | "candidate", contents = true) =>
+    matches(
+      live,
+      descriptor[selected],
+      selected === "previous" ? live : descriptor.originalStageRoot,
+      contents,
+    );
   const root = (name: string) => path.join(anchor, name);
   const helperIdentity = descriptor.helperIdentity;
   const custodyPath = (name: "anchor" | "helper") => {
@@ -67,8 +94,8 @@ export function createPublicationOwner(
     "previous.candidate",
     "launchers",
     "previous-launchers",
-  ];
-  const assertInventory = (allowed = artifactNames) => {
+  ] as const;
+  const assertInventory = (allowed: readonly string[] = artifactNames) => {
     let entries: string[];
     try {
       entries = fs.readdirSync(custodyPath("anchor"));
@@ -84,41 +111,6 @@ export function createPublicationOwner(
     if (entries.some((name) => !allowed.includes(name))) {
       throw new Error("Unknown package recovery artifacts require operator inspection.");
     }
-  };
-  const selectedLauncherIdentity = (
-    entry: (typeof descriptor.launchers)[number],
-    selected: "previous" | "candidate",
-  ) => {
-    if (selected === "previous" && entry.previous === null) {
-      return null;
-    }
-    return record.phase === "aborted"
-      ? entry.previousIdentity
-      : record.publications.find((published) => published.name === entry.name)?.identity;
-  };
-  const assertSelectedLaunchers = (selected: "previous" | "candidate") => {
-    for (const entry of descriptor.launchers) {
-      if (
-        entryIdentity(path.join(descriptor.binDir, entry.name), "launcher") !==
-        selectedLauncherIdentity(entry, selected)
-      ) {
-        throw new Error("Selected package launcher identity changed.");
-      }
-    }
-  };
-  const verifySelectedLaunchers = async (selected: "previous" | "candidate") => {
-    const reader = createPackageIntegrityReader();
-    assertSelectedLaunchers(selected);
-    for (const entry of descriptor.launchers) {
-      const destination = path.join(descriptor.binDir, entry.name);
-      const fingerprint = (await reader.exists(destination))
-        ? encodePackageActivationLauncher(await reader.launcher(destination))
-        : null;
-      if (fingerprint !== entry[selected]) {
-        throw new Error("Selected package launcher fingerprint changed.");
-      }
-    }
-    assertSelectedLaunchers(selected);
   };
   const assertCurrent = () => {
     assertion();
@@ -136,14 +128,11 @@ export function createPublicationOwner(
     if (packageActivationIdentity(descriptor.binDir, true) !== descriptor.binIdentity) {
       throw new Error("Package launcher parent changed");
     }
-    if (
-      retirementSelected &&
-      packageActivationIdentity(live, true) !== descriptor[retirementSelected].identity
-    ) {
-      throw new Error("Selected package changed during retirement.");
-    }
     if (retirementSelected) {
-      assertSelectedLaunchers(retirementSelected);
+      if (packageActivationIdentity(live, true) !== descriptor[retirementSelected].identity) {
+        throw new Error("Selected package changed during retirement.");
+      }
+      assertSelectedLaunchers(record, retirementSelected);
     }
   };
   const transition = (
@@ -154,42 +143,68 @@ export function createPublicationOwner(
     assertCurrent();
     record = journal.transition(record, phase, intent, assertion, publications);
   };
-  const matches = async (file: string, expected: PackageIntegrityFingerprint, logical: string) => {
-    if (!(await packagePathEntryExists(file))) {
+  const matches = async (
+    file: string,
+    expected: PackageIntegrityFingerprint,
+    logical: string,
+    contents = true,
+  ) => {
+    const id = entryIdentity(file, true);
+    if (id === null) {
       return false;
     }
-    const observed = await createPackageIntegrityReader().tree(file, logical);
-    if (!isDeepStrictEqual(observed, expected)) {
+    if (id !== expected.identity) {
       throw new Error(`Package publication object changed: ${file}`);
+    }
+    if (!contents) {
+      return true;
+    }
+    // Legacy package code is reinstallable; accept its previous identity/version without the stale seal.
+    if (legacy && expected === descriptor.previous) {
+      const current = await createPackageIntegrityReader().directoryIdentity(file);
+      if (current?.identity !== expected.identity || current.version !== expected.version) {
+        throw new Error(`Package publication object changed: ${file}`);
+      }
+      if (!trees.legacyWarning) {
+        trees.legacyWarning =
+          "legacy package record settled by identity and version; content could not be re-verified";
+        log.warn(trees.legacyWarning);
+      }
+      return true;
+    }
+    // A prepared descriptor carries its in-process observation, so settled unchanged
+    // files are not re-read. A recovery process parses one without and re-reads all.
+    const observed = await createPackageIntegrityReader().tree(file, logical, expected, legacy);
+    if (!isDeepStrictEqual(observed, expected)) {
+      throw new PackageIntegrityMismatchError(
+        `Package publication object changed: ${file}`,
+        packageIntegrityDifferences(expected, observed),
+      );
     }
     return true;
   };
-  const inspect = async () => {
+  const inspect = async (contents: "all" | "selected" | "staged" | "none" = "all") => {
     const reader = createPackageIntegrityReader();
-    const livePresent = await reader.exists(live);
+    const liveIdentity = entryIdentity(live, true);
     let selected: "previous" | "candidate" | null = null;
-    if (livePresent) {
-      const id = packageActivationIdentity(live, true);
+    if (liveIdentity !== null) {
       selected =
-        id === descriptor.previous.identity
+        liveIdentity === descriptor.previous.identity
           ? "previous"
-          : id === descriptor.candidate.identity
+          : liveIdentity === descriptor.candidate.identity
             ? "candidate"
             : null;
       if (!selected) {
         throw new Error("The installed package is not either recorded generation.");
       }
-      await matches(
-        live,
-        descriptor[selected],
-        selected === "previous" ? live : descriptor.originalStageRoot,
-      );
+      await matchesSelected(selected, contents === "all" || contents === "selected");
     }
-    const previous = await matches(root("previous"), descriptor.previous, live);
+    const previous = await matches(root("previous"), descriptor.previous, live, contents === "all");
     const candidate = await matches(
       root("candidate"),
       descriptor.candidate,
       descriptor.originalStageRoot,
+      contents === "all" || contents === "staged",
     );
     if ((selected === "previous") === previous || (selected === "candidate") === candidate) {
       throw new Error("Package publication generation roles are ambiguous.");
@@ -206,19 +221,20 @@ export function createPublicationOwner(
       const source = root(`launchers/${entry.name}`);
       if (
         packageActivationIdentity(source, "launcher") !== entry.candidateIdentity ||
-        encodePackageActivationLauncher(await reader.launcher(source)) !== entry.candidate
+        !matchesLauncher(await reader.launcher(source), entry.candidate)
       ) {
         throw new Error("Candidate launcher assets changed.");
       }
       const destination = path.join(descriptor.binDir, entry.name);
       const present = await reader.exists(destination);
       const id = present ? packageActivationIdentity(destination, "launcher") : null;
-      const fingerprint = present
-        ? encodePackageActivationLauncher(await reader.launcher(destination))
-        : null;
-      if (id === entry.previousIdentity && fingerprint === entry.previous) {
+      const fingerprint = present ? await reader.launcher(destination) : null;
+      if (id === entry.previousIdentity && matchesLauncher(fingerprint, entry.previous)) {
         launcherStates.set(entry.name, "previous");
-      } else if (id === published.get(entry.name) && fingerprint === entry.candidate) {
+      } else if (
+        id === published.get(entry.name) &&
+        matchesLauncher(fingerprint, entry.candidate)
+      ) {
         launcherStates.set(entry.name, "candidate");
       } else {
         throw new Error(`Package launcher changed outside its publication intent: ${entry.name}`);
@@ -235,47 +251,6 @@ export function createPublicationOwner(
     const bytes = await fsp.readFile(helper());
     if (createHash("sha256").update(bytes).digest("hex") !== descriptor.helperDigest) {
       throw new Error("Sealed package recovery helper changed.");
-    }
-    assertCurrent();
-  };
-  const preflight = async (action: "repair" | "retire") => {
-    if (
-      action === "repair" &&
-      !["preparing", "prepared", "publishing", "publication-complete"].includes(record.phase)
-    ) {
-      throw new Error(`Forward publication is disarmed (${record.phase}).`);
-    }
-    if (
-      action === "retire" &&
-      !["publication-complete", "rolled-back", "aborted", "retiring", "anchor-retired"].includes(
-        record.phase,
-      )
-    ) {
-      throw new Error(`Package evidence cannot be retired (${record.phase}).`);
-    }
-    await verifyClosure();
-    if (record.phase === "preparing") {
-      inspectPackageActivationCustody(anchor, record);
-    } else if (action === "repair" || record.phase === "publication-complete") {
-      await inspect();
-    } else {
-      const selected =
-        record.intent?.kind === "remove" ||
-        record.intent?.kind === "retire" ||
-        record.intent?.kind === "remove-anchor" ||
-        record.intent?.kind === "unlink-helper"
-          ? record.intent.selected
-          : "previous";
-      if (
-        !(await matches(
-          live,
-          descriptor[selected],
-          selected === "previous" ? live : descriptor.originalStageRoot,
-        ))
-      ) {
-        throw new Error("Selected package is missing.");
-      }
-      await verifySelectedLaunchers(selected);
     }
     assertCurrent();
   };
@@ -309,9 +284,7 @@ export function createPublicationOwner(
   };
   const publish = async (resume: boolean, onDisplaced?: () => void | Promise<void>) => {
     await verifyClosure();
-    if (!["preparing", "prepared", "publishing", "publication-complete"].includes(record.phase)) {
-      throw new Error(`Forward publication is disarmed (${record.phase}).`);
-    }
+    assertPackageActivationActionAllowed(record, "repair");
     if (record.phase === "preparing") {
       await completePackageActivationCustody(anchor, journal, assertion);
       record = journal.read();
@@ -341,9 +314,10 @@ export function createPublicationOwner(
     } else if (observed.selected === null) {
       await persistPackageSelection("displaced");
     }
-    observed = await inspect();
-    assertCurrent();
-    if (observed.selected === null) {
+    if (observed.selected !== "candidate") {
+      // Displacement/capture can yield to writers; re-verify the candidate at publication.
+      await inspect("staged");
+      assertCurrent();
       transition("publishing", { kind: "publish" });
       await activateStagedNpmPackageRoot(root("candidate"), live, () => {
         assertCurrent();
@@ -358,7 +332,7 @@ export function createPublicationOwner(
     }
     await persistPackageSelection("candidate");
     for (const entry of descriptor.launchers) {
-      observed = await inspect();
+      observed = await inspect("none");
       assertCurrent();
       if (observed.launcherStates.get(entry.name) === "candidate") {
         const destination = path.join(descriptor.binDir, entry.name);
@@ -410,67 +384,61 @@ export function createPublicationOwner(
       const id = packageActivationIdentity(path.join(descriptor.binDir, entry.name), "launcher");
       transition("publishing", null, [...record.publications, { name: entry.name, identity: id }]);
     }
-    observed = await inspect();
+    observed = await inspect("selected");
     assertCurrent();
     if (observed.selected !== "candidate") {
       throw new Error("Candidate publication is incomplete.");
     }
     transition("publication-complete");
-    return packageActivationStatus(record);
+    return trees.legacyWarning ? retire() : packageActivationStatus(record);
   };
-  const persistRetirement = async () => {
-    const assertRetired = () => {
-      assertCurrent();
-      if (!isPackageActivationComplete(anchor, record)) {
-        throw new Error("Package recovery artifacts were not retired.");
-      }
-    };
-    assertRetired();
-    const outcome = await syncDirectory(path.dirname(helper()));
-    assertRetired();
-    requireDirectorySync(outcome, "Package helper retirement");
-    // Retrying a lost acknowledgement persists the same recorded absence without
-    // another journal write. Read-only receipts remain observations, not grants.
-    return packageActivationStatus(record);
-  };
-  const retire = async () => {
-    await verifyClosure();
-    if (
-      !["publication-complete", "rolled-back", "aborted", "retiring", "anchor-retired"].includes(
-        record.phase,
-      )
-    ) {
-      throw new Error(`Package evidence cannot be retired (${record.phase}).`);
+  const assertSettlementSelection = (selected: "previous" | "candidate", cause?: unknown) => {
+    assertion();
+    assertManagedUpdateLeaseDatabaseIdentity(descriptor.authority);
+    if (packageActivationIdentity(live, true) !== descriptor[selected].identity) {
+      throw new Error("Selected package changed during retirement.", { cause });
     }
-    const selected =
-      record.intent?.kind === "remove" ||
-      record.intent?.kind === "retire" ||
-      record.intent?.kind === "remove-anchor" ||
-      record.intent?.kind === "unlink-helper"
-        ? record.intent.selected
-        : record.phase === "publication-complete"
-          ? "candidate"
-          : "previous";
-    await matches(
-      live,
-      descriptor[selected],
-      selected === "previous" ? live : descriptor.originalStageRoot,
-    );
-    if (!(await packagePathEntryExists(live))) {
+    assertSelectedLaunchers(record, selected);
+  };
+  const settleSelected = (
+    selected: "previous" | "candidate",
+    detail: string,
+    onSettled?: (detail: string) => void,
+  ) => {
+    const settled = settlePackageActivationCustody({
+      anchor,
+      journal,
+      record,
+      settlement: {
+        kind: "publication-settled-external-change",
+        replacementIdentity: descriptor[selected].identity,
+        settled: true,
+        detail,
+      },
+      assertCurrent: () => assertSettlementSelection(selected),
+      onSettled: () => onSettled?.(detail),
+    });
+    record = settled.record;
+    return settled;
+  };
+  const retire = async (onSettled?: (detail: string) => void) => {
+    await verifyClosure();
+    assertPackageActivationActionAllowed(record, "retire");
+    const selected = selectedPackageRetirementGeneration(record);
+    if (!(await matchesSelected(selected))) {
       throw new Error("Selected package is missing.");
     }
-    await verifySelectedLaunchers(selected);
+    await verifySelectedLaunchers(record, selected);
     retirementSelected = selected;
     assertCurrent();
-    if (!["retiring", "anchor-retired"].includes(record.phase)) {
-      for (const name of ["previous", "candidate", "previous.candidate"] as const) {
-        await matches(
-          root(name),
-          name === "previous" ? descriptor.previous : descriptor.candidate,
-          name === "previous" ? live : descriptor.originalStageRoot,
-        );
+    if (trees.legacyWarning) {
+      const { archiveWarning } = settleSelected(selected, trees.legacyWarning, onSettled);
+      if (archiveWarning) {
+        log.warn(archiveWarning);
       }
-      assertCurrent();
+      return packageActivationStatus(record);
+    }
+    if (!["retiring", "anchor-retired"].includes(record.phase)) {
       const publications =
         record.phase === "aborted"
           ? descriptor.launchers.flatMap((entry) =>
@@ -481,13 +449,7 @@ export function createPublicationOwner(
           : record.publications;
       transition("retiring", { kind: "retire", selected }, publications);
     }
-    for (const name of [
-      "previous",
-      "candidate",
-      "previous.candidate",
-      "launchers",
-      "previous-launchers",
-    ] as const) {
+    for (const name of artifactNames) {
       const target = root(name);
       if (!(await packagePathEntryExists(target))) {
         assertCurrent();
@@ -558,13 +520,44 @@ export function createPublicationOwner(
       throw new Error("Final helper identity changed.");
     }
     await fsp.unlink(helper());
-    return persistRetirement();
+    assertCurrent();
+    const outcome = await syncDirectory(path.dirname(helper()));
+    assertCurrent();
+    requireDirectorySync(outcome, "Package helper retirement");
+    if (!isPackageActivationComplete(anchor, record)) {
+      throw new Error("Package recovery artifacts were not retired.");
+    }
+    return packageActivationStatus(record);
+  };
+  // Callers have elected retirement after verified publication, restoration, or
+  // untouched-preparation refusal. Raw recovery entrypoints retain strict retirement;
+  // they never infer completion from an unverified package.
+  const retireVerified = async (
+    onSettled?: (detail: string) => void,
+  ): Promise<string | undefined> => {
+    if (record.phase !== "prepared") {
+      assertPackageActivationActionAllowed(record, "retire");
+    }
+    const selected = selectedPackageRetirementGeneration(record);
+    try {
+      await retire(onSettled);
+      return trees.legacyWarning;
+    } catch (error) {
+      const assertSelected = () => assertSettlementSelection(selected, error);
+      assertSelected();
+      assertJournalCurrent(record);
+      await matchesSelected(selected);
+      await verifySelectedLaunchers(record, selected);
+      assertSelected();
+      assertJournalCurrent(record);
+      const detail = `Verified ${selected} package; recovery evidence retained after cleanup failed: ${formatErrorMessage(error)}`;
+      return settleSelected(selected, detail, onSettled).warning;
+    }
   };
   return {
     publish,
     retire,
-    persistRetirement,
-    preflight,
+    retireVerified,
     async disarmRollback() {
       assertCurrent();
       const observed = await inspect();
@@ -580,9 +573,7 @@ export function createPublicationOwner(
       // Disarm before any restore or its compensating moves. Failure to commit
       // this fact forbids compensation; a killed rollback never becomes forward repair.
       transition("rollback-in-progress", record.intent);
-      const disarmed = await inspect();
-      assertCurrent();
-      return disarmed.previous;
+      return observed.previous;
     },
     recordRestoredLauncher(name: string, staged: string) {
       if (record.phase !== "rollback-in-progress") {
@@ -596,11 +587,11 @@ export function createPublicationOwner(
     },
     async restored() {
       assertCurrent();
-      assertSelectedLaunchers("previous");
+      assertSelectedLaunchers(record, "previous");
       // Restoration also removes launchers that did not exist in the old package.
       const outcome = await syncDirectory(descriptor.binDir);
       assertCurrent();
-      assertSelectedLaunchers("previous");
+      assertSelectedLaunchers(record, "previous");
       requireDirectorySync(outcome, "Restored package launchers");
       await persistPackageSelection("previous");
       const publications = descriptor.launchers.flatMap((entry) => {

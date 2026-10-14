@@ -707,8 +707,12 @@ function buildPageLookupKeys(page: WikiPageSummary): Set<string> {
 function renderWikiPageLinks(params: {
   config: ResolvedMemoryWikiConfig;
   pages: WikiPageSummary[];
+  emptyText?: string;
   sourceRelativeTo?: string;
 }): string {
+  if (params.pages.length === 0 && params.emptyText) {
+    return `- ${params.emptyText}`;
+  }
   return params.pages
     .map((page) => `- ${formatPageLink(params.config, page, params.sourceRelativeTo)}`)
     .join("\n");
@@ -857,18 +861,6 @@ async function refreshPageRelatedBlocks(params: {
     updatedFiles.push(page.absolutePath);
   }
   return updatedFiles;
-}
-
-function renderSectionList(params: {
-  config: ResolvedMemoryWikiConfig;
-  pages: WikiPageSummary[];
-  emptyText: string;
-  sourceRelativeTo?: string;
-}): string {
-  if (params.pages.length === 0) {
-    return `- ${params.emptyText}`;
-  }
-  return renderWikiPageLinks(params);
 }
 
 async function writeManagedMarkdownFile(params: {
@@ -1020,7 +1012,7 @@ function buildRootIndexBody(params: {
   for (const group of WIKI_PAGE_GROUPS) {
     lines.push("", `### ${group.heading}`);
     lines.push(
-      renderSectionList({
+      renderWikiPageLinks({
         config: params.config,
         pages: params.pages.filter((page) => page.kind === group.kind),
         emptyText: `No ${normalizeLowercaseStringOrEmpty(group.heading)} yet.`,
@@ -1029,19 +1021,6 @@ function buildRootIndexBody(params: {
   }
 
   return lines.join("\n");
-}
-
-function buildDirectoryIndexBody(params: {
-  config: ResolvedMemoryWikiConfig;
-  pages: WikiPageSummary[];
-  group: { kind: WikiPageKind; dir: string; heading: string };
-}): string {
-  return renderSectionList({
-    config: params.config,
-    pages: params.pages.filter((page) => page.kind === params.group.kind),
-    emptyText: `No ${normalizeLowercaseStringOrEmpty(params.group.heading)} yet.`,
-    sourceRelativeTo: `${params.group.dir}/index.md`,
-  });
 }
 
 const FRESHNESS_RANK: Record<WikiFreshnessLevel, number> = {
@@ -1265,7 +1244,12 @@ async function compileMemoryWikiVaultUnlocked(
         title: group.heading,
         startMarker: `<!-- openclaw:wiki:${group.dir}:index:start -->`,
         endMarker: `<!-- openclaw:wiki:${group.dir}:index:end -->`,
-        body: buildDirectoryIndexBody({ config, pages, group }),
+        body: renderWikiPageLinks({
+          config,
+          pages: pages.filter((page) => page.kind === group.kind),
+          emptyText: `No ${normalizeLowercaseStringOrEmpty(group.heading)} yet.`,
+          sourceRelativeTo: `${group.dir}/index.md`,
+        }),
         ...(options?.signal ? { signal: options.signal } : {}),
       })
     ) {
@@ -1403,7 +1387,7 @@ export async function refreshMemoryWikiIndexesAfterImport(params: {
     params.syncResult.removedCount > 0;
   const dashboardState = await readMemoryWikiDashboardState(params.config);
   params.signal?.throwIfAborted();
-  const dashboardNeedsCompile = dashboardState.state !== "ready";
+  let dashboardNeedsCompile = dashboardState.state !== "ready";
   if (!params.config.ingest.autoCompile) {
     if (importChanged || dashboardNeedsCompile) {
       setMemoryWikiDashboardState(params.config, { state: "compile-required" });
@@ -1412,6 +1396,13 @@ export async function refreshMemoryWikiIndexesAfterImport(params: {
   }
 
   const missingIndexes = await hasMissingWikiIndexes(params.config.vault.path);
+  if (!importChanged && !missingIndexes && dashboardNeedsCompile) {
+    // Another compiler can replace our publication without changing sources.
+    // Validate and adopt its durable cache before deciding to rebuild it.
+    await initializeMemoryWikiVault(params.config, { signal: params.signal });
+    await activateExistingMemoryWikiVault(params.config, params.signal);
+    dashboardNeedsCompile = (await readMemoryWikiDashboardState(params.config)).state !== "ready";
+  }
   params.signal?.throwIfAborted();
   if (!importChanged && !missingIndexes && !dashboardNeedsCompile) {
     return { refreshed: false, reason: "no-import-changes" };

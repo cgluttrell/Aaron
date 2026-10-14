@@ -216,7 +216,9 @@ export function projectModelCatalogEntryForRoute(params: {
       ...projected,
       api: route.api,
       baseUrl: route.baseUrl,
-      ...(donor?.contextWindow !== undefined ? { contextWindow: donor.contextWindow } : {}),
+      ...(donor?.contextWindow !== undefined
+        ? { contextWindow: donor.contextWindow, contextWindowSource: donor.contextWindowSource }
+        : {}),
       ...(donor?.contextTokens !== undefined ? { contextTokens: donor.contextTokens } : {}),
       ...(donor?.contextWindows !== undefined ? { contextWindows: donor.contextWindows } : {}),
       ...(donor?.contextWindowDefault !== undefined
@@ -246,18 +248,17 @@ export function projectModelCatalogEntryForRoute(params: {
 
 /** Returns true for loopback, wildcard, and mDNS local base URLs. */
 export const isLocalBaseUrl = (baseUrl: string) => {
-  try {
-    const url = new URL(baseUrl);
-    const host = normalizeLowercaseStringOrEmpty(url.hostname).replace(/^\[|\]$/g, "");
-    return (
-      host === "localhost" ||
-      (isCanonicalDottedDecimalIPv4(host) && isLoopbackIpAddress(host)) ||
-      host === "0.0.0.0" ||
-      host === "::" ||
-      host === "::1" ||
-      host.endsWith(".local")
-    );
-  } catch {
+  const url = URL.parse(baseUrl);
+  if (!url) {
     return false;
   }
+  const host = normalizeLowercaseStringOrEmpty(url.hostname).replace(/^\[|\]$/g, "");
+  return (
+    host === "localhost" ||
+    (isCanonicalDottedDecimalIPv4(host) && isLoopbackIpAddress(host)) ||
+    host === "0.0.0.0" ||
+    host === "::" ||
+    host === "::1" ||
+    host.endsWith(".local")
+  );
 };

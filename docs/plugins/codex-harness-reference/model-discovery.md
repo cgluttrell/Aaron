@@ -40,6 +40,30 @@ require the native owner's supported reload/restart and a catalog refresh;
 OpenClaw does not poll native home files for readiness. Authored host routes and
 explicit profile selections retain their existing auth and compatibility checks.
 
+For the Codex runtime, the composer shows **Ultrafast** only when authenticated
+account discovery advertises that service tier for the selected model, account,
+route, and runtime.
+The OpenAI provider's existing account-scoped discovery supplies this observation;
+static catalog hints and the native app-server's fallback list do not establish
+access. Selecting a managed personal account prepares that account's catalog
+through the same provider discovery path, without changing shared auth order.
+Prepared-only reads do not start discovery. Account changes, failed discovery,
+and retired generations cannot reuse another account's tier support.
+
+Native-only accounts without managed discovery credentials, token-sharing auth
+that cannot use model discovery, and catalogs without explicit service-tier
+metadata leave this capability unknown. The composer hides Ultrafast in those
+cases rather than offering a disabled option. Discovery support describes
+availability, not a guarantee that an upstream request will receive that tier.
+
+The embedded OpenClaw runtime uses the available API-key OpenAI Responses route
+to offer Ultrafast without catalog metadata, whether the key comes from an auth
+profile, environment, or provider config (including SecretRefs). This remains
+subject to observed provider downgrades for the selected credential and route;
+see [Fast mode](/providers/openai/advanced#fast-mode).
+Codex-runtime Ultrafast with API-key authentication still requires the native
+catalog, including a pinned `model_catalog_json`, to list the tier for that model.
+
 Native catalog identifiers are runtime identifiers, not privacy labels. A
 deployment using a broker-owned alias must supply an alias-safe native catalog
 before starting app-server: both `id` and `model` in `model/list` must be the

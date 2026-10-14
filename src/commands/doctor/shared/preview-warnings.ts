@@ -11,11 +11,12 @@ import {
 } from "../../../agents/provider-tool-policy.js";
 import { isToolAllowedByPolicyName } from "../../../agents/tool-policy-match.js";
 import { mergeAlsoAllowPolicy, resolveToolProfilePolicy } from "../../../agents/tool-policy.js";
+import type { OpenClawConfigWithLegacyRoster } from "../../../config/legacy.roster.js";
 import type { OpenClawConfig } from "../../../config/types.openclaw.js";
 import type { ToolPolicyConfig } from "../../../config/types.tools.js";
+import { VERSION_BOUND_RUNTIME_PLUGIN_POLICY_IDS_BY_SURFACE } from "../../../plugins/official-runtime-plugins.js";
 import { collectChannelRouteTargets } from "../../../routing/channel-route-targets.js";
 import { createLazyImportLoader } from "../../../shared/lazy-promise.js";
-import { VERSION_BOUND_RUNTIME_PLUGIN_POLICY_IDS_BY_SURFACE } from "./configured-runtime-plugin-installs.js";
 import type { BlockedLegacyOpenAICodexProviderPlan } from "./legacy-config-migrations.runtime.models.js";
 import {
   collectUnavailableSourceReplyTargets,
@@ -51,21 +52,6 @@ function hasSubagentAllowlistConfig(cfg: OpenClawConfig): boolean {
     const subagents = hasRecord(agent.subagents) ? agent.subagents : undefined;
     return Array.isArray(subagents?.allowAgents);
   });
-}
-
-function hasToolsBySenderKey(value: unknown): boolean {
-  if (Array.isArray(value)) {
-    return value.some(hasToolsBySenderKey);
-  }
-  if (!hasRecord(value)) {
-    return false;
-  }
-  if (hasRecord(value.toolsBySender)) {
-    return true;
-  }
-  return Object.entries(value).some(
-    ([key, nested]) => key !== "toolsBySender" && hasToolsBySenderKey(nested),
-  );
 }
 
 function hasConfiguredSafeBins(cfg: OpenClawConfig): boolean {
@@ -510,13 +496,16 @@ export async function resolveDoctorChannelPreviewConfig(params: {
 
 /** Collect info and warning notes for doctor preview mode. */
 export async function collectDoctorPreviewNotes(params: {
-  cfg: OpenClawConfig;
-  activationSourceConfig?: OpenClawConfig;
+  cfg: unknown;
+  activationSourceConfig?: OpenClawConfigWithLegacyRoster;
   doctorFixCommand: string;
   env?: NodeJS.ProcessEnv;
   allowExec?: boolean;
   blockedCodexProviderPlan?: BlockedLegacyOpenAICodexProviderPlan;
 }): Promise<DoctorPreviewNotes> {
+  if (!hasRecord(params.cfg)) {
+    throw new TypeError("Doctor config preview requires an object");
+  }
   const infoNotes: string[] = [];
   const warnings: string[] = [];
   // Each non-empty scan contributes one note; keep its formatter's line order intact.
@@ -580,7 +569,10 @@ export async function collectDoctorPreviewNotes(params: {
     }
   }
 
-  if ((hasPluginConfig || hasChannelConfig) && params.cfg.plugins?.enabled !== false) {
+  if (
+    (hasPluginConfig || hasChannelConfig) &&
+    (!hasRecord(params.cfg.plugins) || params.cfg.plugins.enabled !== false)
+  ) {
     const {
       collectStalePluginConfigWarnings,
       isStalePluginAutoRepairBlocked,
@@ -660,13 +652,6 @@ export async function collectDoctorPreviewNotes(params: {
     }
   }
 
-  if (hasToolsBySenderKey(params.cfg)) {
-    const { collectLegacyToolsBySenderWarnings, scanLegacyToolsBySenderKeys } =
-      await import("./legacy-tools-by-sender.js");
-    const toolsBySenderHits = scanLegacyToolsBySenderKeys(params.cfg);
-    appendScanWarnings(toolsBySenderHits, collectLegacyToolsBySenderWarnings);
-  }
-
   if (hasConfiguredSafeBins(params.cfg)) {
     const {
       collectExecSafeBinCoverageWarnings,
@@ -685,11 +670,13 @@ export async function collectDoctorPreviewNotes(params: {
 
   const { collectStaleOAuthProfileShadowWarnings, scanStaleOAuthProfileShadows } =
     await import("./stale-oauth-profile-shadows.js");
-  const staleOAuthProfileShadows = await scanStaleOAuthProfileShadows({
-    cfg: params.cfg,
-    env,
-  });
+  const { hits: staleOAuthProfileShadows, warnings: staleOAuthWarnings } =
+    await scanStaleOAuthProfileShadows({
+      cfg: params.cfg,
+      env,
+    });
   appendScanWarnings(staleOAuthProfileShadows, collectStaleOAuthProfileShadowWarnings);
+  warnings.push(...staleOAuthWarnings);
 
   const { collectStaleConfiguredAuthOrderWarnings } = await import("./stale-auth-order.js");
   warnings.push(

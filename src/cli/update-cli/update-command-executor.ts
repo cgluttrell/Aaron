@@ -140,7 +140,6 @@ export async function withUpdateCommandExecutor<T>(
           if (!store || !lease || !databasePath) {
             throw new UpdateCommandRecoveryPendingError("Child executor admission is closed.");
           }
-          const authority = admittedAuthorities.get(fence)?.authority;
           const spawner = legacyChild ?? lease;
           if (spawner.version === 1) {
             throw new UpdateCommandRecoveryPendingError("Borrowed parent has no child lifetime.");
@@ -161,13 +160,7 @@ export async function withUpdateCommandExecutor<T>(
               : {}),
             ...(serviceLease ? { retainedParent: serviceLease } : {}),
             databasePath,
-            databaseIdentity: authority
-              ? {
-                  databasePath: authority.databasePath,
-                  databaseIdentity: authority.databaseIdentity,
-                  parentIdentity: authority.parentIdentity,
-                }
-              : undefined,
+            databaseIdentity: admittedAuthorities.get(fence)?.authority,
           };
         },
       });
@@ -320,7 +313,7 @@ export async function withUpdateCommandExecutor<T>(
               found.lease.executor.pid === process.pid
             ) {
               const { isCurrentManagedServiceUpdateHandoffProcess } =
-                await import("../../infra/update-managed-service-handoff.js");
+                await import("../../infra/update-managed-service-handoff-current.js");
               const handoff = { root: key, runId, store };
               const handedOff = await isCurrentManagedServiceUpdateHandoffProcess(handoff);
               // Retain the exact row observed before the await. Matching the run in

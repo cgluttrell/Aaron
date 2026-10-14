@@ -1,3 +1,8 @@
+import { raceWithTimeout } from "../../packages/retry/src/index.js";
+import {
+  hasProviderTransportDispatcherPool,
+  stopActiveManagedProviderLocalServices,
+} from "../agents/provider-runtime-lifecycle.js";
 import { finalizeActiveDebugProxyCaptures } from "../proxy-capture/runtime-cleanup.js";
 import type { CliHarnessCleanup } from "./runtime-cleanup-scope.js";
 
@@ -32,6 +37,8 @@ export async function runCliDisposerAfterPending(
   const token = Symbol(name);
   const predecessors = pending.filter(({ deferred }) => deferred).map((entry) => entry.operation);
   const operation = Promise.resolve().then(async () => {
+    // Later deferred drains must not become mutual dependencies. Ordinary disposal can
+    // admit cleanup tails after its reporting deadline, so reselect those until idle.
     await Promise.allSettled(predecessors);
     for (;;) {
       const active = [...pendingDisposers.values()]
@@ -47,10 +54,7 @@ export async function runCliDisposerAfterPending(
   });
   pendingDisposers.set(token, { name, operation, deferred: true });
   console.error(
-    "CLI cleanup deferred: " +
-      name +
-      " until pending disposers settle: " +
-      pending.map((entry) => entry.name).join(", "),
+    `CLI cleanup deferred: ${name} until pending disposers settle: ${pending.map((entry) => entry.name).join(", ")}`,
   );
 }
 
@@ -61,25 +65,16 @@ export async function runCliDisposer(
   timeoutMs = DISPOSER_TIMEOUT_MS,
 ): Promise<void> {
   const token = Symbol(name);
-  let timer: ReturnType<typeof setTimeout> | undefined;
   const operation = Promise.resolve()
     .then(() => (runCleanup ? runCleanup(dispose) : dispose()))
     .finally(() => pendingDisposers.delete(token));
   pendingDisposers.set(token, { name, operation, deferred: false });
   try {
-    await Promise.race([
-      operation,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(() => {
-          console.error(`CLI cleanup timed out: ${name} after ${timeoutMs}ms`);
-          resolve();
-        }, timeoutMs);
-      }),
-    ]);
+    await raceWithTimeout(operation, timeoutMs, () => {
+      console.error(`CLI cleanup timed out: ${name} after ${timeoutMs}ms`);
+    });
   } catch {
     // Teardown cannot mask the command outcome or skip later resources.
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -118,18 +113,8 @@ export async function closeCliResources(cleanup?: CliHarnessCleanup): Promise<vo
         cleanup.registries.clear();
       }
     },
-    "provider-local-services": async () => {
-      const { hasManagedProviderLocalServices } =
-        await import("../agents/provider-runtime-lifecycle.js");
-      if (hasManagedProviderLocalServices()) {
-        const { stopManagedProviderLocalServices } =
-          await import("../agents/provider-local-service.js");
-        await stopManagedProviderLocalServices();
-      }
-    },
+    "provider-local-services": stopActiveManagedProviderLocalServices,
     "provider-transport-dispatchers": async () => {
-      const { hasProviderTransportDispatcherPool } =
-        await import("../agents/provider-runtime-lifecycle.js");
       if (hasProviderTransportDispatcherPool()) {
         const { closeProviderTransportDispatcherPool } =
           await import("../agents/provider-transport-dispatcher-pool.js");

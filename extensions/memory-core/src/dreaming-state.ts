@@ -1,4 +1,3 @@
-// Memory Core dreaming state lives in SQLite-backed plugin state.
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
@@ -7,6 +6,7 @@ import type {
   OpenKeyedStoreOptions,
   PluginStateKeyedStore,
 } from "openclaw/plugin-sdk/plugin-state-runtime";
+import { createPluginRuntimeStore } from "openclaw/plugin-sdk/runtime-store";
 
 const MEMORY_CORE_PLUGIN_ID = "memory-core";
 export const DREAMING_DAILY_INGESTION_NAMESPACE = "dreaming-daily-ingestion";
@@ -53,19 +53,17 @@ type WriteMemoryCoreWorkspaceEntriesParams<T> = MemoryCoreWorkspaceParams & {
 type WriteMemoryCoreWorkspaceEntryParams<T> = MemoryCoreWorkspaceParams &
   MemoryCoreWorkspaceEntry<T>;
 
-let configuredOpenKeyedStore: MemoryCoreOpenKeyedStore | undefined;
+const dreamingState = createPluginRuntimeStore<MemoryCoreOpenKeyedStore>({
+  key: "memory-core:dreaming-state",
+  errorMessage: "memory-core dreaming SQLite state store is not configured",
+});
 
-export function configureMemoryCoreDreamingState(openKeyedStore: MemoryCoreOpenKeyedStore): void {
-  configuredOpenKeyedStore = openKeyedStore;
-}
+export const configureMemoryCoreDreamingState = dreamingState.setRuntime;
 
 export function openMemoryCoreStateStore<T>(
   options: OpenKeyedStoreOptions,
 ): PluginStateKeyedStore<T> {
-  if (!configuredOpenKeyedStore) {
-    throw new Error("memory-core dreaming SQLite state store is not configured");
-  }
-  return configuredOpenKeyedStore<T>(options);
+  return dreamingState.getRuntime()<T>(options);
 }
 
 export function normalizeMemoryCoreWorkspaceKey(workspaceDir: string): string {
@@ -112,15 +110,12 @@ async function readWorkspaceStoreEntries<T>(store: PluginStateKeyedStore<T>, wor
 }
 
 // Caller owns typed decoding for values read from plugin state.
-export function readMemoryCoreWorkspaceEntries<T>(
+export async function readMemoryCoreWorkspaceEntries<T>(
   params: MemoryCoreWorkspaceParams,
-): Promise<Array<MemoryCoreWorkspaceEntry<T>>>;
-export async function readMemoryCoreWorkspaceEntries(
-  params: MemoryCoreWorkspaceParams,
-): Promise<Array<MemoryCoreWorkspaceEntry<unknown>>> {
+): Promise<Array<MemoryCoreWorkspaceEntry<T>>> {
   const workspaceKey = memoryCoreWorkspaceStateKey(params.workspaceDir);
   const entries = await readWorkspaceStoreEntries(
-    openWorkspaceStore<unknown>(params.namespace),
+    openWorkspaceStore<T>(params.namespace),
     workspaceKey,
   );
   return entries
@@ -129,24 +124,10 @@ export async function readMemoryCoreWorkspaceEntries(
 }
 
 // Caller owns typed encoding for values written to plugin state.
-// Skip register() when the canonical workspace value is unchanged so Dreaming
-// does not rewrite every row (and stall the gateway) on a no-op pass. Each
-// register() costs plugin-state quota COUNT scans plus an expiry DELETE before the
-// single-row upsert, so redundant writes dominate a Dreaming sweep. Fork port of
-// upstream PR #111392 (T1565, originally ee96d1bc8a5), merged with upstream's
-// event-loop yielding.
-//
-// Capacity retention policy (explicit): skipping register() also skips the keyed
-// store's created_at refresh. Under DREAMING_WORKSPACE_STATE_MAX_ENTRIES pressure
-// the store evicts oldest created_at first, so unchanged rows age toward eviction
-// instead of being retained by rewrite-based recency.
-export function writeMemoryCoreWorkspaceEntries<T>(
+export async function writeMemoryCoreWorkspaceEntries<T>(
   params: WriteMemoryCoreWorkspaceEntriesParams<T>,
-): Promise<void>;
-export async function writeMemoryCoreWorkspaceEntries(
-  params: WriteMemoryCoreWorkspaceEntriesParams<unknown>,
 ): Promise<void> {
-  const store = openWorkspaceStore<unknown>(params.namespace);
+  const store = openWorkspaceStore<T>(params.namespace);
   const workspaceKey = memoryCoreWorkspaceStateKey(params.workspaceDir);
   const workspaceDir = path.resolve(params.workspaceDir);
   // Fork patch T1565 (port of upstream PR #111392, still open): read the workspace's rows once,
@@ -189,11 +170,12 @@ export async function writeMemoryCoreWorkspaceEntries(
     }
   }
 }
-export async function writeMemoryCoreWorkspaceEntry(
-  params: WriteMemoryCoreWorkspaceEntryParams<unknown>,
+// Caller owns typed encoding for values written to plugin state.
+export async function writeMemoryCoreWorkspaceEntry<T>(
+  params: WriteMemoryCoreWorkspaceEntryParams<T>,
 ): Promise<void> {
   const workspaceKey = memoryCoreWorkspaceStateKey(params.workspaceDir);
-  await openWorkspaceStore<unknown>(params.namespace).register(
+  await openWorkspaceStore<T>(params.namespace).register(
     memoryCoreWorkspaceEntryKey(params.workspaceDir, params.key),
     {
       version: 1,

@@ -2,11 +2,11 @@ import path from "node:path";
 import { resolveConfigPath } from "../../config/paths.js";
 import { resolveGatewayInstallEntrypoint } from "../../daemon/gateway-entrypoint.js";
 import { resolveInstallWorkTimeoutMs } from "../../infra/install-mode-options.js";
-import {
-  runGlobalPackageUpdateSteps,
-  type PackageUpdateTransaction,
-} from "../../infra/package-update-steps.js";
-import type { PackageActivationOptions } from "../../infra/package-update-swap-contract.js";
+import { runGlobalPackageUpdateSteps } from "../../infra/package-update-steps.js";
+import type {
+  PackageActivationOptions,
+  PackageUpdateTransaction,
+} from "../../infra/package-update-swap-contract.js";
 import { PackageUpdateActivationError } from "../../infra/package-update-swap-contract.js";
 import {
   failedPackageVerificationStep,
@@ -35,18 +35,20 @@ import {
   verifyPackageUpdateRecovery,
   type ResolvedGlobalInstallTarget,
 } from "../../infra/update-global.js";
-import { normalizeFallbackFailureReason } from "../../infra/update-runner-command.js";
+import {
+  normalizeFallbackFailureReason,
+  reportUpdateStepCompletion,
+} from "../../infra/update-runner-command.js";
 import {
   buildUpdateDoctorEnv,
   resolveUpdateDoctorExecutionPolicy,
 } from "../../infra/update-runner-doctor.js";
-import type { UpdateRunResult } from "../../infra/update-runner-types.js";
+import type { UpdateRunResult, UpdateStepProgress } from "../../infra/update-runner-types.js";
 import type { UpdateStepResult } from "../../infra/update-step-result.js";
 import { hasCommandProcessCleanupError } from "../../process/exec-result.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { CLI_NAME } from "../cli-name.js";
-import { createUpdateProgress } from "./progress.js";
 import {
   DEFAULT_PACKAGE_NAME,
   readPackageName,
@@ -71,8 +73,9 @@ import { resolveUpdateTargetEnv } from "./update-command-service-env.js";
 type PackageDoctorOptions = {
   root: string;
   timeoutMs?: number;
+  /** Null leaves forward work unbounded; omission retains the caller's timeout. */
   workTimeoutMs?: number | null;
-  progress: ReturnType<typeof createUpdateProgress>["progress"];
+  progress: UpdateStepProgress;
   assertCurrent?: () => void;
   results?: UpdateStepResult[];
   managedServiceEnv?: NodeJS.ProcessEnv;
@@ -123,7 +126,9 @@ export async function runPackageUpdateDoctor(params: PackageDoctorOptions) {
     index: 0,
     total: 0,
   };
-  params.progress?.onStepStart?.(doctorProgressInfo);
+  await params.progress?.onStepStart?.(doctorProgressInfo);
+  assertCurrent?.();
+  context?.assertCurrent();
   const configSnapshot = params.onConfigSnapshot
     ? await captureUpdateConfigSnapshot(resolveConfigPath(doctorEnv), doctorEnv)
     : undefined;
@@ -133,15 +138,13 @@ export async function runPackageUpdateDoctor(params: PackageDoctorOptions) {
     failure?: { error: unknown },
   ) => {
     let completionFailure = failure;
+    let databaseReceipt: UpdateStepResult | undefined;
     if (context?.databaseBackup) {
-      const receipt = recordUpdateDatabaseWrites(
+      databaseReceipt = recordUpdateDatabaseWrites(
         context.databaseBackup,
         doctorResult?.databaseWrites,
         doctorStep,
       );
-      if (receipt) {
-        params.progress?.onStepComplete?.({ ...receipt, index: 0, total: 0 });
-      }
     }
     try {
       const refusal = doctorResult?.configWriteRefusal;
@@ -255,37 +258,54 @@ export async function runPackageUpdateDoctor(params: PackageDoctorOptions) {
       );
       delete doctorStep.advisory;
     }
-    try {
-      params.progress?.onStepComplete?.({
-        ...doctorProgressInfo,
-        durationMs: doctorStep.durationMs,
-        exitCode: doctorStep.exitCode,
-        stdoutTail: doctorStep.stdoutTail,
-        stderrTail: doctorStep.stderrTail,
-        signal: doctorStep.signal,
-        killed: doctorStep.killed,
-        outputLimitExceeded: doctorStep.outputLimitExceeded,
-        termination: doctorStep.termination,
-        advisory: doctorStep.advisory,
-        warnings: doctorStep.warnings,
-        diagnostics: doctorStep.diagnostics,
-        failureFacts: doctorStep.failureFacts,
-        doctorLintFindings: doctorStep.doctorLintFindings,
-        configChanges: doctorStep.configChanges,
-        configWriteRefusal: doctorStep.configWriteRefusal,
-      });
-    } catch (error) {
-      if (completionFailure) {
-        throw new AggregateError(
-          [completionFailure.error, error],
-          "Doctor progress reporting failed",
-          {
-            cause: error,
-          },
-        );
+    // Join callback failures with the settled Doctor error; authority checks keep their own outcome.
+    const reportCompletion = async (step: Parameters<typeof reportUpdateStepCompletion>[1]) => {
+      try {
+        await (completionFailure
+          ? params.progress?.onStepComplete?.(step)
+          : reportUpdateStepCompletion(params.progress, step));
+      } catch (error) {
+        if (completionFailure) {
+          throw new AggregateError(
+            [completionFailure.error, error],
+            "Doctor progress reporting failed",
+            {
+              cause: error,
+            },
+          );
+        }
+        throw error;
       }
-      throw error;
+    };
+    if (databaseReceipt) {
+      await reportCompletion({
+        ...databaseReceipt,
+        index: 0,
+        total: 0,
+      });
+      assertCurrent?.();
+      context?.assertCurrent();
     }
+    await reportCompletion({
+      ...doctorProgressInfo,
+      durationMs: doctorStep.durationMs,
+      exitCode: doctorStep.exitCode,
+      stdoutTail: doctorStep.stdoutTail,
+      stderrTail: doctorStep.stderrTail,
+      signal: doctorStep.signal,
+      killed: doctorStep.killed,
+      outputLimitExceeded: doctorStep.outputLimitExceeded,
+      termination: doctorStep.termination,
+      advisory: doctorStep.advisory,
+      warnings: doctorStep.warnings,
+      diagnostics: doctorStep.diagnostics,
+      failureFacts: doctorStep.failureFacts,
+      doctorLintFindings: doctorStep.doctorLintFindings,
+      configChanges: doctorStep.configChanges,
+      configWriteRefusal: doctorStep.configWriteRefusal,
+    });
+    assertCurrent?.();
+    context?.assertCurrent();
     if (completionFailure) {
       throw completionFailure.error;
     }
@@ -331,6 +351,7 @@ export async function runPackageUpdateDoctor(params: PackageDoctorOptions) {
                 configInputHash: context.inputHash,
                 repair: doctorPolicy.fix,
                 databaseGenerations: context.databaseBackup?.sourceGenerations,
+                originalRecoveryCapture: context.originalRecoveryCapture,
               },
             },
             runDoctor,
@@ -362,7 +383,7 @@ export async function runPackageUpdateDoctor(params: PackageDoctorOptions) {
   try {
     params.results?.push(...(processSettlement ? [processSettlement] : []), ...completedSteps);
     if (processSettlement) {
-      params.progress?.onStepComplete?.({ ...processSettlement, index: 0, total: 0 });
+      await params.progress?.onStepComplete?.({ ...processSettlement, index: 0, total: 0 });
       assertCurrent?.();
       context?.assertCurrent();
     }
@@ -435,33 +456,23 @@ export async function prepareGitPackageExposure(
   };
 }
 
-export type PackageInstallUpdateParams = {
+export type PackageInstallUpdateParams = Omit<PackageDoctorOptions, "results"> & {
   reapplyLocalOverrides?: boolean;
   requirePackageReplacement?: boolean;
-  root: string;
   installKind: "git" | "package" | "unknown";
   tag: string;
   installSpec?: string;
   timeoutMs: number;
-  /** Null leaves forward work unbounded; omission retains the caller's timeout. */
-  workTimeoutMs?: number | null;
   startedAt: number;
-  progress: ReturnType<typeof createUpdateProgress>["progress"];
-  managedServiceEnv?: NodeJS.ProcessEnv;
-  invocationCwd?: string;
   honorPackageRoot?: boolean;
-  nodeRunner?: string;
   resolveLifecycleNodeRunner?: () => string | undefined;
   installEnv?: NodeJS.ProcessEnv;
   installTarget?: ResolvedGlobalInstallTarget;
   beforeVerifyCandidate?: (root: string) => Promise<void>;
   validateCandidate: (root: string) => Promise<UpdateStepResult[]>;
   beforeActivate: () => Promise<void>;
-  assertCurrent?: () => void;
   reserveInstallSlot?: (root: string) => void;
   onTransaction: (transaction: PackageUpdateTransaction) => void | Promise<void>;
-  onConfigSnapshot?: PackageDoctorOptions["onConfigSnapshot"];
-  getDoctorContext?: PackageDoctorOptions["getDoctorContext"];
   getActivation?: () => PackageActivationOptions | undefined;
 };
 
@@ -475,6 +486,7 @@ export async function stagePackageInstallUpdate(
   const staged = createDeferredCore<string>();
   const continuation = createDeferredCore<PackageInstallUpdateParams | undefined>();
   let continued = false;
+  let deliveredFailure: { error: unknown } | undefined;
   let active: PackageInstallUpdateParams | undefined;
   const requireActive = () => {
     if (!active) {
@@ -552,14 +564,30 @@ export async function stagePackageInstallUpdate(
       }
       continued = true;
       continuation.resolve(next);
-      return await completed;
+      try {
+        return await completed;
+      } catch (error) {
+        deliveredFailure = { error };
+        throw error;
+      }
     },
     async close() {
       if (!continued) {
         continued = true;
         continuation.resolve(undefined);
       }
-      await completed;
+      try {
+        await completed;
+      } catch (error) {
+        // Closing joins the same operation; a delivered refusal is not a new cleanup failure.
+        if (
+          !deliveredFailure ||
+          deliveredFailure.error !== error ||
+          hasCommandProcessCleanupError(error)
+        ) {
+          throw error;
+        }
+      }
     },
   };
 }
@@ -617,6 +645,7 @@ export async function runPackageInstallUpdate(
     getActivation: params.getActivation,
     installTarget,
     installSpec,
+    installCwd: params.invocationCwd,
     packageName,
     packageRoot: pkgRoot,
     // Artifact equality cannot skip a method switch or retained-runtime staging.

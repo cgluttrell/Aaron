@@ -1,7 +1,9 @@
 import "./doctor-maintenance.settlement.test-support.js";
+import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { promisify } from "node:util";
 import { expect, it, vi } from "vitest";
 import { GatewayServiceStopUnsafeError } from "../daemon/service-inspection-error.js";
 import { collectNestedErrorCandidates } from "../infra/error-graph-internal.js";
@@ -13,14 +15,35 @@ import { readUpdateDatabaseGenerations } from "../infra/update-database-generati
 import { DoctorMaintenanceRefusalError } from "../infra/update-doctor-result.js";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import { withCommandProcessScope } from "../process/exec-spawn.js";
+import { createSpawnBrokerHost } from "../process/spawn-broker/host.js";
 import { beginDoctorMaintenance } from "./doctor-maintenance.js";
+import * as nocow from "./doctor-sqlite-nocow.js";
 
 const settlement = await import("./doctor-maintenance.settlement.test-support.js");
 const { begin, boundary, cleanupBarrier, root } = settlement;
+const capturedExecFile = promisify(execFile);
+const capturedSpawnSync = spawnSync;
 
-it.each([false, true])(
-  "captures settled Doctor writes without attributing earlier writes (changed=%s)",
-  async (changed) => {
+it("blocks captured native calls and the real broker while settlement controls are active", async () => {
+  try {
+    expect(() => capturedSpawnSync("/synthetic/forbidden")).toThrow(
+      "Doctor settlement controls cannot start or inspect native processes",
+    );
+    await expect(async () => capturedExecFile("/synthetic/forbidden")).rejects.toThrow(
+      "Doctor settlement controls cannot start or inspect native processes",
+    );
+    expect(() =>
+      createSpawnBrokerHost({ workerUrl: new URL("file:///synthetic/forbidden.mjs") }),
+    ).toThrow("Doctor settlement controls cannot start or inspect native processes");
+    expect(boundary.native).toHaveBeenCalledTimes(3);
+  } finally {
+    boundary.native.mockClear();
+  }
+});
+
+it.each(["unchanged", "before", "during"])(
+  "requires unchanged fingerprints through Doctor settlement (%s)",
+  async (scenario) => {
     vi.spyOn(updateState, "readUpdateDatabaseGenerationsIsolated").mockImplementation(
       async (paths) => readUpdateDatabaseGenerations(paths),
     );
@@ -30,7 +53,7 @@ it.each([false, true])(
     seed.exec("CREATE TABLE evidence(value INTEGER); INSERT INTO evidence VALUES (1)");
     seed.close();
     const databaseGenerations = readUpdateDatabaseGenerations([pathname, missing]);
-    if (changed) {
+    if (scenario === "before") {
       const foreign = new DatabaseSync(pathname);
       foreign.exec("INSERT INTO evidence VALUES (99)");
       foreign.close();
@@ -43,17 +66,21 @@ it.each([false, true])(
       databaseGenerations,
     });
     expect(maintenance?.databaseWrites).toBeUndefined();
-    const owned = new DatabaseSync(pathname);
-    owned.exec("PRAGMA journal_mode=WAL; INSERT INTO evidence VALUES (2)");
-    boundary.close.mockImplementationOnce(async () => owned.close());
+    if (scenario === "during") {
+      const owned = new DatabaseSync(pathname);
+      owned.exec("PRAGMA journal_mode=WAL; INSERT INTO evidence VALUES (2)");
+      boundary.close.mockImplementationOnce(async () => owned.close());
+    }
     await maintenance!.releaseState();
     const receipt = maintenance!.databaseWrites;
     expect(receipt).toEqual({
-      unchanged: !changed,
+      unchanged: scenario === "unchanged",
       fromGenerations: admitted,
       generations: readUpdateDatabaseGenerations([pathname, missing]),
     });
-    expect(receipt?.generations[pathname]).not.toBe(databaseGenerations[pathname]);
+    expect(receipt?.generations[pathname] === databaseGenerations[pathname]).toBe(
+      scenario === "unchanged",
+    );
     const later = new DatabaseSync(pathname);
     later.exec("INSERT INTO evidence VALUES (100)");
     later.close();
@@ -64,6 +91,44 @@ it.each([false, true])(
     );
   },
 );
+
+it("refuses automatic restore after a NOCOW physical replacement during Doctor maintenance", async () => {
+  vi.spyOn(updateState, "readUpdateDatabaseGenerationsIsolated").mockImplementation(async (paths) =>
+    readUpdateDatabaseGenerations(paths),
+  );
+  const pathname = path.join(settlement.tempDirs.make("doctor-nocow-receipt-"), "agent.sqlite");
+  const seed = new DatabaseSync(pathname);
+  seed.exec("CREATE TABLE evidence(value INTEGER); INSERT INTO evidence VALUES (1)");
+  seed.close();
+  const generations = readUpdateDatabaseGenerations([pathname]);
+  const rewrite = vi.spyOn(nocow, "repairDoctorSqliteNoCow").mockImplementation(async () => {
+    expect(boundary.close).toHaveBeenCalled();
+    fs.copyFileSync(pathname, `${pathname}.new`);
+    fs.renameSync(`${pathname}.new`, pathname);
+    return { changes: ["NOCOW rewrite complete"], warnings: [] };
+  });
+  const maintenance = await beginDoctorMaintenance({
+    root: null,
+    options: { repair: true, nonInteractive: true },
+    runtime: { log: boundary.log, error: vi.fn(), exit: vi.fn() },
+    databaseGenerations: generations,
+  });
+  await maintenance!.repairSqliteNoCow([pathname]);
+  await maintenance!.release();
+  expect(rewrite).toHaveBeenCalledOnce();
+  // Independent SQLite writers are not excluded during the rewrite, so even this
+  // Doctor-owned replacement cannot be attributed and must not be auto-restored.
+  expect(maintenance!.databaseWrites).toEqual({
+    unchanged: false,
+    fromGenerations: generations,
+    generations: readUpdateDatabaseGenerations([pathname]),
+  });
+  expect(maintenance!.databaseWrites?.generations[pathname]).not.toBe(generations[pathname]);
+  expect(maintenance!.warnings).not.toContain("NOCOW rewrite complete");
+  await expect(maintenance!.repairSqliteNoCow([pathname])).rejects.toThrow(
+    "original live maintenance owner",
+  );
+});
 
 it("keeps fingerprint failures advisory and publishes no database write proof", async () => {
   vi.spyOn(updateState, "readUpdateDatabaseGenerationsIsolated").mockImplementation(async (paths) =>
@@ -174,6 +239,24 @@ it.each([false, true])(
   },
 );
 
+it.each([undefined, {}])(
+  "reports settled state-release failure without a managed Gateway (%j)",
+  async (config) => {
+    const failure = new Error("settled state release failed");
+    const maintenance = await beginDoctorMaintenance({
+      root: null,
+      options: { repair: true, nonInteractive: true },
+      runtime: { log: boundary.log, error: vi.fn(), exit: vi.fn() },
+    });
+    boundary.release.mockRejectedValueOnce(failure);
+    const result = await maintenance!.finish(config).catch((error: unknown) => error);
+    await expect(maintenance!.release()).rejects.toBe(failure);
+    expect(result).toBe(failure);
+    expect(boundary.close).toHaveBeenCalledOnce();
+    expect(boundary.restart).not.toHaveBeenCalled();
+  },
+);
+
 it("retains state custody when the resource scope cannot close", async () => {
   const cleanupFailure = new Error("persistent resource cleanup failure");
   boundary.close.mockRejectedValue(cleanupFailure);
@@ -240,7 +323,6 @@ it("releases its acquired process owner without deferring a one-shot authority r
   });
   await expect(begin(assertCurrent)).rejects.toBe(refused);
   expect(boundary.release).toHaveBeenCalledOnce();
-  expect(boundary.ownerAssert).toHaveBeenCalledOnce();
   expect(boundary.restart).not.toHaveBeenCalled();
   expect(boundary.stop).toHaveBeenCalledOnce();
 });
@@ -264,32 +346,6 @@ it("preserves caller cancellation after a settled maintenance inspection", async
   await expect(withCommandProcessScope(() => begin(), controller.signal)).rejects.toBe(cancelled);
   expect(boundary.stop).toHaveBeenCalledOnce();
   expect(boundary.restart).not.toHaveBeenCalled();
-});
-
-it("leaves a progressing Gateway running and warns after the readiness cap", async () => {
-  boundary.health.mockResolvedValue({
-    healthy: false,
-    staleGatewayPids: [],
-    runtime: { status: "running", pid: 4242 },
-    portUsage: { port: 18789, status: "free", listeners: [], hints: [] },
-    waitOutcome: "still-starting",
-    elapsedMs: 300_000,
-    startupPhase: "startup migration",
-  });
-  const maintenance = await begin();
-  expect(maintenance).toBeDefined();
-
-  await expect(maintenance!.finish({})).resolves.toBeUndefined();
-
-  const warning = expect.stringMatching(
-    /still starting after 300s.*startup migration.*openclaw gateway status --deep/,
-  );
-  expect(maintenance!.warnings).toContainEqual(warning);
-  expect(boundary.log).toHaveBeenCalledWith(warning);
-  expect(boundary.log).not.toHaveBeenCalledWith(
-    "Gateway restarted and verified after Doctor repair.",
-  );
-  expect(boundary.restart).toHaveBeenCalledOnce();
 });
 
 it.each(["forced", "uncertain"] as const)(

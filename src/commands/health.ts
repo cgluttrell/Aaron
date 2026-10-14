@@ -6,11 +6,7 @@ import { listReadOnlyChannelPluginsForConfig } from "../channels/plugins/read-on
 import { probeGatewayStatus } from "../cli/daemon-cli/probe.js";
 import { DEFAULT_RESTART_HEALTH_TIMEOUT_MS } from "../cli/daemon-cli/restart-health.constants.js";
 import { withProgress } from "../cli/progress.js";
-import {
-  createConfigReadError,
-  formatInvalidConfigDetails,
-  isConfigReadFailure,
-} from "../config/io.invalid-config.js";
+import { createConfigReadError, isConfigReadFailure } from "../config/io.invalid-config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import {
   buildGatewayConnectionDetails,
@@ -47,16 +43,6 @@ export { formatHealthChannelLines } from "./health-format.js";
 export type { HealthSummary } from "../gateway/health/types.js";
 
 const healthLog = createSubsystemLogger("health");
-
-const debugHealth = (
-  cfg: OpenClawConfig | undefined,
-  message: string,
-  meta?: Record<string, unknown>,
-) => {
-  if (isDiagnosticFlagEnabled("health", cfg)) {
-    healthLog.info(message, meta);
-  }
-};
 
 function isGatewayHealthAuthUnavailableError(error: unknown): boolean {
   return isGatewayCredentialsRequiredError(error) || isGatewaySecretRefUnavailableError(error);
@@ -350,7 +336,6 @@ export async function healthCommand(
         accountIds,
       });
       const accountId = resolvePreferredAccountId({
-        accountIds,
         defaultAccountId,
         boundAccounts,
       });
@@ -377,11 +362,14 @@ export async function healthCommand(
           includeChannelPrefix: true,
         });
       } catch (error) {
-        debugHealth(cfg, "logSelfId.failed", {
+        const details = {
           channel: plugin.id,
           accountId,
           error: formatErrorMessage(error),
-        });
+        };
+        if (isDiagnosticFlagEnabled("health", cfg)) {
+          healthLog.info("logSelfId.failed", details);
+        }
       }
     }
 
@@ -444,7 +432,7 @@ export async function readNonObservingHealthConfig(): Promise<OpenClawConfig> {
     pluginValidation: "core-only",
   });
   if (isConfigReadFailure(snapshot)) {
-    throw createConfigReadError(snapshot.path, formatInvalidConfigDetails(snapshot.issues));
+    throw createConfigReadError(snapshot);
   }
   return snapshot.runtimeConfig ?? snapshot.config;
 }

@@ -43,10 +43,7 @@ import {
   type OpenClawAgentDatabaseOptions,
 } from "./openclaw-agent-db-contract.js";
 import * as maintenanceAuthority from "./openclaw-agent-db-lease.js";
-import {
-  backfillOpenClawAgentSchema,
-  migrateOpenClawAgentSchema,
-} from "./openclaw-agent-db-legacy-schema.js";
+import { migrateOpenClawAgentSchema } from "./openclaw-agent-db-legacy-schema.js";
 import { persistAgentSchemaMetadata } from "./openclaw-agent-db-metadata-write.js";
 import { ensureOpenClawAgentDatabasePermissions } from "./openclaw-agent-db-permissions.js";
 import { registerOpenClawAgentDatabase } from "./openclaw-agent-db-registry.js";
@@ -60,13 +57,13 @@ import {
   hasPendingMemoryChunkMetadataMigration,
   migrateRetiredAgentStateLeaseSchema,
   ensureSessionKeyContractSchemaInTransaction,
+  ensureSessionReactionsSchemaInTransaction,
   readExistingAgentSchemaMeta,
   repairAndAssertOpenClawAgentV14SchemaForMigration,
 } from "./openclaw-agent-db-schema-helpers.js";
 import {
   backfillSessionConversations,
-  dropLegacyRuntimeJournalSchemas,
-  dropLegacySessionTranscriptSearchSchema,
+  assertSupportedAgentMigrationSchemas,
   ensureSessionAdditiveColumns,
   ensureSessionEntryValidityProjection,
   migrateConversationDeliveryTargetColumn,
@@ -75,7 +72,6 @@ import {
   migrateSessionTranscriptGenerations,
 } from "./openclaw-agent-db-session-migrations.js";
 import { migrateSessionNodesAndWindows } from "./openclaw-agent-db-session-nodes-migration.js";
-import { backfillSessionEntryProvenance } from "./openclaw-agent-db-session-provenance.js";
 import {
   isPersistentOpenClawAgentDatabasePath,
   resolveOpenClawAgentSqlitePath,
@@ -104,22 +100,6 @@ import {
 } from "./openclaw-state-db.js";
 
 const agentDbLog = createSubsystemLogger("state/agent-db");
-
-function dropLegacyMemoryIndexSchema(db: DatabaseSync): void {
-  const columns = db.prepare("PRAGMA table_info(memory_index_sources)").all() as Array<{
-    name?: unknown;
-  }>;
-  const hasLegacySourceColumns = columns.some((row) => row.name === "source_kind");
-  if (!hasLegacySourceColumns) {
-    return;
-  }
-  // Memory indexes are derived cache data; v1 used a different key shape.
-  db.exec(`
-    DROP TABLE IF EXISTS memory_index_chunks_fts;
-    DROP TABLE IF EXISTS memory_index_chunks;
-    DROP TABLE IF EXISTS memory_index_sources;
-  `);
-}
 
 function migrateMemoryChunkMetadataSchema(db: DatabaseSync): void {
   ensureMemoryRecallMetadataSchema(db);
@@ -341,6 +321,9 @@ function ensureAgentSchema(
           `OpenClaw agent database ${pathname} uses schema version ${previousVersion}; expected at most ${targetVersion} for this migration.`,
         );
       }
+      if (previousVersion < targetVersion) {
+        assertSupportedAgentMigrationSchemas(db, pathname, previousVersion);
+      }
       const isEmptyDatabase =
         previousVersion === 0 &&
         readExistingAgentSchemaMeta(db) === null &&
@@ -429,6 +412,7 @@ function ensureAgentSchema(
         ensureSessionAdditiveColumns(db);
         ensureSessionEntryValidityProjection(db);
         ensureSessionKeyContractSchemaInTransaction(db);
+        ensureSessionReactionsSchemaInTransaction(db);
         if (hasPendingMemoryChunkMetadataMigration(db)) {
           migrateMemoryChunkMetadataSchema(db);
           db.exec(schemaSql);
@@ -445,20 +429,13 @@ function ensureAgentSchema(
       } else if (previousVersion === 14) {
         repairAndAssertOpenClawAgentV14SchemaForMigration(db, { agentId, pathname });
       }
-      // Structure-gated helpers converge both legacy memory schema lineages.
-      dropLegacyMemoryIndexSchema(db);
-      dropLegacySessionTranscriptSearchSchema(db);
-      dropLegacyRuntimeJournalSchemas(db);
       maintenanceAuthority.renewAgentDatabaseMaintenanceAuthorityIfPresent();
       migrateMemoryIndexSourcesIdentity(db);
       migrateOpenClawAgentSchema(db);
       migrateConversationDeliveryTargetColumn(db);
-      backfillOpenClawAgentSchema(db, previousVersion);
-      // Remove after 2026-10-01: drop the pre-v11 conversation backfill once schema 11 is the support floor.
       if (previousVersion < 11) {
         backfillSessionConversations(db);
       }
-      backfillSessionEntryProvenance(db, previousVersion);
       migrateSessionNodesAndWindows(db, previousVersion);
       maintenanceAuthority.renewAgentDatabaseMaintenanceAuthorityIfPresent();
       ensureSessionAdditiveColumns(db);
@@ -524,10 +501,7 @@ function ensureAgentSchema(
 /** Initialize agent schema/ownership metadata on an independently managed connection. */
 export function ensureOpenClawAgentDatabaseSchema(
   db: DatabaseSync,
-  options: OpenClawAgentDatabaseOptions & {
-    register?: boolean;
-    onMigrationWarning?: (warning: string) => void;
-  },
+  options: OpenClawAgentDatabaseOptions & { register?: boolean },
 ): void {
   runSqliteIntegrityOperationSync(ensureOpenClawAgentDatabaseSchemaSteps(db, options));
 }
@@ -543,6 +517,11 @@ export function* ensureOpenClawAgentDatabaseSchemaSteps(
   const agentId = normalizeAgentId(options.agentId);
   const databaseOptions = { ...options, agentId };
   const pathname = resolveOpenClawAgentSqlitePath(databaseOptions);
+  assertExistingAgentSchemaOwner(readExistingAgentSchemaMeta(db), agentId, pathname);
+  const version = assertSupportedAgentSchemaVersion(db, pathname);
+  if (version < OPENCLAW_AGENT_SCHEMA_VERSION) {
+    assertSupportedAgentMigrationSchemas(db, pathname, version);
+  }
   const deletionFence =
     databaseOptions.register === true &&
     isPersistentOpenClawAgentDatabasePath(pathname, databaseOptions.env)
@@ -631,6 +610,8 @@ export function* migrateOpenClawAgentDatabaseToMediaPrerequisiteSchemaSteps(
   }
   const agentId = normalizeAgentId(options.agentId);
   const pathname = resolveOpenClawAgentSqlitePath({ ...options, agentId });
+  assertExistingAgentSchemaOwner(readExistingAgentSchemaMeta(db), agentId, pathname);
+  assertSupportedAgentMigrationSchemas(db, pathname, readSqliteUserVersion(db));
   if (db.location()) {
     maintenanceAuthority.invalidateOpenClawAgentDatabaseIntegrityBeforeMutation(
       pathname,

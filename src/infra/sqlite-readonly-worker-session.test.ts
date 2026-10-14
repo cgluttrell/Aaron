@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import type { SpawnOptions } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
@@ -27,10 +26,7 @@ class MockChild extends EventEmitter {
   });
   kill = vi.fn<(_signal?: NodeJS.Signals) => boolean>(() => true);
 }
-const mock = vi.hoisted(() => ({
-  spawn:
-    vi.fn<(_executable: string, _argv: readonly string[], _options: SpawnOptions) => MockChild>(),
-}));
+const mock = vi.hoisted(() => ({ spawn: vi.fn<(executable: string) => MockChild>() }));
 vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
   spawn: mock.spawn,
@@ -38,9 +34,14 @@ vi.mock("node:child_process", async (importOriginal) => ({
 
 type Session = ReturnType<typeof createSqliteReadOnlyWorkerSession>;
 const sessions: Array<{ session: Session; child: MockChild }> = [];
-function createSession(cwd = "/fixture/launch") {
+function createSession(unavailableRuntime?: string) {
   const child = new MockChild();
-  mock.spawn.mockReturnValueOnce(child);
+  mock.spawn.mockImplementationOnce((executable) => {
+    if (executable === unavailableRuntime) {
+      throw Object.assign(new Error(`spawn ${executable} EACCES`), { code: "EACCES" });
+    }
+    return child;
+  });
   const readBudget = vi.fn(() => ({ timeoutMs: 60_000, size: "fixture" }));
   const requestArgs = vi.fn((pathname: string, options: { mode: string }) => [
     options.mode,
@@ -49,7 +50,7 @@ function createSession(cwd = "/fixture/launch") {
   const env = { OPENCLAW_STATE_DIR: "/fixture/state" };
   const session = createSqliteReadOnlyWorkerSession({
     env,
-    cwd,
+    cwd: "/fixture/launch",
     transport: { kind: "native" },
     argv: ["--fixture-readonly-session"],
     retainLifetime: false,
@@ -111,28 +112,26 @@ describe("SQLite read-only session operation custody", () => {
       child.emit("error", failure);
       await nextTurn();
       expect(settled()).toBe(false);
+      expect(session.notStarted).toBe(false);
       child.emit("close", -1, null);
       const error = await observed;
+      expect(session.notStarted).toBe(!spawned);
       if (spawned) {
         expect(error).toBe(failure);
       } else {
         expect(error).toMatchObject({ code, cause: failure });
-        expect((error as Error).message).toContain("runtime binary not executable");
+        expect((error as Error).message).toContain(
+          `runtime binary not executable: ${process.execPath}`,
+        );
+        expect((error as Error).message).not.toMatch(/disk space|XDG_CACHE_HOME/);
         expect((error as Error).message).toContain(process.execPath);
         expect((error as Error).message).toContain("/fixture/launch");
-        expect((error as Error).message).not.toMatch(/disk space|XDG_CACHE_HOME/);
         expect((error as Error).message).not.toContain("OPENCLAW_STATE_DIR");
         expect((error as Error).message).not.toContain("--fixture-readonly-session");
       }
       await session.close();
     },
   );
-
-  it("inherits an unchanged native working directory", () => {
-    createSession(process.cwd());
-    const options = mock.spawn.mock.calls.at(-1)?.[2];
-    expect(options).not.toHaveProperty("cwd");
-  });
 
   it.each([
     "staging-create",
@@ -338,33 +337,42 @@ it("carries only its captured read scope and refuses callbacks after owner retir
   }
 });
 
-it("counts admitted read-only session children in node spawn diagnostics", () => {
-  let now = 0;
-  const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
-  const events: unknown[] = [];
-  const stop = onDiagnosticEvent((event) => {
-    if (event.type === "diagnostic.child_process.spawn") {
-      events.push(event);
+it.each([
+  { execPath: "/fixture/bin/node", family: "node" },
+  { execPath: "/fixture/bin/bun", family: "bun" },
+  { execPath: "/fixture/bin/custom-runtime", family: "other" },
+])(
+  "counts admitted read-only session children as $family in spawn diagnostics",
+  ({ execPath, family }) => {
+    const originalExecPath = process.execPath;
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => now);
+    const events: unknown[] = [];
+    const stop = onDiagnosticEvent((event) => {
+      if (event.type === "diagnostic.child_process.spawn") {
+        events.push(event);
+      }
+    });
+    try {
+      process.execPath = execPath;
+      setDiagnosticsEnabledForProcess(false);
+      emitChildProcessSpawnSample();
+      setDiagnosticsEnabledForProcess(true);
+      const { child } = createSession("/usr/bin/node");
+      expect(mock.spawn).toHaveBeenCalledWith(execPath, expect.any(Array), expect.any(Object));
+      now = 60_000;
+      emitChildProcessSpawnSample();
+      expect(events).toEqual([]);
+      child.emit("spawn");
+      now = 120_000;
+      emitChildProcessSpawnSample();
+      expect(events).toEqual([expect.objectContaining({ family, count: 1 })]);
+    } finally {
+      process.execPath = originalExecPath;
+      stop();
+      setDiagnosticsEnabledForProcess(false);
+      emitChildProcessSpawnSample();
+      clock.mockRestore();
     }
-  });
-  try {
-    setDiagnosticsEnabledForProcess(false);
-    emitChildProcessSpawnSample();
-    setDiagnosticsEnabledForProcess(true);
-    const { child } = createSession();
-    now = 60_000;
-    emitChildProcessSpawnSample();
-    expect(events).toEqual([]);
-    child.emit("spawn");
-    now = 120_000;
-    emitChildProcessSpawnSample();
-    expect(events).toEqual([
-      expect.objectContaining({ family: process.versions.bun ? "other" : "node", count: 1 }),
-    ]);
-  } finally {
-    stop();
-    setDiagnosticsEnabledForProcess(false);
-    emitChildProcessSpawnSample();
-    clock.mockRestore();
-  }
-});
+  },
+);

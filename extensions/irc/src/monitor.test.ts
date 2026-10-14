@@ -9,6 +9,7 @@ import {
 } from "openclaw/plugin-sdk/channel-ingress-test-runtime";
 import { createPluginRuntimeMock } from "openclaw/plugin-sdk/channel-test-helpers";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
+import { withinTest } from "openclaw/plugin-sdk/test-fixtures";
 import { describe, expect, it, vi } from "vitest";
 import { createIrcIngressMonitor } from "./irc-ingress.js";
 import { onIrcTestLine, startIrcTestServer } from "./irc-server.test-support.js";
@@ -44,24 +45,6 @@ type ReconnectingReplyIrcServer = {
 type IrcIngressQueue = NonNullable<Parameters<typeof createIrcIngressMonitor>[0]["queue"]>;
 type IrcIngressPayload = Parameters<IrcIngressQueue["enqueue"]>[1];
 type IrcMonitorMessageHandler = NonNullable<Parameters<typeof monitorIrcProvider>[0]["onMessage"]>;
-
-function waitForOwnedSignal<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
-  const abortError = () =>
-    signal.reason instanceof Error
-      ? signal.reason
-      : new Error("IRC test aborted before the owned signal settled", { cause: signal.reason });
-  if (signal.aborted) {
-    return Promise.reject(abortError());
-  }
-  let onAbort!: () => void;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject(abortError());
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-  return Promise.race([pending, aborted]).finally(() =>
-    signal.removeEventListener("abort", onAbort),
-  );
-}
 
 async function withIngressQueue<T>(
   fn: (queue: IrcIngressQueue, stateDir: string) => Promise<T>,
@@ -306,8 +289,8 @@ describe("IRC automatic reply outcomes", () => {
           statusSink,
         });
         server.sendInbound("bot");
-        await waitForOwnedSignal(admitted.promise, signal);
-        await waitForOwnedSignal(completed, signal);
+        await withinTest(admitted.promise, signal);
+        await withinTest(completed, signal);
 
         expect(runtime.error).toHaveBeenCalledWith(
           expect.stringContaining("Message must be non-empty for IRC sends"),
@@ -422,14 +405,14 @@ describe("irc monitor reconnect", () => {
         const betaSocket = sockets.get("qa-beta");
         expect(betaSocket).toBeDefined();
         sockets.get("qa-alpha")?.write(":alice!ident@example.org PRIVMSG #alpha :recover me\r\n");
-        await waitForOwnedSignal(stored.promise, signal);
+        await withinTest(stored.promise, signal);
         let stopSettled = false;
         const stopping = alpha.stop().then(() => {
           stopSettled = true;
         });
         const betaCompleted = observeIngressCompletion(betaQueue);
         betaSocket?.write(":bob!ident@example.org PRIVMSG #beta :sibling stays live\r\n");
-        await waitForOwnedSignal(betaCompleted, signal);
+        await withinTest(betaCompleted, signal);
         expect(stopSettled).toBe(false);
         expect(betaDispatch).toHaveBeenCalledOnce();
         expect(alphaDispatch).not.toHaveBeenCalled();
@@ -441,7 +424,7 @@ describe("irc monitor reconnect", () => {
         expect(pending).toHaveLength(1);
         const recovered = observeIngressCompletion(alphaQueue);
         await start("alpha", alphaQueue, freshDispatch);
-        expect(await waitForOwnedSignal(recovered, signal)).toBe(pending[0]?.id);
+        expect(await withinTest(recovered, signal)).toBe(pending[0]?.id);
         expect(freshDispatch).toHaveBeenCalledOnce();
         expect(freshDispatch.mock.calls[0]?.[0]).toMatchObject({
           text: "recover me",
@@ -471,7 +454,7 @@ describe("irc monitor reconnect", () => {
       try {
         monitor = await monitorIrcProvider({ config, ingressQueue, statusSink });
         server.disconnectFirst();
-        await waitForOwnedSignal(reconnected, signal);
+        await withinTest(reconnected, signal);
         expect(
           server.lines.filter((line) => line === "USER bot 0 * :OpenClaw").length,
         ).toBeGreaterThanOrEqual(3);
@@ -521,13 +504,13 @@ describe("irc monitor reconnect", () => {
           statusSink,
         });
         server.sendInbound();
-        await waitForOwnedSignal(pairingStarted.promise, signal);
+        await withinTest(pairingStarted.promise, signal);
         server.disconnectFirst();
-        await waitForOwnedSignal(reconnected, signal);
+        await withinTest(reconnected, signal);
         expect(server.connectionCount).toBeGreaterThanOrEqual(2);
         expect(server.linesByConnection[1]?.some((line) => line.startsWith("USER "))).toBe(true);
         pairingResult.resolve({ code: "CODE", created: true });
-        const completedId = await waitForOwnedSignal(completed, signal);
+        const completedId = await withinTest(completed, signal);
         expect(enqueueSpy).toHaveBeenCalledOnce();
         expect(completedId).toBe(enqueueSpy.mock.calls[0]?.[0]);
         expect(await ingressQueue.listPending({ limit: "all" })).toEqual([]);
@@ -535,7 +518,7 @@ describe("irc monitor reconnect", () => {
         // Let the delayed send finish before shutdown can suppress it.
         // Peer-observed QUIT follows any reply bytes queued on the replacement socket.
         await monitor.stop();
-        await waitForOwnedSignal(server.replacementQuitReceived, signal);
+        await withinTest(server.replacementQuitReceived, signal);
         expect(
           server.linesByConnection[0]?.some((line) => line.startsWith("PRIVMSG alice :")),
         ).toBe(false);
@@ -589,7 +572,7 @@ describe("irc monitor inbound target", () => {
             },
           });
           server.sendInbound(serverTarget, colonlessBody);
-          const completedId = await waitForOwnedSignal(completed, signal);
+          const completedId = await withinTest(completed, signal);
           expect(messages).toHaveLength(1);
           expect(messages[0]).toMatchObject({
             messageId: completedId,
@@ -634,7 +617,7 @@ describe("irc monitor inbound target", () => {
           ingressQueue,
           onMessage,
         });
-        expect(await waitForOwnedSignal(completed, signal)).toBe(eventId);
+        expect(await withinTest(completed, signal)).toBe(eventId);
         expect(await ingressQueue.listPending({ limit: "all" })).toEqual([]);
         expect(await ingressQueue.listClaims()).toEqual([]);
         expect(onMessage).not.toHaveBeenCalled();
@@ -674,7 +657,7 @@ describe("irc monitor inbound target", () => {
           ingressQueue,
           onMessage,
         });
-        expect(await waitForOwnedSignal(completed, signal)).toBe(eventId);
+        expect(await withinTest(completed, signal)).toBe(eventId);
         expect(await ingressQueue.listPending({ limit: "all" })).toEqual([]);
         expect(await ingressQueue.listClaims()).toEqual([]);
         expect(onMessage).not.toHaveBeenCalled();
@@ -702,7 +685,7 @@ describe("irc monitor inbound target", () => {
           onMessage,
         });
         server.sendInbound("#openclaw", false, "bot");
-        const completedId = await waitForOwnedSignal(completed, signal);
+        const completedId = await withinTest(completed, signal);
         expect(enqueueSpy).toHaveBeenCalledOnce();
         await enqueueSpy.mock.results[0]?.value;
         expect(completedId).toBe(enqueueSpy.mock.calls[0]?.[0]);

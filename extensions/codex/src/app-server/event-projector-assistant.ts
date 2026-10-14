@@ -181,6 +181,15 @@ export class CodexAssistantProjection {
     }
   }
 
+  /** Codex deltas are best-effort; completed item text is authoritative (codex-rs TUI agrees). */
+  async streamCompletedItemTail(item: CodexThreadItem | undefined): Promise<void> {
+    const streamed = item?.type === "agentMessage" ? this.assistantTextByItem.get(item.id) : "";
+    // Without this, a dropped final delta leaves live and terminal chat text short.
+    if (streamed && typeof item?.text === "string" && item.text.startsWith(streamed)) {
+      await this.handleAssistantDelta({ itemId: item.id, delta: item.text.slice(streamed.length) });
+    }
+  }
+
   recordItemCompleted(
     item: CodexThreadItem | undefined,
     itemId: string | undefined,
@@ -335,7 +344,7 @@ export class CodexAssistantProjection {
     if (recoveredAudible.length > 0) {
       return recoveredAudible.slice(-1);
     }
-    const recovered = this.resolveFinalAssistantTextItem()?.text;
+    const recovered = this.resolveFinalAssistantText();
     return recovered ? [recovered] : [];
   }
 
@@ -453,17 +462,12 @@ export class CodexAssistantProjection {
   }
 
   hasAssistantItemTextForSynthesis(): boolean {
-    for (let i = this.assistantItemOrder.length - 1; i >= 0; i -= 1) {
-      const itemId = this.assistantItemOrder[i];
-      if (!itemId || this.isNonTerminalAssistantItem(itemId)) {
-        continue;
-      }
-      const text = this.assistantTextByItem.get(itemId);
-      if (text && text.length > 0) {
-        return true;
-      }
-    }
-    return false;
+    return this.assistantItemOrder.some(
+      (itemId) =>
+        Boolean(itemId) &&
+        !this.isNonTerminalAssistantItem(itemId) &&
+        Boolean(this.assistantTextByItem.get(itemId)),
+    );
   }
 
   createCurrentAttemptAssistantMessage(
@@ -629,7 +633,7 @@ export class CodexAssistantProjection {
     this.supersedeVisibleAnswerCandidate();
   }
 
-  private resolveFinalAssistantTextItem(): { itemId: string; text: string } | undefined {
+  private resolveFinalAssistantText(): string | undefined {
     for (let i = this.assistantItemOrder.length - 1; i >= 0; i -= 1) {
       const itemId = this.assistantItemOrder[i];
       if (!itemId) {
@@ -640,7 +644,7 @@ export class CodexAssistantProjection {
         continue;
       }
       if (text && !this.isToolProgressEchoText(itemId, text)) {
-        return { itemId, text };
+        return text;
       }
     }
     return undefined;

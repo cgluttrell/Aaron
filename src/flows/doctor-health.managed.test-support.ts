@@ -52,8 +52,6 @@ const { mocks } = await import("./doctor-health.test-support.js");
 type DoctorManagedRepairOutcome =
   | "ready"
   | "archive-verification"
-  | "clean-repair"
-  | "clean-inspect"
   | "clean-stopped-repair"
   | "clean-stopped-probe-timeout"
   | "clean-stopped-owner-unknown"
@@ -85,7 +83,7 @@ export function registerDoctorManagedRepairTests(outcomes: readonly DoctorManage
         const clean = outcome.startsWith("clean-") || outcome.startsWith("update-");
         const archiveVerification = outcome === "archive-verification";
         const current = clean || archiveVerification;
-        const inspectionOnly = outcome === "clean-inspect" || outcome === "clean-force-inspect";
+        const inspectionOnly = outcome === "clean-force-inspect";
         const force = outcome.startsWith("clean-force-");
         const cfg: OpenClawConfig = {
           agents: {
@@ -451,7 +449,6 @@ export function registerDoctorManagedRepairTests(outcomes: readonly DoctorManage
             outcome === "config-refused" ||
             outcome === "workspace-cleanup-failed" ||
             outcome === "restart-unhealthy" ||
-            outcome === "clean-repair" ||
             outcome === "clean-stopped-repair" ||
             outcome === "clean-force-repair" ||
             approvalsBlocked ||

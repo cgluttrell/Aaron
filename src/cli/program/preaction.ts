@@ -1,9 +1,8 @@
 // Global Commander pre-action hook: startup presentation, config guard, logging, and plugin preflight.
 import type { Command } from "commander";
-import type { ConfigFileSnapshot } from "../../config/types.js";
+import type { StartupConfigPreflightOptions } from "../../commands/startup-config-preflight.js";
 import { setVerbose } from "../../globals.js";
 import type { LogLevel } from "../../logging/levels.js";
-import { resolvePluginInstallInvalidConfigPolicy } from "../../plugins/install-config.js";
 import { defaultRuntime } from "../../runtime.js";
 import { resolveCliArgvInvocation } from "../argv-invocation.js";
 import { getVerboseFlag, isHelpOrVersionInvocation } from "../argv.js";
@@ -12,12 +11,10 @@ import {
   applyCliExecutionStartupPresentation,
   ensureCliExecutionBootstrap,
 } from "../command-execution-startup.js";
-import { inheritOptionFromParent } from "../command-options.js";
 import { resolveCliCommandPathPolicy } from "../command-path-policy.js";
 import { resolveCliStartupPolicy } from "../command-startup-policy.js";
 import { applyResolvedCommandOutputMode } from "../json-output-mode.js";
 import { isModelsPlainMachineOutput } from "../models-output-mode.js";
-import { resolvePluginInstallPreactionRequest } from "../plugin-install-config-policy.js";
 import { getCommanderCommandPath, hasCommanderOptionToken } from "./commander-parse-facts.js";
 import { isCommandJsonOutputMode } from "./json-mode.js";
 import { isParentDefaultHelpAction } from "./parent-default-help.js";
@@ -33,36 +30,12 @@ function setProcessTitleForCommand() {
   }
 }
 
-function shouldAllowInvalidConfigForAction(actionCommand: Command, commandPath: string[]): boolean {
-  return (
-    commandPath[0] === "update" ||
-    resolvePluginInstallInvalidConfigPolicy(
-      resolvePluginInstallPreactionRequest({
-        actionCommand,
-        commandPath,
-        argv: process.argv,
-      }),
-    ) === "allow-plugin-recovery"
-  );
-}
-
 function getCliLogLevel(actionCommand: Command): LogLevel | undefined {
   if (actionCommand.getOptionValueSourceWithGlobals("logLevel") !== "cli") {
     return undefined;
   }
   const logLevel = actionCommand.optsWithGlobals<{ logLevel?: unknown }>().logLevel;
   return typeof logLevel === "string" ? (logLevel as LogLevel) : undefined;
-}
-
-function getCommandAgentId(actionCommand: Command): string | undefined {
-  if (!actionCommand.options.some((option) => option.attributeName() === "agent")) {
-    return undefined;
-  }
-  const value =
-    actionCommand.getOptionValueSource("agent") === "cli"
-      ? actionCommand.getOptionValue("agent")
-      : inheritOptionFromParent(actionCommand, "agent", "cli");
-  return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
 function isBareParentDefaultHelpInvocation(actionCommand: Command, argv: string[]): boolean {
@@ -200,8 +173,17 @@ export function registerPreActionHooks(program: Command, programVersion: string)
       });
       return;
     }
-    let beforeStatePreparation: ((snapshot?: ConfigFileSnapshot) => Promise<boolean>) | undefined;
-    let allowInvalid = shouldAllowInvalidConfigForAction(actionCommand, commandPath);
+    let beforeStatePreparation: StartupConfigPreflightOptions["beforeStatePreparation"];
+    const [{ resolvePluginInstallInvalidConfigPolicy }, { resolvePluginInstallPreactionRequest }] =
+      await Promise.all([
+        import("../../plugins/install-config.js"),
+        import("../plugin-install-config-policy.js"),
+      ]);
+    let allowInvalid =
+      commandPath[0] === "update" ||
+      resolvePluginInstallInvalidConfigPolicy(
+        resolvePluginInstallPreactionRequest({ actionCommand, commandPath, argv: process.argv }),
+      ) === "allow-plugin-recovery";
     if (isGatewayRunAction(actionCommand)) {
       const { prepareGatewayRunBootstrap, recheckGatewayRunBootstrap } =
         await import("../gateway-cli/pre-bootstrap.js");
@@ -219,27 +201,6 @@ export function registerPreActionHooks(program: Command, programVersion: string)
           runtime: defaultRuntime,
           ...(snapshot ? { snapshot } : {}),
         });
-    }
-    const commandAgentId = getCommandAgentId(actionCommand);
-    if (commandAgentId) {
-      const existingGuard = beforeStatePreparation;
-      beforeStatePreparation = async (snapshot) => {
-        if (snapshot) {
-          const { isValidAgentId, normalizeAgentId } =
-            await import("@openclaw/normalization-core/agent-id");
-          if (isValidAgentId(commandAgentId)) {
-            const [{ listAgentIds }, { retainLegacyDefaultAgentId }] = await Promise.all([
-              import("../../agents/agent-scope-config.js"),
-              import("../../config/legacy.default-agent-owner.js"),
-            ]);
-            const agentId = normalizeAgentId(commandAgentId);
-            if (listAgentIds(snapshot.sourceConfig).includes(agentId)) {
-              retainLegacyDefaultAgentId(snapshot.sourceConfig, agentId);
-            }
-          }
-        }
-        return (await existingGuard?.(snapshot)) ?? true;
-      };
     }
     await ensureCliExecutionBootstrap({
       runtime: defaultRuntime,

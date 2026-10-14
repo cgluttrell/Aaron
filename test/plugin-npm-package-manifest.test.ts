@@ -1,7 +1,7 @@
 // Plugin npm manifest tests validate generated plugin package manifests.
 import { execFile, spawnSync, type SpawnSyncOptions } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
+import fs, {
   chmodSync,
   existsSync,
   lstatSync,
@@ -14,18 +14,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:http";
-import { dirname, join, win32 } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   generatePluginNpmPackageLockWithRetry,
   resolveAugmentedPluginNpmPackageJson,
   resolveAugmentedPluginNpmManifest,
-  resolvePluginNpmCommand,
   runPluginNpmCiWithRetry,
   withAugmentedPluginNpmManifestForPackage,
 } from "../scripts/lib/plugin-npm-package-manifest.mts";
+import { resolveNpmRunner } from "../scripts/npm-runner.mts";
 import { hasChannelPackageState } from "../src/channels/plugins/package-state-probes.js";
 import type { PluginManifest } from "../src/plugins/manifest-types.js";
 import {
@@ -113,7 +113,9 @@ function parseNpmPackResult(stdout: string): NpmPackResult {
 }
 
 function listNpmPackDryRunFiles(packageDir: string): string[] {
-  const invocation = resolvePluginNpmCommand(["pack", "--dry-run", "--json", "--ignore-scripts"]);
+  const invocation = resolveNpmRunner({
+    npmArgs: ["pack", "--dry-run", "--json", "--ignore-scripts"],
+  });
   const result = spawnSync(invocation.command, invocation.args, {
     cwd: packageDir,
     encoding: "utf8",
@@ -507,41 +509,6 @@ describe("plugin npm package manifest staging", () => {
     expect(packageJson.openclaw?.release?.bundleRuntimeDependencies).toBe(false);
   });
 
-  it("wraps Windows npm.cmd staging through cmd.exe without shell mode", () => {
-    const nodeDir = "C:\\Program Files\\nodejs";
-    const npmCmdPath = win32.resolve(nodeDir, "npm.cmd");
-
-    expect(
-      resolvePluginNpmCommand(["install", "--package-lock-only"], {
-        comSpec: "C:\\Windows\\System32\\cmd.exe",
-        env: { PATH: "C:\\bin" },
-        execPath: win32.join(nodeDir, "node.exe"),
-        existsSync: (candidate: string) => candidate === npmCmdPath,
-        platform: "win32",
-      }),
-    ).toEqual({
-      command: "C:\\Windows\\System32\\cmd.exe",
-      args: [
-        "/d",
-        "/s",
-        "/c",
-        '""C:\\Program Files\\nodejs\\npm.cmd" install --package-lock-only"',
-      ],
-      shell: false,
-      windowsVerbatimArguments: true,
-    });
-  });
-
-  it("rejects bare npm fallback on Windows plugin package staging", () => {
-    expect(() =>
-      resolvePluginNpmCommand(["install"], {
-        execPath: "C:\\nodejs\\node.exe",
-        existsSync: () => false,
-        platform: "win32",
-      }),
-    ).toThrow("OpenClaw refuses to shell out to bare npm on Windows");
-  });
-
   it("retries timed-out bundled dependency installs after cleaning partial output", () => {
     const timeoutError = Object.assign(new Error("timed out"), { code: "ETIMEDOUT" });
     const spawnResults = [
@@ -834,6 +801,50 @@ describe("plugin npm package manifest staging", () => {
     expect(readFileSync(join(packageDir, "package.json"), "utf8")).toBe(originalText);
   });
 
+  it("restores both source manifests when the package overlay write fails", () => {
+    const repoDir = fixtureDirs.make("openclaw-plugin-npm-overlay-write-failure-");
+    const packageDir = writePublishablePluginPackage(repoDir);
+    writeGeneratedChannelMetadata(repoDir, "diffs");
+    writeFileText(join(packageDir, "dist", "index.js"), "export {};\n");
+    writeFileText(join(packageDir, "dist", "setup-entry.js"), "export {};\n");
+    const manifestPath = join(packageDir, "openclaw.plugin.json");
+    const packageJsonPath = join(packageDir, "package.json");
+    writeFileSync(manifestPath, '{"id":"diffs"}\r\n');
+    const originalManifest = readFileSync(manifestPath);
+    const originalPackageJson = readFileSync(packageJsonPath);
+    const failure = Object.assign(new Error("package overlay write failed"), { code: "EIO" });
+    const write = fs.writeFileSync.bind(fs);
+    let injected = false;
+    let manifestAtFailure: Buffer | undefined;
+    const writeSpy = vi.spyOn(fs, "writeFileSync").mockImplementation((file, data, options) => {
+      if (!injected && file === packageJsonPath) {
+        injected = true;
+        manifestAtFailure = readFileSync(manifestPath);
+        throw failure;
+      }
+      write(file, data, options);
+    });
+    const callback = vi.fn();
+    let caught: unknown;
+    try {
+      withAugmentedPluginNpmManifestForPackage(
+        { repoRoot: repoDir, packageDir, bundleDependencies: true },
+        callback,
+      );
+    } catch (error) {
+      caught = error;
+    } finally {
+      writeSpy.mockRestore();
+    }
+
+    expect(injected).toBe(true);
+    expect(manifestAtFailure).not.toEqual(originalManifest);
+    expect(caught).toBe(failure);
+    expect(callback).not.toHaveBeenCalled();
+    expect(readFileSync(manifestPath)).toEqual(originalManifest);
+    expect(readFileSync(packageJsonPath)).toEqual(originalPackageJson);
+  });
+
   it.each(["qa-lab", "qa-channel"] as const)(
     "packs only the private %s Gateway surface and restores source metadata",
     (id) => {
@@ -1039,13 +1050,9 @@ describe("plugin npm package manifest staging", () => {
         mkdirSync(consumerDir, { recursive: true });
         writeJsonFile(join(consumerDir, "package.json"), { private: true, type: "module" });
 
-        const packInvocation = resolvePluginNpmCommand([
-          "pack",
-          "--json",
-          "--ignore-scripts",
-          "--pack-destination",
-          consumerDir,
-        ]);
+        const packInvocation = resolveNpmRunner({
+          npmArgs: ["pack", "--json", "--ignore-scripts", "--pack-destination", consumerDir],
+        });
         const pack = spawnSync(packInvocation.command, packInvocation.args, {
           cwd: packageDir,
           encoding: "utf8",
@@ -1171,7 +1178,6 @@ process.stdout.write("PACKED_PLUGIN_CHANNEL_STATE_OK\\n");
     "split destination",
     "failed command",
     "ancestor optional",
-    "legacy shrinkwrap",
   ])("preserves source dependencies while staging npm bundles with %s", (scenario) => {
     const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-package-portable-optional-");
     const packageDir = writePublishablePluginPackage(repoDir);
@@ -1211,16 +1217,6 @@ process.stdout.write("PACKED_PLUGIN_CHANNEL_STATE_OK\\n");
     const sourceOnlyPath = join(packageDir, "node_modules", "source-only", "marker");
     writeFileText(sourceOnlyPath, "keep\n");
     const originalText = readFileSync(join(packageDir, "package.json"), "utf8");
-    const shrinkwrapPath = join(packageDir, "npm-shrinkwrap.json");
-    const legacyShrinkwrap = `${JSON.stringify({
-      name: "@openclaw/diffs",
-      version: "2026.5.3",
-      lockfileVersion: 3,
-      packages: {},
-    })}\n`;
-    if (scenario === "legacy shrinkwrap") {
-      writeFileText(shrinkwrapPath, legacyShrinkwrap);
-    }
     const outputDir =
       scenario.includes("destination") && scenario !== "default destination"
         ? join(packageDir, "artifacts")
@@ -1268,9 +1264,6 @@ process.stdout.write("PACKED_PLUGIN_CHANNEL_STATE_OK\\n");
     expect(readFileSync(sourceOnlyPath, "utf8")).toBe("keep\n");
     expect(existsSync(join(packageDir, "package-lock.json"))).toBe(false);
     expect(readFileSync(join(packageDir, "package.json"), "utf8")).toBe(originalText);
-    if (scenario === "legacy shrinkwrap") {
-      expect(readFileSync(shrinkwrapPath, "utf8")).toBe(legacyShrinkwrap);
-    }
     if (scenario === "failed command") {
       const stagingDir = result.stdout.trim();
       expect(stagingDir).not.toBe("");
@@ -1485,16 +1478,18 @@ console.log(JSON.stringify({ path: path.join(destination, packed.filename) }));
         expect(bundled.status, bundled.stderr).toBe(0);
         expect(JSON.parse(bundled.stdout)).toEqual([2, expectedSibling]);
       }
-      const npm = resolvePluginNpmCommand([
-        "install",
-        "--ignore-scripts",
-        "--omit=dev",
-        "--omit=peer",
-        "--legacy-peer-deps",
-        "--workspaces=false",
-        "--no-audit",
-        "--no-fund",
-      ]);
+      const npm = resolveNpmRunner({
+        npmArgs: [
+          "install",
+          "--ignore-scripts",
+          "--omit=dev",
+          "--omit=peer",
+          "--legacy-peer-deps",
+          "--workspaces=false",
+          "--no-audit",
+          "--no-fund",
+        ],
+      });
       await execFileAsync(npm.command, npm.args, {
         cwd: consumerPackage,
         encoding: "utf8",
@@ -1524,6 +1519,167 @@ console.log(JSON.stringify({ path: path.join(destination, packed.filename) }));
       expect(readFileSync(join(installedDir, "index.js"), "utf8")).toBe(installedSource);
       expect(readFileSync(join(packageDir, "package.json"), "utf8")).toBe(originalManifest);
       expect(existsSync(join(packageDir, "package-lock.json"))).toBe(false);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+    }
+  });
+
+  it("installs bundled dependencies whose shared node npm reloads under another override set", async () => {
+    // Mirrors amazon-bedrock-mantle: `core` is reachable through `parent`'s scoped `types`
+    // pin and through the globally pinned `format`. pnpm locks `core` in two peer contexts,
+    // so no `core>types` rule exists, and npm's first lock pass and its reload of that lock
+    // give the shared `core` node different override sets; `npm ci` then rejects the lock.
+    const repoDir = makeTempRepoRoot(tempDirs, "openclaw-plugin-npm-override-reload-");
+    const packageDir = writePublishablePluginPackage(repoDir);
+    writeFileText(join(packageDir, "dist", "index.js"), "export {};\n");
+    writeFileText(join(packageDir, "dist", "setup-entry.js"), "export {};\n");
+    const manifests: Record<string, Record<string, string>> = {
+      "leaf@1.0.0": {},
+      "types@1.0.0": { leaf: "1.0.0" },
+      "types@1.1.0": { leaf: "1.0.0" },
+      "core@1.0.0": { types: "^1.1.0" },
+      "core@1.1.0": { types: "^1.1.0" },
+      "env@1.0.0": { core: "1.0.0" },
+      "env@1.1.0": { core: "1.1.0" },
+      "creds@1.0.0": { env: "1.0.0" },
+      "creds@1.1.0": { env: "1.1.0" },
+      "format@1.0.0": { core: "1.0.0" },
+      "parent@1.0.0": { creds: "1.0.0", format: "1.0.0", types: ">=1.0.0" },
+      "modern@1.0.0": { creds: "1.1.0" },
+    };
+    // pnpm snapshots carry exact resolutions; registry manifests above carry npm ranges.
+    const snapshots: Record<string, Record<string, string>> = {
+      "leaf@1.0.0": {},
+      "types@1.0.0": { leaf: "1.0.0" },
+      "types@1.1.0": { leaf: "1.0.0" },
+      "core@1.0.0(types@1.0.0)": { types: "1.0.0" },
+      "core@1.0.0(types@1.1.0)": { types: "1.1.0" },
+      "core@1.1.0": { types: "1.1.0" },
+      "env@1.0.0": { core: "1.0.0(types@1.1.0)" },
+      "env@1.1.0": { core: "1.1.0" },
+      "creds@1.0.0": { env: "1.0.0" },
+      "creds@1.1.0": { env: "1.1.0" },
+      "format@1.0.0": { core: "1.0.0(types@1.1.0)" },
+      "parent@1.0.0": { creds: "1.0.0", format: "1.0.0", types: "1.0.0" },
+      "modern@1.0.0": { creds: "1.1.0" },
+    };
+    const tarballDir = join(repoDir, "tarballs");
+    mkdirSync(tarballDir, { recursive: true });
+    const registryVersions = Object.entries(manifests).map(([key, dependencies]) => {
+      const [name = "", version = ""] = key.split("@");
+      const manifest = { name, version, main: "index.js", dependencies };
+      const sourceDir = join(repoDir, "registry-src", key);
+      writeJsonFile(join(sourceDir, "package.json"), manifest);
+      writeFileText(join(sourceDir, "index.js"), "module.exports = true;\n");
+      const npm = resolveNpmRunner({
+        npmArgs: ["pack", "--json", "--ignore-scripts", "--pack-destination", tarballDir],
+      });
+      const pack = spawnSync(npm.command, npm.args, { ...npm, cwd: sourceDir, encoding: "utf8" });
+      expect(pack.status, pack.stderr).toBe(0);
+      const tarball = readFileSync(join(tarballDir, parseNpmPackResult(pack.stdout).filename));
+      const integrity = `sha512-${createHash("sha512").update(tarball).digest("base64")}`;
+      return { manifest, tarball, integrity };
+    });
+    writeJsonFile(join(packageDir, "package.json"), {
+      ...JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8")),
+      dependencies: { parent: "1.0.0", modern: "1.0.0" },
+    });
+    writeJsonFile(join(repoDir, "pnpm-workspace.yaml"), {});
+    writeJsonFile(join(repoDir, "pnpm-lock.yaml"), {
+      lockfileVersion: "9.0",
+      importers: {
+        "extensions/diffs": {
+          dependencies: {
+            parent: { specifier: "1.0.0", version: "1.0.0" },
+            modern: { specifier: "1.0.0", version: "1.0.0" },
+          },
+        },
+      },
+      packages: Object.fromEntries(
+        registryVersions.map(({ manifest, integrity }) => [
+          `${manifest.name}@${manifest.version}`,
+          { resolution: { integrity } },
+        ]),
+      ),
+      snapshots: Object.fromEntries(
+        Object.entries(snapshots).map(([key, dependencies]) => [key, { dependencies }]),
+      ),
+    });
+    const server = createServer((request, response) => {
+      const endpoint = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+      const versions = registryVersions.filter(
+        ({ manifest }) => request.url === `/${manifest.name}`,
+      );
+      const tarball = registryVersions.find(
+        ({ manifest }) => request.url === `/${manifest.name}-${manifest.version}.tgz`,
+      );
+      if (versions.length > 0) {
+        response.setHeader("content-type", "application/json");
+        response.end(
+          JSON.stringify({
+            name: versions[0]?.manifest.name,
+            "dist-tags": { latest: versions.at(-1)?.manifest.version },
+            versions: Object.fromEntries(
+              versions.map(({ manifest, integrity }) => [
+                manifest.version,
+                {
+                  ...manifest,
+                  dist: {
+                    tarball: `${endpoint}/${manifest.name}-${manifest.version}.tgz`,
+                    integrity,
+                  },
+                },
+              ]),
+            ),
+          }),
+        );
+      } else if (tarball) {
+        response.end(tarball.tarball);
+      } else {
+        response.writeHead(404);
+        response.end();
+      }
+    });
+    await new Promise<void>((resolve) => {
+      server.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const packed = await execFileAsync(
+        process.execPath,
+        [
+          "--import",
+          tsxImport,
+          fileURLToPath(new URL("../scripts/lib/plugin-npm-package-manifest.mts", import.meta.url)),
+          "--run",
+          packageDir,
+          "--",
+          "npm",
+          "pack",
+          "--json",
+          "--ignore-scripts",
+          "--pack-destination",
+          repoDir,
+        ],
+        {
+          cwd: repoDir,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            npm_config_registry: `http://127.0.0.1:${(server.address() as { port: number }).port}`,
+            npm_config_cache: join(repoDir, "npm-cache"),
+            OPENCLAW_NPM_PACKAGE_LOCK_REPO_ROOT: repoDir,
+            OPENCLAW_PLUGIN_NPM_BUNDLE_DEPENDENCIES: "1",
+          },
+        },
+      );
+      const files = parseNpmPackResult(packed.stdout).files.map((entry) => entry.path);
+      // `parent` keeps its pinned types@1.0.0 while `core` gets the types@1.1.0 it requires.
+      expect(files).toContain("node_modules/parent/node_modules/types/package.json");
+      expect(files).toContain(
+        "node_modules/parent/node_modules/core/node_modules/types/package.json",
+      );
     } finally {
       await new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

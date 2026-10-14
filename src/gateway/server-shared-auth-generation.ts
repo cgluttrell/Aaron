@@ -4,7 +4,6 @@ import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { notifyListeners, registerListener } from "../shared/listeners.js";
 import { captureGatewayAuthPolicy, isGatewayAuthGrantCurrent } from "./auth-policy.js";
 import type { GatewayAuthPolicy } from "./auth-policy.types.js";
-import type { ResolvedGatewayAuth } from "./auth-resolve.js";
 import { resolveGatewayReloadSettings } from "./config-reload-settings.js";
 import {
   invalidateGatewayPolicyClient,
@@ -34,41 +33,29 @@ type SharedAuthInvalidation =
   | { kind: "policy"; config: OpenClawConfig }
   | { kind: "all" };
 
-function isProxyPolicyTransition(
-  transition: SharedAuthConfigTransition | undefined,
-  authModeOverride?: ResolvedGatewayAuth["mode"],
-): boolean {
-  if (!transition) {
-    return false;
-  }
-  const previousAuth = transition.previous.gateway?.auth;
-  const nextAuth = transition.next.gateway?.auth;
+function isProxyPolicyTransition(transition: SharedAuthConfigTransition | undefined): boolean {
   return Boolean(
-    (authModeOverride ?? previousAuth?.mode) === "trusted-proxy" &&
-    previousAuth?.trustedProxy &&
-    (authModeOverride ?? nextAuth?.mode) === "trusted-proxy" &&
-    nextAuth?.trustedProxy,
+    transition?.previous.gateway?.auth?.mode === "trusted-proxy" &&
+    transition.previous.gateway.auth.trustedProxy &&
+    transition.next.gateway?.auth?.mode === "trusted-proxy" &&
+    transition.next.gateway.auth.trustedProxy,
   );
 }
 
 function resolveSharedAuthInvalidation(
   generation: string | undefined | null,
   transition?: SharedAuthConfigTransition,
-  authModeOverride?: ResolvedGatewayAuth["mode"],
 ): SharedAuthInvalidation | undefined {
   if (generation === null) {
     return { kind: "all" };
   }
   // Proxy runs can outlive several handshake generations without losing their grant.
-  if (transition && isProxyPolicyTransition(transition, authModeOverride)) {
+  if (transition && isProxyPolicyTransition(transition)) {
     const allowUsers = (config: OpenClawConfig) =>
       JSON.stringify([...new Set(config.gateway?.auth?.trustedProxy?.allowUsers ?? [])].toSorted());
     const fallbackGrant = (config: OpenClawConfig) =>
-      captureGatewayAuthPolicy(config, {
-        role: "operator",
-        authMethod: "password",
-        authModeOverride,
-      }).grantGeneration;
+      captureGatewayAuthPolicy(config, { role: "operator", authMethod: "password" })
+        .grantGeneration;
     return allowUsers(transition.previous) === allowUsers(transition.next) &&
       fallbackGrant(transition.previous) === fallbackGrant(transition.next)
       ? undefined
@@ -81,19 +68,13 @@ function resolveSharedAuthInvalidation(
 export class SharedGatewaySessionGenerationState {
   #current: string | undefined;
   #required: string | undefined | null;
-  readonly authModeOverride: ResolvedGatewayAuth["mode"] | undefined;
   #revision = 0;
   readonly #reader: GenerationReader;
   readonly #invalidationListeners = new Set<(event: SharedAuthInvalidation) => void>();
 
-  constructor(initial: {
-    current: string | undefined;
-    required: string | undefined | null;
-    authModeOverride?: ResolvedGatewayAuth["mode"];
-  }) {
+  constructor(initial: { current: string | undefined; required: string | undefined | null }) {
     this.#current = initial.current;
     this.#required = initial.required;
-    this.authModeOverride = initial.authModeOverride;
     this.#reader = () => (this.#required === null ? this.#current : this.#required);
     Object.defineProperty(this.#reader, generationReaderStateKey, {
       value: new GenerationReaderBinding(this.#reader, this),
@@ -225,11 +206,7 @@ export class SharedGatewaySessionGenerationState {
       this.#required = null;
     }
     this.#revision++;
-    const invalidation = resolveSharedAuthInvalidation(
-      this.requiredGeneration,
-      transition,
-      this.authModeOverride,
-    );
+    const invalidation = resolveSharedAuthInvalidation(this.requiredGeneration, transition);
     if (invalidation) {
       this.publishInvalidation(invalidation);
     }
@@ -270,8 +247,7 @@ export function disconnectStaleSharedGatewayAuthClients(params: {
   transition?: SharedAuthConfigTransition;
 }): void {
   const proxyPolicyTransition =
-    params.expectedGeneration !== null &&
-    isProxyPolicyTransition(params.transition, params.state?.authModeOverride);
+    params.expectedGeneration !== null && isProxyPolicyTransition(params.transition);
   for (const gatewayClient of params.clients) {
     if (!gatewayClient.usesSharedGatewayAuth) {
       continue;
@@ -299,7 +275,6 @@ export function disconnectStaleSharedGatewayAuthClients(params: {
     const invalidation = resolveSharedAuthInvalidation(
       params.expectedGeneration,
       params.transition,
-      params.state?.authModeOverride,
     );
     if (invalidation) {
       params.state?.publishInvalidation(invalidation);

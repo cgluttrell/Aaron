@@ -13,7 +13,10 @@ import {
   assertExistingDatabaseIdentity,
   normalizeDatabasePath,
 } from "../infra/sqlite-worker-identity.js";
-import { createSqliteWorkerOperationAdmission } from "../infra/sqlite-worker-operation-admission.js";
+import {
+  createSqliteWorkerOperationAdmission,
+  type SqliteWorkerAdmissionRequest,
+} from "../infra/sqlite-worker-operation-admission.js";
 import {
   reserveSqliteWorkerInputPreparation,
   type SqliteWorkerOperations,
@@ -30,11 +33,11 @@ import {
 } from "./openclaw-agent-db-lifecycle.js";
 import { getOpenClawAgentDatabaseIfOpen } from "./openclaw-agent-db.js";
 import { resolveOpenClawAgentSqlitePath } from "./openclaw-agent-db.paths.js";
-import type { AgentDatabaseRequestExecutionSource } from "./openclaw-agent-execution-contract.js";
-import {
-  captureOpenClawAgentDatabaseExecution,
-  type OpenClawAgentDatabaseExecution,
-} from "./openclaw-agent-execution.js";
+import type {
+  AgentDatabaseRequestExecutionSource,
+  OpenClawAgentDatabaseExecution,
+} from "./openclaw-agent-execution-contract.js";
+import { captureOpenClawAgentDatabaseExecution } from "./openclaw-agent-execution.js";
 import { runOpenClawAgentWorkerWrite } from "./openclaw-agent-write-admission.js";
 import {
   captureOpenClawStateDatabaseReadAdmission,
@@ -64,7 +67,11 @@ export type OpenClawAgentSqliteWorkerStore<Operations extends SqliteWorkerOperat
 export async function openOpenClawAgentSqliteWorkerStore<Operations extends SqliteWorkerOperations>(
   inputOptions: OpenClawAgentDatabaseOptions,
   publicationSource: DatabaseSync | { execution: OpenClawAgentDatabaseExecution },
-  worker: { moduleUrl: URL; input: unknown },
+  worker: {
+    moduleUrl: URL;
+    input: unknown;
+    assertAdmission?: (request: SqliteWorkerAdmissionRequest) => SqliteWorkerAdmissionRequest;
+  },
 ): Promise<
   OpenClawAgentSqliteWorkerStore<Operations> & {
     execute<Key extends keyof Operations>(
@@ -222,7 +229,7 @@ export async function openOpenClawAgentSqliteWorkerStore<Operations extends Sqli
           return {
             nativeLocations: binding.nativeLocations,
             admission: createSqliteWorkerOperationAdmission((request, grant) => {
-              binding.authorize(request);
+              binding.authorize(worker.assertAdmission?.(request) ?? request);
               if (request.stage === "transaction" || request.stage === "commit") {
                 if (
                   !(

@@ -65,6 +65,12 @@ openclaw plugins update openclaw-codex-app-server --acknowledge-install-policy-w
 
 Updates apply to tracked plugin installs in the managed plugin index and tracked hook-pack installs in shared SQLite state. They reuse the source that the user already chose when installing the plugin, so they do not require a second source acknowledgement.
 
+Eligible official OpenClaw npm plugins follow the running host's release cohort
+when their recorded selector is bare, `latest`, or an older OpenClaw release.
+This applies to named updates and `--all`, so recovering a stale plugin uses the
+same target as `openclaw update` and `openclaw update repair`. An explicit version
+or tag supplied in the current command still takes precedence.
+
 Supply multiple IDs or npm specs to update a selection, or use `--all` without
 IDs. Repeated targets and sibling plugin IDs update their package once. An
 explicit npm spec overrides an ID-only selection of the same package; two
@@ -121,6 +127,9 @@ During `openclaw update`, a locally linked plugin with an explicit load path kee
   </Accordion>
   <Accordion title="Existing plugin source choices">
     Updates retain the recorded npm or ClawHub source. Older install records do not distinguish automatic ClawHub selection from an explicit `clawhub:` request, so OpenClaw does not silently switch those records to npm. To change an existing plugin deliberately, review and run `openclaw plugins install npm:<package> --force`. Automatic externalization of an image-owned bundled plugin uses npm first and its declared ClawHub source second.
+
+    Version checks report the compatible update available from that recorded source. ClawHub and npm can publish at different times, so the reported target can be older than core or the latest npm package. Updating core does not require switching registries.
+
   </Accordion>
   <Accordion title="Version checks and integrity drift">
     Before a live npm update, OpenClaw checks the installed package version against the npm registry metadata. If the installed version and recorded artifact identity already match the resolved target, it avoids downloading or reinstalling. A requested selector change or managed release-pin recovery can still update the plugin index without rewriting `openclaw.json`.
@@ -185,11 +194,13 @@ The receipt can also include cleanup warnings. Modules and native libraries may
 remain loaded after their registrations are removed.
 
 Bundled plugins can reload while preserving their enabled or disabled policy.
-Compiled bundled plugins reuse their process-loaded code when their registrations
-reload. If the plugin's files changed while its original module remains loaded,
+Bundled plugins, including TypeScript source entries, reuse their process-loaded
+code when their registrations reload. If the plugin's files changed while its
+original module remains loaded,
 the result reports `restartRequired: true` with a warning, and CLI and tool
 output explain that a Gateway restart is needed to load edited code. Reload does
-not rebuild compiled bundled code; source installations also need a build.
+not rebuild bundled code. Rebuild before restarting when the installation loads
+compiled output.
 External captured sources return `restartRequired: false` after replacement.
 Reloading unchanged bundled files also returns `restartRequired: false`; channel
 and service registrations can be replaced without restarting the Gateway.
