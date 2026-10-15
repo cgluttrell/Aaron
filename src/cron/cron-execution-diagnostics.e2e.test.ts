@@ -141,6 +141,8 @@ async function runPersistedDiagnosticCase(params: {
           history: history!,
           lastError: cron.getJob(job.id)?.state.lastError,
           lastErrorReason: cron.getJob(job.id)?.state.lastErrorReason,
+          lastRunStatus: cron.getJob(job.id)?.state.lastRunStatus,
+          lastDiagnosticSummary: cron.getJob(job.id)?.state.lastDiagnosticSummary,
         };
       } finally {
         cron.stop();
@@ -425,5 +427,61 @@ describe("cron execution diagnostics", { concurrent: false }, () => {
         },
       });
     }
+  });
+  describe("tool surface of the model turn (T2823)", () => {
+    const report = (names: string[]) => ({
+      source: "run",
+      generatedAt: 1,
+      systemPrompt: { chars: 1, projectContextChars: 0, nonProjectContextChars: 1 },
+      injectedWorkspaceFiles: [],
+      skills: { promptChars: 0, entries: [] },
+      tools: {
+        listChars: 0,
+        schemaChars: 0,
+        entries: names.map((name) => ({ name, summaryChars: 1, schemaChars: 1 })),
+      },
+    });
+
+    async function runWithTools(names: string[], name: string) {
+      const modelRef = { provider: "openai", model: "gpt-5.4" };
+      resolveConfiguredModelRefMock.mockReturnValue(modelRef);
+      mockRunCronFallbackPassthrough();
+      runEmbeddedAgentMock.mockResolvedValueOnce({
+        payloads: [{ text: "done" }],
+        meta: { agentMeta: {}, systemPromptReport: report(names) },
+      });
+      return await runPersistedDiagnosticCase({ cfg: configFor(modelRef), modelRef, name });
+    }
+
+    it.each([
+      [[], "zero tools"],
+      [["message"], "only the message tool"],
+    ])("warns when the turn had %j tools", async (names, phrase) => {
+      const outcome = await runWithTools(names, `tools ${phrase}`);
+      for (const entry of [outcome.finished, outcome.history]) {
+        expect(entry.diagnostics?.entries).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              source: "agent-run",
+              severity: "warn",
+              message: expect.stringContaining(phrase),
+            }),
+          ]),
+        );
+      }
+      expect(outcome.lastDiagnosticSummary).toContain(phrase);
+    });
+
+    it("records a plain ok with no tool-surface warning when real tools were available", async () => {
+      const outcome = await runWithTools(["message", "exec", "read"], "normal tools");
+      for (const entry of [outcome.finished, outcome.history]) {
+        expect(entry.status).toBe("ok");
+        expect((entry.diagnostics?.entries ?? []).filter((d) => d.source === "agent-run")).toEqual(
+          [],
+        );
+      }
+      expect(outcome.lastRunStatus).toBe("ok");
+      expect(outcome.lastDiagnosticSummary).toBeUndefined();
+    });
   });
 });
