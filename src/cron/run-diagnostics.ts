@@ -246,5 +246,37 @@ export function createCronRunDiagnosticsFromAgentResult(
   if (typeof failureSignal?.message === "string") {
     diagnostics.push(createCronRunDiagnosticsFromError("tool", failureSignal.message, opts));
   }
+  diagnostics.push(createCronRunDiagnosticsFromToolSurface(meta.systemPromptReport, opts));
   return mergeCronRunDiagnostics(...diagnostics);
+}
+
+/**
+ * Warns when the model turn ran with no working tools (zero tools, or only the
+ * `message` tool). Such a turn can complete "ok" while doing none of the job's
+ * work, so the run log and job state must surface it instead of looking idle.
+ * Keyed on the structured run report, never on log text.
+ */
+export function createCronRunDiagnosticsFromToolSurface(
+  systemPromptReport: unknown,
+  opts?: { nowMs?: () => number },
+): CronRunDiagnostics | undefined {
+  const report = asOptionalObjectRecord(systemPromptReport);
+  if (!report || report.source !== "run") {
+    return undefined;
+  }
+  const tools = asOptionalObjectRecord(report.tools);
+  if (!tools || !Array.isArray(tools.entries)) {
+    return undefined;
+  }
+  const names = tools.entries
+    .map((entry) => normalizeOptionalString(asOptionalObjectRecord(entry)?.name))
+    .filter((name): name is string => Boolean(name));
+  if (names.length !== tools.entries.length || names.some((name) => name !== "message")) {
+    return undefined;
+  }
+  const message =
+    names.length === 0
+      ? "Cron agent turn ran with zero tools available; the job could not act."
+      : "Cron agent turn ran with only the message tool available; the job could not do work beyond sending a message.";
+  return createCronRunDiagnosticsFromError("agent-run", message, { ...opts, severity: "warn" });
 }
