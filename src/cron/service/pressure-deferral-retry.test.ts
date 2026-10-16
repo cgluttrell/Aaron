@@ -1,12 +1,16 @@
 // Fork T3705 (T3699 option D): pressure-deferred isolated cron dispatch re-checks the guard on
 // a bounded schedule, exercised through the real onTimer -> execute -> outcome path.
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { setupCronServiceSuite, writeCronStoreSnapshot } from "../../cron/service.test-harness.js";
 import { createCronServiceState } from "../../cron/service/state.js";
 import { onTimer } from "../../cron/service/timer.test-support.js";
 import { loadCronStore } from "../../cron/store.js";
 import type { CronJob } from "../../cron/types.js";
-import { readCgroupMemorySample } from "../../process/dispatch-pressure-guard.js";
+import {
+  readCgroupMemorySample,
+  type DispatchPressureDecision,
+  type DispatchPressureGuardInput,
+} from "../../process/dispatch-pressure-guard.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import {
   CRON_PRESSURE_DEFER_ERROR,
@@ -24,7 +28,9 @@ const RECHECK_LOG = "cron: pressure-deferred isolated dispatch will re-check the
 const GIVE_UP_LOG =
   "cron: pressure-deferred isolated dispatch gave up re-checking; skipped until next slot";
 
-const deferDecision = () => ({
+type Guard = (input: DispatchPressureGuardInput) => DispatchPressureDecision;
+
+const deferDecision = (): DispatchPressureDecision => ({
   status: "defer" as const,
   reason: "cgroup_memory_absolute_threshold" as const,
   sample: {
@@ -37,9 +43,12 @@ const deferDecision = () => ({
   },
   threshold: { workingSetBytes: 6 * GIB },
 });
-const allowDecision = () => ({ status: "allow" as const, reason: "below_threshold" as const });
+const allowDecision = (): DispatchPressureDecision => ({
+  status: "allow",
+  reason: "below_threshold",
+});
 
-async function setup(params: { expr: string; guard: ReturnType<typeof vi.fn> }) {
+async function setup(params: { expr: string; guard: Mock<Guard> }) {
   const { storePath } = await makeStorePath();
   const startMs = Date.parse("2026-10-16T03:00:00.000Z");
   let nowMs = startMs;
@@ -78,7 +87,10 @@ async function setup(params: { expr: string; guard: ReturnType<typeof vi.fn> }) 
 
 describe("pressure-deferred isolated cron dispatch re-check (T3705)", () => {
   it("defers, then dispatches when the guard admits on the second check", async () => {
-    const guard = vi.fn().mockImplementationOnce(deferDecision).mockImplementation(allowDecision);
+    const guard = vi
+      .fn<Guard>()
+      .mockImplementationOnce(deferDecision)
+      .mockImplementation(allowDecision);
     const env = await setup({ expr: "0 3 * * *", guard });
 
     const firstNext = await env.tick();
@@ -102,7 +114,7 @@ describe("pressure-deferred isolated cron dispatch re-check (T3705)", () => {
   });
 
   it("gives up at the 3 hour cap with one logged skip and resumes the natural schedule", async () => {
-    const guard = vi.fn(deferDecision);
+    const guard = vi.fn<Guard>(deferDecision);
     const env = await setup({ expr: "0 3 * * *", guard });
 
     let next = await env.tick();
@@ -125,7 +137,7 @@ describe("pressure-deferred isolated cron dispatch re-check (T3705)", () => {
   });
 
   it("stops re-checking at the job's next scheduled slot when it comes before the cap", async () => {
-    const guard = vi.fn(deferDecision);
+    const guard = vi.fn<Guard>(deferDecision);
     const env = await setup({ expr: "0 * * * *", guard });
 
     let next = await env.tick();
