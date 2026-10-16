@@ -49,6 +49,10 @@ export type DispatchPressureSample = {
   cgroupDir: string;
   currentBytes: number;
   fileCacheBytes: number;
+  /** memory.stat `anon`; diagnostic breakdown only. */
+  anonBytes?: number;
+  /** memory.stat `kernel` (0 on kernels that do not report it); diagnostic breakdown only. */
+  kernelBytes?: number;
   workingSetBytes: number;
   maxBytes?: number;
   usageRatio?: number;
@@ -202,13 +206,20 @@ export function readCgroupMemorySample(
     // Working set excludes all page cache (`file`), not only `inactive_file`. Active file cache
     // is still reclaimable, and an unbounded gateway cgroup accumulates many GB of it (sessions,
     // SQLite, node_modules). Counting it deferred every isolated dispatch for days (T2273).
-    const fileCacheBytes = parseMemoryStatValue(read(path.join(cgroupDir, "memory.stat")), "file");
+    const memoryStat = read(path.join(cgroupDir, "memory.stat"));
+    const fileCacheBytes = parseMemoryStatValue(memoryStat, "file");
+    // Breakdown only (T3705): anon and kernel explain what filled the working set when the
+    // guard defers. They do not feed any threshold decision.
+    const anonBytes = parseMemoryStatValue(memoryStat, "anon");
+    const kernelBytes = parseMemoryStatValue(memoryStat, "kernel");
     const workingSetBytes = Math.max(0, current - fileCacheBytes);
     if (max === "max" || typeof max !== "number" || max <= 0) {
       return {
         cgroupDir,
         currentBytes: current,
         fileCacheBytes,
+        anonBytes,
+        kernelBytes,
         workingSetBytes,
       };
     }
@@ -216,6 +227,8 @@ export function readCgroupMemorySample(
       cgroupDir,
       currentBytes: current,
       fileCacheBytes,
+      anonBytes,
+      kernelBytes,
       workingSetBytes,
       maxBytes: max,
       usageRatio: workingSetBytes / max,
