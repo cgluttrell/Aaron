@@ -22,6 +22,11 @@ import {
   recordScheduleComputeError,
 } from "./jobs-scheduling.js";
 import { resolveManualOneShotOccurrenceAtMs } from "./one-shot-schedule.js";
+import {
+  clearPressureDeferralRetry,
+  isPressureDeferredOutcome,
+  resolvePressureDeferralRetry,
+} from "./pressure-deferral-retry.js";
 import { recordQuietCronEvaluation } from "./run-history.js";
 import type { CronJobPolicyContext, CronServiceState, DeferredCronNotifications } from "./state.js";
 import {
@@ -185,6 +190,10 @@ export function applyJobResult(
     }
   };
   const alertConfig = resolveFailureAlert(state, job);
+  const pressureDeferred = isPressureDeferredOutcome(result);
+  if (!pressureDeferred) {
+    clearPressureDeferralRetry(state.deps, job.id);
+  }
   if (result.status === "error") {
     job.state.consecutiveErrors = (job.state.consecutiveErrors ?? 0) + 1;
     job.state.consecutiveSkipped = 0;
@@ -498,6 +507,20 @@ export function applyJobResult(
         job.state.nextRunAtMs = triggerNext;
         if (triggerNext !== undefined || job.schedule.kind === "every") {
           scheduleNextRun(triggerNext);
+        }
+      }
+      // Fork T3705: a pressure-deferred dispatch re-checks the guard on a bounded schedule
+      // instead of waiting for the next natural slot.
+      if (pressureDeferred) {
+        const pressureRetryAtMs = resolvePressureDeferralRetry({
+          serviceKey: state.deps,
+          log: state.deps.log,
+          jobId: job.id,
+          endedAtMs: result.endedAt,
+          naturalNextRunAtMs: job.state.nextRunAtMs,
+        });
+        if (pressureRetryAtMs !== undefined) {
+          scheduleNextRun(pressureRetryAtMs);
         }
       }
     } else {
