@@ -17,6 +17,7 @@ import {
   type AssistantErrorTranscript,
 } from "../assistant-error-transcript.js";
 import { resolveModelFallbackError } from "../failover-error.js";
+import type { FailoverReason } from "../failover/signal.js";
 import {
   createContextEngineLogicalTurnLease,
   type ContextEngineLogicalTurnLease,
@@ -121,6 +122,8 @@ type EmbeddedAgentRunEntryParams<T extends EmbeddedAgentRunResult> = {
     model: string;
     requestedRouteResolution?: ModelFallbackRouteResolution;
     fallbacksOverride?: string[];
+    /** Restricts model fallback to these failure reasons; absent permits all. */
+    fallbackReasonAllowlist?: readonly FailoverReason[];
     agentDir?: string;
     userLockedAuthProfileId?: string;
   } & ModelManifestNormalizationContext;
