@@ -31,7 +31,7 @@ const executionRoot = "/tmp/workshop-skills";
 
 describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
   setupRunCronIsolatedAgentTurnSuite();
-  it("runs a system review on OpenClaw with its selected Codex-configured model and no fallback", async () => {
+  it("runs a system review on OpenClaw with rate-limit-only fallback candidates", async () => {
     const cfg: OpenClawConfig = {
       agents: {
         defaults: { model: "anthropic/claude-sonnet-4-6" },
@@ -71,7 +71,10 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
       expect.objectContaining({
         provider: "openai",
         model: "gpt-5.4",
-        fallbacksOverride: [],
+        fallbacksOverride: undefined,
+        // The review retains its selected model for every failure class except
+        // a rate-limited primary (T3726); candidates stay OpenClaw-rooted.
+        fallbackReasonAllowlist: ["rate_limit"],
       }),
     );
     expect(acquirePreparedModelRuntimeMock).toHaveBeenCalledWith(
@@ -80,6 +83,11 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
           expect.objectContaining({
             provider: "openai",
             modelId: "gpt-5.4",
+            runtime: "openclaw",
+          }),
+          expect.objectContaining({
+            provider: "openai",
+            modelId: "gpt-5",
             runtime: "openclaw",
           }),
         ],
@@ -93,13 +101,13 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
         agentHarnessId: "openclaw",
         agentHarnessRuntimeOverride: "openclaw",
         modelSelectionLocked: true,
-        modelFallbacksOverride: [],
+        modelFallbacksOverride: undefined,
       }),
     );
     expect(runCliAgentMock).not.toHaveBeenCalled();
 
     // Resolve the actual fallback candidate chain from the runner's options.
-    // The configured Codex fallback must not become a second candidate.
+    // The configured Codex fallback is a rate-limit-only second candidate.
     const fallbackRequest = runWithModelFallbackMock.mock.calls[0]?.[0] as {
       provider: string;
       model: string;
@@ -114,7 +122,7 @@ describe("runCronIsolatedAgentTurn — rooted runtime fallback", () => {
         requestedRouteResolution: "resolved",
         fallbacksOverride: fallbackRequest.fallbacksOverride,
       }).map(({ provider, model }) => `${provider}/${model}`),
-    ).toEqual(["openai/gpt-5.4"]);
+    ).toEqual(["openai/gpt-5.4", "openai/gpt-5"]);
   });
 
   it("runs a declared system review with a Claude CLI primary and returns its report", async () => {
