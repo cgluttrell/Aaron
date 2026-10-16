@@ -2207,3 +2207,95 @@ describe("runWithModelFallback quota recovery", () => {
     expect(run).not.toHaveBeenCalled();
   });
 });
+
+describe("runWithModelFallback fallbackReasonAllowlist", () => {
+  // T3726: a cron system review keeps its pinned model except when the primary
+  // is rate-limited; the allowlist is the generic runner-side gate for that.
+  const allowlistCfg = () => createModelFallbackConfig("primary/m1", ["fallback/ok-model"]);
+
+  function rateLimitedPrimaryRun() {
+    return vi.fn().mockImplementation(async (providerId: string) => {
+      if (providerId === "fallback") {
+        return "fallback ok";
+      }
+      throw new FailoverError("429 Rate limit reached. Please try again later.", {
+        reason: "rate_limit",
+        provider: providerId,
+        model: "m1",
+        status: 429,
+      });
+    });
+  }
+
+  it("switches to the fallback on a rate-limited primary and logs the switch", async () => {
+    const warnLogs = createWarnLogCapture("openclaw-model-fallback-allowlist");
+    try {
+      const run = rateLimitedPrimaryRun();
+      const result = await runWithModelFallback({
+        cfg: allowlistCfg(),
+        provider: "primary",
+        model: "m1",
+        fallbackReasonAllowlist: ["rate_limit"],
+        run,
+      });
+      expect(result.result).toBe("fallback ok");
+      expect(run.mock.calls.map(([providerId]) => providerId)).toEqual(["primary", "fallback"]);
+      const warning = await warnLogs.findText("switching to fallback");
+      expect(warning).toContain(
+        "rate-limited primary/m1; switching to fallback fallback/ok-model (reason=rate_limit)",
+      );
+    } finally {
+      warnLogs.cleanup();
+    }
+  });
+
+  it("surfaces non-rate-limit primary failures without consuming the chain", async () => {
+    const run = vi.fn().mockRejectedValue(
+      new FailoverError("500 synthetic upstream failure", {
+        reason: "server_error",
+        provider: "primary",
+        model: "m1",
+        status: 500,
+      }),
+    );
+    // A single blocked candidate surfaces its original error verbatim, exactly
+    // like the pre-existing single-candidate chain failure shape.
+    await expect(
+      runWithModelFallback({
+        cfg: allowlistCfg(),
+        provider: "primary",
+        model: "m1",
+        fallbackReasonAllowlist: ["rate_limit"],
+        run,
+      }),
+    ).rejects.toMatchObject({
+      name: "FailoverError",
+      reason: "server_error",
+      provider: "primary",
+      model: "m1",
+    });
+    expect(run).toHaveBeenCalledExactlyOnceWith("primary", "m1", expect.any(Object));
+  });
+
+  it("keeps every-reason fallback when no allowlist is configured", async () => {
+    const run = vi.fn().mockImplementation(async (providerId: string) => {
+      if (providerId === "fallback") {
+        return "fallback ok";
+      }
+      throw new FailoverError("500 synthetic upstream failure", {
+        reason: "server_error",
+        provider: providerId,
+        model: "m1",
+        status: 500,
+      });
+    });
+    const result = await runWithModelFallback({
+      cfg: allowlistCfg(),
+      provider: "primary",
+      model: "m1",
+      run,
+    });
+    expect(result.result).toBe("fallback ok");
+    expect(run.mock.calls.map(([providerId]) => providerId)).toEqual(["primary", "fallback"]);
+  });
+});

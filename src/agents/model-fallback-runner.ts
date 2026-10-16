@@ -1,5 +1,4 @@
 import { sanitizeForLog } from "../../packages/terminal-core/src/ansi.js";
-import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { emitFailoverEvent } from "../infra/diagnostic-events.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
@@ -7,7 +6,6 @@ import { createLazyImportLoader } from "../shared/lazy-promise.js";
 import {
   assertAdmittedRunOperatorAuthority,
   assertOperatorModelAllowed,
-  type AdmittedRunOperatorAuthority,
 } from "./admitted-run-context.js";
 import { externalCliDiscoveryScoped } from "./auth-profiles/external-cli-discovery.js";
 import { resolveSubscriptionAuthModeForProfiles } from "./auth-profiles/profile-list.js";
@@ -45,13 +43,9 @@ import {
   isTranscriptNotContinuableError,
   type ModelFallbackAuthRuntime,
   type ModelFallbackClassifiedResult,
-  type ModelFallbackErrorHandler,
   type ModelFallbackExhaustionResult,
-  type ModelFallbackResultClassifier,
-  type ModelFallbackRunFn,
   type ModelFallbackRunOptions,
   type ModelFallbackRunResult,
-  type ModelFallbackRuntimeContext,
   type ModelFallbackStepHandler,
   recordFailedCandidateAttempt,
   resolveFallbackAuthScope,
@@ -75,13 +69,13 @@ import {
   logModelFallbackDecision,
   type ModelFallbackDecisionParams,
 } from "./model-fallback-observation.js";
+import { allowsFallbackReason, resolveAllowedNextCandidate } from "./model-fallback-reason-gate.js";
+import type { RunWithModelFallbackParams } from "./model-fallback-runner.types.js";
 import {
   MODEL_FALLBACK_SKIPPED_CODE,
   type FallbackAttempt,
   type ModelFallbackCandidate,
-  type ModelFallbackRouteResolution,
 } from "./model-fallback.types.js";
-import type { ModelManifestNormalizationContext } from "./model-ref-shared.js";
 import {
   resolveSessionSuspensionReason,
   suspendSession,
@@ -92,33 +86,6 @@ const log = createSubsystemLogger("model-fallback");
 const modelFallbackAuthRuntimeLoader = createLazyImportLoader<ModelFallbackAuthRuntime>(
   () => import("./auth-profiles.runtime.js"),
 );
-
-type RunWithModelFallbackParams<T> = ModelFallbackRuntimeContext & {
-  cfg: OpenClawConfig | undefined;
-  provider: string;
-  model: string;
-  runId?: string;
-  sessionId?: string;
-  userLockedAuthProfileId?: string;
-  prepareCandidateChain?: (candidates: readonly ModelFallbackCandidate[]) => Promise<void> | void;
-  lane?: string;
-  agentDir?: string;
-  /** Optional explicit fallbacks list; when provided (even empty), replaces agents.defaults.model.fallbacks. */
-  fallbacksOverride?: string[];
-  requestedRouteResolution?: ModelFallbackRouteResolution;
-  run: ModelFallbackRunFn<T>;
-  onError?: ModelFallbackErrorHandler;
-  onFallbackStep?: ModelFallbackStepHandler;
-  classifyResult?: ModelFallbackResultClassifier<T>;
-  /** Return false when a thrown attempt committed work that must not be replayed. */
-  canFallbackAfterError?: (
-    attempt: Parameters<ModelFallbackErrorHandler>[0],
-  ) => boolean | Promise<boolean>;
-  mergeExhaustedResult?: (params: { latestResult: T; preferredResult: T }) => T;
-  skipAuthProfileRuntime?: boolean;
-  abortSignal?: AbortSignal;
-  operatorAuthority?: AdmittedRunOperatorAuthority;
-} & ModelManifestNormalizationContext;
 
 type DeferredSessionSuspensionState = {
   pending?: SessionSuspensionParams;
@@ -434,6 +401,9 @@ async function runWithModelFallbackInternal<T>(
               ? decision.error
               : `Provider ${candidate.provider} is in cooldown`;
           pushSkippedAttempt(error, decision.reason, authMode);
+          const canAdvancePastSkip =
+            hasRemainingCandidate &&
+            allowsFallbackReason(params.fallbackReasonAllowlist, decision.reason);
 
           // Only record terminal session suspension when no remaining candidate
           // can serve the turn. Provider cooldown state prevents repeat probes.
@@ -444,9 +414,9 @@ async function runWithModelFallbackInternal<T>(
               fromProvider: candidate.provider,
               fromModel: candidate.model,
               reason: decision.reason,
-              suspended: !hasRemainingCandidate,
+              suspended: !canAdvancePastSkip,
             });
-            if (!hasRemainingCandidate) {
+            if (!canAdvancePastSkip) {
               deferredSuspension.pending = undefined;
               void suspendSession({
                 cfg: params.cfg,
@@ -465,6 +435,9 @@ async function runWithModelFallbackInternal<T>(
             error,
             profileCount: profileIds.length,
           });
+          if (!canAdvancePastSkip) {
+            break;
+          }
           continue;
         }
 
@@ -693,7 +666,18 @@ async function runWithModelFallbackInternal<T>(
       excludedProviders: tlsFailedProviders,
     });
     lastError = normalized;
-    await recordFailure(normalized, candidates[failedNextCandidateIndex]);
+    const nextAfterFailure = resolveAllowedNextCandidate(
+      params.fallbackReasonAllowlist,
+      normalized,
+      candidate,
+      candidates[failedNextCandidateIndex],
+      log,
+    );
+    await recordFailure(normalized, nextAfterFailure);
+    if (!nextAfterFailure) {
+      // A disallowed advance ends the chain with the existing failure surface.
+      break;
+    }
     if (failedNextCandidateIndex > i + 1) {
       i = failedNextCandidateIndex - 1;
     }

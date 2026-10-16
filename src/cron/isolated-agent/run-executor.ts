@@ -261,6 +261,9 @@ function createCronPromptExecutor(
             ? params.liveSelection.authProfileId
             : undefined,
         fallbacksOverride: cronFallbacksOverride,
+        // The system review keeps its selected model except when the primary is
+        // rate-limited; every other failure class surfaces instead of switching.
+        ...(isSkillCollectionReview ? { fallbackReasonAllowlist: ["rate_limit" as const] } : {}),
       },
       identity: {
         runId,
