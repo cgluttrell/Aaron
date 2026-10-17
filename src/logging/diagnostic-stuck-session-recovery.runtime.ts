@@ -53,6 +53,33 @@ function resolveStaleActiveLaneTaskReleaseMs(params: StuckSessionRecoveryRequest
   return Math.max(STALE_ACTIVE_LANE_TASK_RELEASE_MS, compactionReleaseMs);
 }
 
+/**
+ * A reply operation whose phase still reads waiting_for_global_lane but whose
+ * task already holds a global slot, has made no reply progress for the stale
+ * window, and sits on a saturated global lane with queued waiters. Only that
+ * combination is a lane-wait deadlock; queued waiters (no slot) and holders
+ * with fresh progress stay protected.
+ */
+function resolveStaleGlobalLaneSlotHolder(params: {
+  phase: string | undefined;
+  slotLane: string | undefined;
+  activeReplyAgeMs: number | undefined;
+  staleAbortMs: number;
+}): { lane: string; activeCount: number; queuedCount: number } | undefined {
+  if (params.phase !== "waiting_for_global_lane" || !params.slotLane) {
+    return undefined;
+  }
+  if (params.activeReplyAgeMs === undefined || params.activeReplyAgeMs < params.staleAbortMs) {
+    return undefined;
+  }
+  const snapshot = getCommandLaneSnapshot(params.slotLane);
+  const laneWaiting =
+    snapshot.queuedCount > 0 && snapshot.activeCount >= Math.max(1, snapshot.maxConcurrent);
+  return laneWaiting
+    ? { lane: snapshot.lane, activeCount: snapshot.activeCount, queuedCount: snapshot.queuedCount }
+    : undefined;
+}
+
 function isActiveRunProgressStale(params: {
   ageMs: number;
   sessionId?: string;
@@ -245,7 +272,28 @@ export async function recoverStuckDiagnosticSession(
       });
     }
 
-    if (activeReplyPhase === "waiting_for_global_lane" || activeMaintenanceProtected) {
+    // Invariant: waiting_for_global_lane is only "healthy waiting" while the
+    // operation does not hold a global slot. The phase is cleared after
+    // placement admission, not at slot grant, so an admitted task that stalls
+    // in between holds capacity while still reading as a waiter. When every
+    // slot is held that way the lane can never drain and keep_lane deadlocks.
+    const globalLaneWaitDeadlock = resolveStaleGlobalLaneSlotHolder({
+      phase: activeReplyPhase,
+      slotLane: activeReplyActivity?.globalLaneSlotHeld,
+      activeReplyAgeMs,
+      staleAbortMs: staleActiveProgressAbortMs,
+    });
+    if (globalLaneWaitDeadlock) {
+      diag.warn(
+        `stuck session recovery releasing stale global lane slot: ${formatRecoveryContext(params, {
+          activeSessionId: activeWorkSessionId,
+        })} globalLane=${globalLaneWaitDeadlock.lane} laneActive=${globalLaneWaitDeadlock.activeCount} laneQueued=${globalLaneWaitDeadlock.queuedCount} replyIdleMs=${activeReplyAgeMs}`,
+      );
+    }
+    if (
+      (activeReplyPhase === "waiting_for_global_lane" && !globalLaneWaitDeadlock) ||
+      activeMaintenanceProtected
+    ) {
       // Queued replies and configured maintenance own their lane until their
       // producer finishes or the existing compaction safety window expires.
       return reportRecoveryOutcome({

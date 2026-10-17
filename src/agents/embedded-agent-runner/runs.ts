@@ -1021,7 +1021,10 @@ export function isEmbeddedAgentRunInProgress(sessionId: string): boolean {
   return resolveEmbeddedAgentRunProgressState(sessionId) !== undefined;
 }
 
-export type EmbeddedReplyActivity = Pick<ReplyOperation, "phase" | "lastActivityAtMs"> & {
+export type EmbeddedReplyActivity = Pick<
+  ReplyOperation,
+  "phase" | "lastActivityAtMs" | "globalLaneSlotHeld"
+> & {
   /** Terminal outcome committed; only delivery/finalization remains. */
   terminalOutcomeCommitted: boolean;
 };
@@ -1032,6 +1035,7 @@ export function resolveEmbeddedReplyActivity(sessionId: string): EmbeddedReplyAc
     ? {
         phase: operation.phase,
         lastActivityAtMs: operation.lastActivityAtMs,
+        globalLaneSlotHeld: operation.globalLaneSlotHeld,
         terminalOutcomeCommitted: hasCommittedReplyOperationOutcome(operation),
       }
     : undefined;
