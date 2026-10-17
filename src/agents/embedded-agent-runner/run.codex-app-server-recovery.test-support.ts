@@ -343,6 +343,7 @@ describe("runEmbeddedAgent Codex app-server recovery", () => {
       abortByUser,
       markDeferredMaintenanceWaitEnded: vi.fn(),
       markGlobalLaneWaitEnded: vi.fn(),
+      markGlobalLaneSlotGranted: vi.fn(),
       markWaitingForDeferredMaintenance: vi.fn(),
       markWaitingForGlobalLane: vi.fn(),
     } as unknown as NonNullable<Parameters<typeof runEmbeddedAgent>[0]["replyOperation"]>;
@@ -377,6 +378,7 @@ describe("runEmbeddedAgent Codex app-server recovery", () => {
       abortByUser,
       markDeferredMaintenanceWaitEnded: vi.fn(),
       markGlobalLaneWaitEnded: vi.fn(),
+      markGlobalLaneSlotGranted: vi.fn(),
       markWaitingForDeferredMaintenance: vi.fn(),
       markWaitingForGlobalLane: vi.fn(),
     } as unknown as NonNullable<Parameters<typeof runEmbeddedAgent>[0]["replyOperation"]>;
