@@ -412,9 +412,9 @@ describe("cron execution diagnostics", { concurrent: false }, () => {
     }
 
     it.each([
-      [[], "zero tools"],
-      [["message"], "only the message tool"],
-    ])("warns when the turn had %j tools", async (names, phrase) => {
+      [[], "zero tools", "with 0 tools available"],
+      [["message"], "only the message tool", "with 1 tool available (message"],
+    ])("warns when the turn had %j tools", async (names, phrase, countPhrase) => {
       const outcome = await runWithTools(names, `tools ${phrase}`);
       for (const entry of [outcome.finished, outcome.history]) {
         expect(entry.diagnostics?.entries).toEqual(
@@ -424,10 +424,15 @@ describe("cron execution diagnostics", { concurrent: false }, () => {
               severity: "warn",
               message: expect.stringContaining(phrase),
             }),
+            expect.objectContaining({
+              source: "agent-run",
+              message: expect.stringContaining(countPhrase),
+            }),
           ]),
         );
       }
       expect(outcome.lastDiagnosticSummary).toContain(phrase);
+      expect(outcome.lastDiagnosticSummary).toContain(countPhrase);
     });
 
     it("records a plain ok with no tool-surface warning when real tools were available", async () => {
