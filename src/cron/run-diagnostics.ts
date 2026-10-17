@@ -287,7 +287,7 @@ export function createCronRunDiagnosticsFromAgentResult(
  * work, so the run log and job state must surface it instead of looking idle.
  * Keyed on the structured run report, never on log text.
  */
-export function createCronRunDiagnosticsFromToolSurface(
+function createCronRunDiagnosticsFromToolSurface(
   systemPromptReport: unknown,
   opts?: { nowMs?: () => number },
 ): CronRunDiagnostics | undefined {
@@ -307,7 +307,7 @@ export function createCronRunDiagnosticsFromToolSurface(
   }
   const message =
     names.length === 0
-      ? "Cron agent turn ran with zero tools available; the job could not act."
-      : "Cron agent turn ran with only the message tool available; the job could not do work beyond sending a message.";
+      ? "Cron agent turn ran with 0 tools available (zero tools); the job could not act."
+      : `Cron agent turn ran with ${names.length} tool available (${names.join(", ")}; only the message tool); the job could not do work beyond sending a message.`;
   return createCronRunDiagnosticsFromError("agent-run", message, { ...opts, severity: "warn" });
 }
