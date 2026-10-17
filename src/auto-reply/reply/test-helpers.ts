@@ -54,6 +54,7 @@ export function createMockReplyOperation(
     markDeferredMaintenanceWaitEnded: vi.fn(),
     markWaitingForGlobalLane: vi.fn(),
     markGlobalLaneWaitEnded: vi.fn(),
+    markGlobalLaneSlotGranted: vi.fn(),
     markTerminalRecovery: vi.fn(),
     markAcceptedSteeredInboundAudio: vi.fn(),
     bindToolAuthoritySnapshot: vi.fn((snapshot) => {
