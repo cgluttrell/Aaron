@@ -351,6 +351,12 @@ export type ReplyOperation = {
   readonly staleExpiryReason?: ReplyOperationStaleReason;
   readonly startedAtMs: number;
   readonly lastActivityAtMs: number;
+  /**
+   * Global lane whose slot this operation's admitted task holds while its
+   * phase still reads waiting_for_global_lane (admitted, pre-placement).
+   * Undefined while the operation is only queued for capacity.
+   */
+  readonly globalLaneSlotHeld?: string;
   /** True when this operation has owned the supplied session ID. */
   hasOwnedSessionId(sessionId: string): boolean;
   /** Capture lineage before a pending barrier outlives this operation's lane. */
@@ -373,6 +379,8 @@ export type ReplyOperation = {
   markWaitingForGlobalLane(): void;
   /** Return a global-lane-waiting operation to queued once capacity is granted. */
   markGlobalLaneWaitEnded(): void;
+  /** Record that the global lane granted this operation a slot (before placement admission). */
+  markGlobalLaneSlotGranted(lane: string): void;
   /** Mark this operation as an in-flight terminal-session recovery. */
   markTerminalRecovery(): void;
   markAcceptedSteeredInboundAudio(): void;
