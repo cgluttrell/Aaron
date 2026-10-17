@@ -12,6 +12,7 @@ import {
 } from "../agents/embedded-agent-runner/runs.js";
 import { recoverTerminalSessionPlacementTurn } from "../agents/session-placement-admission.js";
 import { prepareStaleFollowupDrainRetirement } from "../auto-reply/reply/queue/drain.js";
+import { loadSessionEntry, markSessionAbortTarget } from "../config/sessions/session-accessor.js";
 import {
   getCommandLaneActiveTaskIds,
   getCommandLaneSnapshot,
@@ -137,6 +138,39 @@ function formatRecoveryContext(
 function reportRecoveryOutcome(outcome: StuckSessionRecoveryOutcome): StuckSessionRecoveryOutcome {
   diag.warn(`stuck session recovery outcome: ${formatRecoveryOutcome(outcome)}`);
   return outcome;
+}
+
+/**
+ * Recovery aborts are aborts: record them through the same abort-target owner
+ * the user Stop path uses (markSessionAbortTarget) so sessions.list reports
+ * abortedLastRun=true instead of looking like a clean end.
+ */
+async function markRecoveryAbortedSession(params: {
+  sessionKey?: string;
+  sessionId?: string;
+}): Promise<void> {
+  const sessionKey = params.sessionKey?.trim();
+  if (!sessionKey) {
+    return;
+  }
+  try {
+    await markSessionAbortTarget({
+      scope: { sessionKey },
+      // Only mark the row that still belongs to the aborted run; a reset or
+      // replacement session must not inherit the stale abort.
+      isCurrent: () => {
+        if (!params.sessionId) {
+          return true;
+        }
+        const entry = loadSessionEntry({ sessionKey, clone: false });
+        return !entry || entry.sessionId === params.sessionId;
+      },
+    });
+  } catch (err) {
+    diag.warn(
+      `stuck session recovery: failed to persist abortedLastRun sessionKey=${sessionKey} err=${String(err)}`,
+    );
+  }
 }
 
 export async function recoverStuckDiagnosticSession(
@@ -443,6 +477,12 @@ export async function recoverStuckDiagnosticSession(
     if (aborted || forceCleared || released > 0 || clearStaleSession) {
       retireStaleFollowupDrain?.();
       const action = aborted || forceCleared ? "abort_embedded_run" : "release_lane";
+      if (action === "abort_embedded_run") {
+        await markRecoveryAbortedSession({
+          sessionKey: params.sessionKey,
+          sessionId: activeSessionId ?? params.sessionId,
+        });
+      }
       void logWithSessionDiagnosticContext({
         level: "warn",
         sessionKey: params.sessionKey,

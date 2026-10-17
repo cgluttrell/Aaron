@@ -3,6 +3,7 @@ import path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   appendTranscriptMessageSync,
+  loadSessionEntry,
   replaceSessionEntry,
 } from "../config/sessions/session-accessor.js";
 import { saveCronStore } from "../cron/store.js";
@@ -17,6 +18,57 @@ import {
 
 describe("stuck session recovery", () => {
   beforeEach(resetMocks);
+
+  it("marks abortedLastRun when recovery aborts an embedded run (T3838)", async () => {
+    const openClawState = await createOpenClawTestState({
+      layout: "state-only",
+      prefix: "openclaw-recovery-aborted-flag-",
+    });
+    try {
+      const sessionKey = "agent:main:main";
+      await replaceSessionEntry({ sessionKey }, { sessionId: "run-stale", updatedAt: 1 });
+      mocks.resolveActiveEmbeddedRunHandleSessionId.mockReturnValue("run-stale");
+      mocks.abortEmbeddedAgentRun.mockReturnValue(true);
+      mocks.waitForEmbeddedAgentRunEnd.mockResolvedValue(true);
+
+      const outcome = await recoverStuckDiagnosticSession({
+        sessionId: "run-stale",
+        sessionKey,
+        ageMs: 10 * 60_000,
+        allowActiveAbort: true,
+      });
+
+      expect(outcome).toMatchObject({ action: "abort_embedded_run" });
+      expect(loadSessionEntry({ sessionKey })?.abortedLastRun).toBe(true);
+    } finally {
+      await openClawState.cleanup();
+    }
+  });
+
+  it("does not mark abortedLastRun on a replacement session row (T3838)", async () => {
+    const openClawState = await createOpenClawTestState({
+      layout: "state-only",
+      prefix: "openclaw-recovery-aborted-flag-replaced-",
+    });
+    try {
+      const sessionKey = "agent:main:main";
+      await replaceSessionEntry({ sessionKey }, { sessionId: "fresh-run", updatedAt: 1 });
+      mocks.resolveActiveEmbeddedRunHandleSessionId.mockReturnValue("run-stale");
+      mocks.abortEmbeddedAgentRun.mockReturnValue(true);
+      mocks.waitForEmbeddedAgentRunEnd.mockResolvedValue(true);
+
+      await recoverStuckDiagnosticSession({
+        sessionId: "run-stale",
+        sessionKey,
+        ageMs: 10 * 60_000,
+        allowActiveAbort: true,
+      });
+
+      expect(loadSessionEntry({ sessionKey })?.abortedLastRun).not.toBe(true);
+    } finally {
+      await openClawState.cleanup();
+    }
+  });
 
   it("does not abort an active embedded run by default", async () => {
     mocks.resolveActiveEmbeddedRunHandleSessionId.mockReturnValue("session-1");
