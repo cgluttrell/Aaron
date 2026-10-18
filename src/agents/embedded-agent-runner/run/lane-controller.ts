@@ -326,6 +326,9 @@ export function createEmbeddedRunLaneController<TParams extends LaneParams>(opti
     const taskWithCurrentLifecycle = async () => {
       endCapacityWait();
       finishGlobalLaneAdmission();
+      // The slot is held from here until placement admission clears the
+      // waiting phase; recovery must be able to see that.
+      options.getParams().replyOperation?.markGlobalLaneSlotGranted(options.globalLane);
       noteLaneTaskProgress();
       let params = options.getParams();
       throwIfAborted();

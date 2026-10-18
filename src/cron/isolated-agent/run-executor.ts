@@ -47,7 +47,6 @@ import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { assertCronExecutionRootRuntime } from "../execution-root-runtime.js";
 import { prepareCronRunAdmission } from "../run-admission.js";
 import { resolveCronScheduledToolPolicy } from "../scheduled-tool-policy.js";
-import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import { resolveCronAuthenticatedChannelRequester } from "../tools-allow-provenance.js";
 import type { CronAgentExecutionPhaseUpdate } from "../types.js";
 import {
@@ -70,7 +69,10 @@ import {
   runCliAgent,
 } from "./run-execution.runtime.js";
 import type { CronRunExecutionParams } from "./run-execution.types.js";
-import { resolveCronFallbacksOverride } from "./run-fallback-policy.js";
+import {
+  isSkillCollectionReviewCronJob,
+  resolveCronFallbacksOverride,
+} from "./run-fallback-policy.js";
 import {
   isCommandStyleCronMessage,
   resolveIsolatedCronPromptCacheKey,
@@ -122,9 +124,7 @@ function createCronPromptExecutor(
       useSubagentFallbacks: params.useSubagentFallbacks,
       inheritDefaultFallbacksForAgentStringModel: params.inheritDefaultFallbacksForAgentStringModel,
     });
-  const isSkillCollectionReview = params.job.declarationKey?.startsWith(
-    SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX,
-  );
+  const isSkillCollectionReview = isSkillCollectionReviewCronJob(params.job);
   const fastModeStartedAtMs = Date.now();
   const fastModeAutoProgressState: FastModeAutoProgressState = {
     offAnnounced: false,
@@ -266,6 +266,9 @@ function createCronPromptExecutor(
             ? params.liveSelection.authProfileId
             : undefined,
         fallbacksOverride: cronFallbacksOverride,
+        // The system review keeps its selected model except when the primary is
+        // rate-limited; every other failure class surfaces instead of switching.
+        ...(isSkillCollectionReview ? { fallbackReasonAllowlist: ["rate_limit" as const] } : {}),
       },
       identity: {
         runId,

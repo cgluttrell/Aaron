@@ -12,6 +12,7 @@ import {
 } from "../agents/embedded-agent-runner/runs.js";
 import { recoverTerminalSessionPlacementTurn } from "../agents/session-placement-admission.js";
 import { prepareStaleFollowupDrainRetirement } from "../auto-reply/reply/queue/drain.js";
+import { loadSessionEntry, markSessionAbortTarget } from "../config/sessions/session-accessor.js";
 import {
   getCommandLaneActiveTaskIds,
   getCommandLaneSnapshot,
@@ -51,6 +52,33 @@ function resolveStaleActiveLaneTaskReleaseMs(params: StuckSessionRecoveryRequest
       ? compactionSafetyTimeoutMs + STUCK_SESSION_ABORT_SETTLE_MS
       : 0;
   return Math.max(STALE_ACTIVE_LANE_TASK_RELEASE_MS, compactionReleaseMs);
+}
+
+/**
+ * A reply operation whose phase still reads waiting_for_global_lane but whose
+ * task already holds a global slot, has made no reply progress for the stale
+ * window, and sits on a saturated global lane with queued waiters. Only that
+ * combination is a lane-wait deadlock; queued waiters (no slot) and holders
+ * with fresh progress stay protected.
+ */
+function resolveStaleGlobalLaneSlotHolder(params: {
+  phase: string | undefined;
+  slotLane: string | undefined;
+  activeReplyAgeMs: number | undefined;
+  staleAbortMs: number;
+}): { lane: string; activeCount: number; queuedCount: number } | undefined {
+  if (params.phase !== "waiting_for_global_lane" || !params.slotLane) {
+    return undefined;
+  }
+  if (params.activeReplyAgeMs === undefined || params.activeReplyAgeMs < params.staleAbortMs) {
+    return undefined;
+  }
+  const snapshot = getCommandLaneSnapshot(params.slotLane);
+  const laneWaiting =
+    snapshot.queuedCount > 0 && snapshot.activeCount >= Math.max(1, snapshot.maxConcurrent);
+  return laneWaiting
+    ? { lane: snapshot.lane, activeCount: snapshot.activeCount, queuedCount: snapshot.queuedCount }
+    : undefined;
 }
 
 function isActiveRunProgressStale(params: {
@@ -125,6 +153,39 @@ function formatRecoveryContext(
 function reportRecoveryOutcome(outcome: StuckSessionRecoveryOutcome): StuckSessionRecoveryOutcome {
   diag.warn(`stuck session recovery outcome: ${formatRecoveryOutcome(outcome)}`);
   return outcome;
+}
+
+/**
+ * Recovery aborts are aborts: record them through the same abort-target owner
+ * the user Stop path uses (markSessionAbortTarget) so sessions.list reports
+ * abortedLastRun=true instead of looking like a clean end.
+ */
+async function markRecoveryAbortedSession(params: {
+  sessionKey?: string;
+  sessionId?: string;
+}): Promise<void> {
+  const sessionKey = params.sessionKey?.trim();
+  if (!sessionKey) {
+    return;
+  }
+  try {
+    await markSessionAbortTarget({
+      scope: { sessionKey },
+      // Only mark the row that still belongs to the aborted run; a reset or
+      // replacement session must not inherit the stale abort.
+      isCurrent: () => {
+        if (!params.sessionId) {
+          return true;
+        }
+        const entry = loadSessionEntry({ sessionKey, clone: false });
+        return !entry || entry.sessionId === params.sessionId;
+      },
+    });
+  } catch (err) {
+    diag.warn(
+      `stuck session recovery: failed to persist abortedLastRun sessionKey=${sessionKey} err=${String(err)}`,
+    );
+  }
 }
 
 export async function recoverStuckDiagnosticSession(
@@ -264,7 +325,29 @@ export async function recoverStuckDiagnosticSession(
       });
     }
 
-    if (activeReplyPhase === "waiting_for_global_lane" || activeMaintenanceProtected) {
+    // Invariant: waiting_for_global_lane is only "healthy waiting" while the
+    // operation does not hold a global slot. The phase is cleared after
+    // placement admission, not at slot grant, so an admitted task that stalls
+    // in between holds capacity while still reading as a waiter. When every
+    // slot is held that way the lane can never drain and keep_lane deadlocks.
+    const globalLaneWaitDeadlock = resolveStaleGlobalLaneSlotHolder({
+      phase: activeReplyPhase,
+      slotLane: activeReplyActivity?.globalLaneSlotHeld,
+      activeReplyAgeMs,
+      staleAbortMs: staleActiveProgressAbortMs,
+    });
+    if (globalLaneWaitDeadlock) {
+      diag.warn(
+        `stuck session recovery releasing stale global lane slot: ${formatRecoveryContext(
+          params,
+          activeWorkSessionId ?? "unknown",
+        )} globalLane=${globalLaneWaitDeadlock.lane} laneActive=${globalLaneWaitDeadlock.activeCount} laneQueued=${globalLaneWaitDeadlock.queuedCount} replyIdleMs=${activeReplyAgeMs}`,
+      );
+    }
+    if (
+      (activeReplyPhase === "waiting_for_global_lane" && !globalLaneWaitDeadlock) ||
+      activeMaintenanceProtected
+    ) {
       // Queued replies and configured maintenance own their lane until their
       // producer finishes or the existing compaction safety window expires.
       return reportRecoveryOutcome({
@@ -458,6 +541,12 @@ export async function recoverStuckDiagnosticSession(
     if (aborted || forceCleared || released > 0 || clearStaleSession) {
       retireStaleFollowupDrain?.();
       const action = aborted || forceCleared ? "abort_embedded_run" : "release_lane";
+      if (action === "abort_embedded_run") {
+        await markRecoveryAbortedSession({
+          sessionKey: params.sessionKey,
+          sessionId: activeSessionId ?? params.sessionId,
+        });
+      }
       void logWithSessionDiagnosticContext({
         level: "warn",
         sessionKey: params.sessionKey,

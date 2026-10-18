@@ -93,6 +93,7 @@ export function createReplyOperation(params: {
   let currentAgentId = resolveReplyOperationAgentId(sessionKey, params.agentId);
   let phase: ReplyOperationPhase = "queued";
   let phaseBeforeGlobalLaneWait: "queued" | "running" | undefined;
+  let globalLaneSlotHeld: string | undefined;
   let staleExpiryReason: replyRunSettle.ReplyOperationStaleReason | undefined;
   let result: ReplyOperationResult | null = null;
   let stateCleared = false;
@@ -284,6 +285,9 @@ export function createReplyOperation(params: {
     get startedAtMs() {
       return startedAtMs;
     },
+    get globalLaneSlotHeld() {
+      return globalLaneSlotHeld;
+    },
     get lastActivityAtMs() {
       return lastActivityAtMs;
     },
@@ -330,7 +334,17 @@ export function createReplyOperation(params: {
       }
       phase = phaseBeforeGlobalLaneWait ?? "queued";
       phaseBeforeGlobalLaneWait = undefined;
+      globalLaneSlotHeld = undefined;
       markProgress("global_lane:wait_ended");
+    },
+    markGlobalLaneSlotGranted(lane: string) {
+      if (result || phase !== "waiting_for_global_lane") {
+        return;
+      }
+      // Deliberately not markProgress: holding a slot is not progress. Stuck
+      // recovery uses this to tell an admitted-but-stalled holder from a
+      // healthy queued waiter.
+      globalLaneSlotHeld = lane;
     },
     markTerminalRecovery() {
       terminalRecovery = true;

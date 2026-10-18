@@ -23,6 +23,7 @@ import type {
   CronRunTelemetry,
 } from "../types.js";
 import { abortErrorMessage, timeoutErrorMessage } from "./execution-errors.js";
+import { CRON_PRESSURE_DEFER_ERROR } from "./pressure-deferral-retry.js";
 import type { CronRunDeliveryResult, CronServiceState } from "./state.js";
 import {
   type CronJobExecutionResult,
@@ -413,13 +414,17 @@ async function executeDetachedCronJob(
     override: options?.dispatchPressureOverride,
   });
   if (pressureDecision.status === "defer") {
-    const error = "gateway memory pressure guard deferred isolated cron agent dispatch";
+    const error = CRON_PRESSURE_DEFER_ERROR;
+    // T3705: anon/kernel ride along so a deferral says what filled the working set. The
+    // re-check schedule itself is applied with the outcome (see pressure-deferral-retry.ts).
     state.deps.log.warn(
       {
         jobId: job.id,
         reason: pressureDecision.reason,
         currentBytes: pressureDecision.sample.currentBytes,
         fileCacheBytes: pressureDecision.sample.fileCacheBytes,
+        anonBytes: pressureDecision.sample.anonBytes,
+        kernelBytes: pressureDecision.sample.kernelBytes,
         workingSetBytes: pressureDecision.sample.workingSetBytes,
         maxBytes: pressureDecision.sample.maxBytes,
         usageRatio: pressureDecision.sample.usageRatio,
