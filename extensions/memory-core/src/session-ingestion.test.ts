@@ -25,6 +25,35 @@ afterEach(async () => {
 });
 
 describe("session ingestion", () => {
+  it("redacts a dispatch actor token through the real transcript scan", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-ingestion-"));
+    tempDirs.push(dir);
+    const archiveFile = path.join(dir, "dispatch.jsonl");
+    const token = ["mcat1", "00000000-0000-4000-8000-000000000000", "exampleOnlyValue"].join(".");
+    await fs.writeFile(
+      archiveFile,
+      `${JSON.stringify({
+        type: "message",
+        id: "dispatch",
+        timestamp: "2026-10-19T08:00:00.000Z",
+        message: {
+          role: "user",
+          content: `Dispatch Identity: X-MC-Actor-Token: ${token} and keep this useful task context.`,
+          timestamp: "2026-10-19T08:00:00.000Z",
+        },
+      })}\n`,
+    );
+    const scan = await scanSessionIngestionSource({
+      source: foreignSessionIngestionSource("main", archiveFile),
+      seenMessages: {},
+      classifyDay: () => "include",
+    });
+    expect(scan.candidates).toHaveLength(1);
+    expect(scan.candidates[0]?.snippet).toContain("[REDACTED_MC_ACTOR_TOKEN]");
+    expect(scan.candidates[0]?.rendered).not.toContain(token);
+    expect(scan.candidates[0]?.snippet).toContain("useful task context");
+  });
+
   it.each(["email", "gmail"] as const)(
     "applies exact %s admission policy using the corpus session store",
     async (hookExternalContentSource) => {

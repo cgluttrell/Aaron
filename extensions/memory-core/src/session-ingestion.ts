@@ -32,6 +32,9 @@ export const SESSION_INGESTION_MIN_MESSAGES_PER_FILE = 12;
 const SESSION_INGESTION_MIN_SNIPPET_CHARS = 12;
 const SESSION_INGESTION_MAX_SNIPPET_CHARS = 280;
 const SESSION_INGESTION_MAX_TRACKED_SCOPES = 2048;
+// Dispatch prompts can be recorded as user turns. Never persist MC actor credentials
+// in the dreaming corpus (or expose them to downstream narrative generation).
+const MC_ACTOR_TOKEN = /\bmcat1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
 type BuildSessionEntryOptions = NonNullable<Parameters<typeof buildSessionEntry>[1]>;
 
 export type SessionEntryOrigin = {
@@ -214,7 +217,10 @@ export function foreignSessionIngestionSource(
 }
 
 function normalizeSessionCorpusSnippet(value: string): string {
-  return truncateUtf16Safe(value.replace(/\s+/g, " ").trim(), SESSION_INGESTION_MAX_SNIPPET_CHARS);
+  return truncateUtf16Safe(
+    value.replace(MC_ACTOR_TOKEN, "[REDACTED_MC_ACTOR_TOKEN]").replace(/\s+/g, " ").trim(),
+    SESSION_INGESTION_MAX_SNIPPET_CHARS,
+  );
 }
 
 function hashSessionMessageId(value: string): string {
