@@ -61,10 +61,14 @@ function scriptedRateLimitThenStallProvider(options: { stall?: boolean } = {}): 
       }
       await new Promise<never>((_resolve, reject) => {
         if (signal.aborted) {
-          reject(signal.reason);
+          reject(new Error("Provider call aborted", { cause: signal.reason }));
           return;
         }
-        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        signal.addEventListener(
+          "abort",
+          () => reject(new Error("Provider call aborted", { cause: signal.reason })),
+          { once: true },
+        );
       });
     },
   };
