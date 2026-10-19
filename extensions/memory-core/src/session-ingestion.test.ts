@@ -7,6 +7,7 @@ import {
   closeOpenClawStateDatabaseForTest,
 } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import {
   foreignSessionIngestionSource,
   resolveAdmissionPolicy,
@@ -15,19 +16,17 @@ import {
   sessionIngestionSourceFromCorpus,
 } from "./session-ingestion.js";
 
-const tempDirs: string[] = [];
+const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
 afterEach(async () => {
   closeOpenClawAgentDatabasesForTest();
   closeOpenClawStateDatabaseForTest();
   vi.unstubAllEnvs();
-  await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
 describe("session ingestion", () => {
   it("redacts a dispatch actor token through the real transcript scan", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-ingestion-"));
-    tempDirs.push(dir);
+    const dir = tempDirs.make("openclaw-session-ingestion-");
     const archiveFile = path.join(dir, "dispatch.jsonl");
     const token = ["mcat1", "00000000-0000-4000-8000-000000000000", "exampleOnlyValue"].join(".");
     await fs.writeFile(
@@ -57,10 +56,7 @@ describe("session ingestion", () => {
   it.each(["email", "gmail"] as const)(
     "applies exact %s admission policy using the corpus session store",
     async (hookExternalContentSource) => {
-      const dir = await fs.realpath(
-        await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-admission-")),
-      );
-      tempDirs.push(dir);
+      const dir = tempDirs.make("openclaw-session-admission-");
       vi.stubEnv("OPENCLAW_STATE_DIR", dir);
       const storePath = path.join(dir, "custom", "sessions.json");
       await fs.mkdir(path.dirname(storePath), { recursive: true });
@@ -125,8 +121,7 @@ describe("session ingestion", () => {
   });
 
   it("verifies backfill content despite an unchanged size and mtime", async () => {
-    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-ingestion-"));
-    tempDirs.push(dir);
+    const dir = tempDirs.make("openclaw-session-ingestion-");
     const archiveFile = path.join(dir, "archive.jsonl");
     const record = (content: string) =>
       `${JSON.stringify({
@@ -177,8 +172,7 @@ describe("session ingestion", () => {
   ])(
     "resumes an append after consuming $maxCandidates snapshot lines",
     async ({ maxCandidates, expected }) => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-ingestion-"));
-      tempDirs.push(dir);
+      const dir = tempDirs.make("openclaw-session-ingestion-");
       const archiveFile = path.join(dir, "archive.jsonl");
       const record = (id: string, content: string, timestamp: string) =>
         `${JSON.stringify({
@@ -258,8 +252,7 @@ describe("session ingestion", () => {
   it.each(["text", "timestamp", "provenance", "ordinal", "truncation"] as const)(
     "rescans when the previous snapshot changes by %s",
     async (change) => {
-      const dir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-session-ingestion-"));
-      tempDirs.push(dir);
+      const dir = tempDirs.make("openclaw-session-ingestion-");
       const archiveFile = path.join(dir, "archive.jsonl");
       const record = (id: string, content: string) => ({
         type: "message",
