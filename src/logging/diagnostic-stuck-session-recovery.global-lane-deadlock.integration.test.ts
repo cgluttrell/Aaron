@@ -28,6 +28,15 @@ import { resetCommandQueueStateForTest } from "../process/command-queue.test-sup
 import { recoverStuckDiagnosticSession } from "./diagnostic-stuck-session-recovery.runtime.js";
 import { resetDiagnosticStateForTest } from "./diagnostic.test-support.js";
 
+// Writer custody is owned by the host in v2026.10.5. This lane/recovery test
+// exercises queue ownership, not SQLite writer admission inside a Vitest worker.
+vi.mock("../agents/embedded-agent-runner/run/session-bootstrap.js", async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import("../agents/embedded-agent-runner/run/session-bootstrap.js")
+  >()),
+  claimAgentSessionWriter: async () => undefined,
+}));
+
 const GLOBAL_LANE = "main";
 const NO_WARN = { warnAfterMs: Number.MAX_SAFE_INTEGER };
 const STALE_AGE_MS = 2_100_000; // the incident: age over 2,000 s

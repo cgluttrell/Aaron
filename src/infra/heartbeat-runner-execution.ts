@@ -368,7 +368,7 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   const isMissionControlExecCompletion =
     scheduledTasks.length === 0 &&
     preflight.shouldInspectPendingEvents &&
-    preflight.pendingEventEntries.some((event) => isExecCompletionEvent(event.text)) &&
+    preflight.pendingEventEntries.some(isExecCompletionSystemEvent) &&
     // Mission Control creates worker sessions with this key prefix. Persisted
     // operator/internal route facts also describe visible WebChat sessions, so
     // the key format is the discriminator until creation records distinguish them.
@@ -433,7 +433,12 @@ export async function prepareHeartbeatRunStage(wake: ReadyHeartbeatWake) {
   const resolvedDelivery = await resolveDeliveryFor(
     preflight.session,
     isMissionControlExecCompletion
-      ? { ...heartbeat, target: heartbeat?.target === "none" ? "none" : "last", to: undefined, accountId: undefined }
+      ? {
+          ...heartbeat,
+          target: heartbeat?.target === "none" ? "none" : "last",
+          to: undefined,
+          accountId: undefined,
+        }
       : preflight.conversationRoute
         ? { target: "last" }
         : heartbeat,

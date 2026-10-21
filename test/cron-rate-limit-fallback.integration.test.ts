@@ -1,9 +1,6 @@
 // T3726: a rate-limited (429) primary during a cron agentTurn must fall through
-// to the agent's configured fallback model — including for system-declared
-// skill-collection-review jobs (T3723) — while every non-rate-limit failure
-// class keeps the review's model pin. Runs the real gateway path:
+// to the agent's configured fallback model. Runs the real gateway path:
 // cron.run → run-executor → runWithModelFallback → embedded runner → provider HTTP.
-import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -19,13 +16,7 @@ import {
 } from "../src/config/config.js";
 import type { ModelDefinitionConfig } from "../src/config/types.models.js";
 import type { OpenClawConfig } from "../src/config/types.openclaw.js";
-import { resolveSkillCollectionReviewMonitorSpecs } from "../src/cron/skill-collection-review-monitor.js";
-import {
-  loadCronStore,
-  resolveCronJobsStorePathFromConfig,
-  saveCronJobsStore,
-} from "../src/cron/store.js";
-import type { CronJobCreate, CronStoredJob } from "../src/cron/types.js";
+import type { CronJobCreate } from "../src/cron/types.js";
 import {
   disconnectGatewayClient,
   startGatewayWithClient,
@@ -60,8 +51,6 @@ type ProviderBehavior = "ok" | "rate-limit" | "bad-request";
 const PROVIDER_PAIRS = {
   "generic-a": { primary: "rlprime-a", fallback: "rlbackup-a" },
   "generic-b": { primary: "rlprime-b", fallback: "rlbackup-b" },
-  "review-main": { primary: "rlprime-main", fallback: "rlbackup-main" },
-  "review-aux": { primary: "rlprime-aux", fallback: "rlbackup-aux" },
 } as const;
 
 function buildModel(id: string): ModelDefinitionConfig {
@@ -240,8 +229,6 @@ describe("cron agentTurn rate-limit fallback", () => {
             agents: {
               ownership: "explicit",
               entries: {
-                main: { model: agentModel(PROVIDER_PAIRS["review-main"]) },
-                aux: { model: agentModel(PROVIDER_PAIRS["review-aux"]) },
                 "generic-a": { model: agentModel(PROVIDER_PAIRS["generic-a"]) },
                 "generic-b": { model: agentModel(PROVIDER_PAIRS["generic-b"]) },
               },
@@ -271,35 +258,9 @@ describe("cron agentTurn rate-limit fallback", () => {
             tools: { toolSearch: false },
             plugins: { allow: [], slots: { memory: "none" } },
             cron: { enabled: false },
-            skills: { workshop: { autonomous: { mode: "auto" } } },
           };
           await writeFile(configPath, JSON.stringify(cfg));
           setRuntimeConfigSnapshot(cfg, cfg);
-
-          // Seed the system-owned review jobs from the real monitor spec
-          // producer. The scheduler-side reconcile that normally declares them
-          // is a background loop the manual-RPC gateway fixture keeps off.
-          const reviewSeedAgents = new Set(["main", "aux"]);
-          const nowMs = Date.now();
-          const seededReviewJobs: CronStoredJob[] = [
-            ...resolveSkillCollectionReviewMonitorSpecs(cfg, []),
-          ]
-            .filter((spec) => reviewSeedAgents.has(spec.agentId))
-            .map(({ input }) =>
-              Object.assign({}, input, {
-                id: randomUUID(),
-                enabled: true,
-                createdAtMs: nowMs,
-                updatedAtMs: nowMs,
-                scheduledToolPolicy: { version: 1, mode: "trusted" },
-                state: {},
-              } satisfies Partial<CronStoredJob>),
-            );
-          expect(seededReviewJobs).toHaveLength(2);
-          await saveCronJobsStore(resolveCronJobsStorePathFromConfig(cfg), {
-            version: 1,
-            jobs: seededReviewJobs,
-          });
 
           const realFetch = globalThis.fetch.bind(globalThis);
           vi.stubGlobal(
@@ -359,15 +320,6 @@ describe("cron agentTurn rate-limit fallback", () => {
             catalogMode: "static",
           });
 
-          const storePath = resolveCronJobsStorePathFromConfig(getRuntimeConfig());
-          const reviewJobFor = async (agentId: string) =>
-            expectDefined(
-              (await loadCronStore(storePath)).jobs.find(
-                (job) => job.declarationKey === `skill-collection-review:${agentId}`,
-              ),
-              `system-declared review job for ${agentId}`,
-            );
-
           const addGenericJob = async (agentId: string) =>
             await gateway.client.request<{ id: string }>("cron.add", {
               name: `Rate limit fallback ${agentId}`,
@@ -413,20 +365,7 @@ describe("cron agentTurn rate-limit fallback", () => {
           const warnLogs = createWarnLogCapture("cron-rate-limit-fallback");
           cleanup.push(() => warnLogs.cleanup());
 
-          // Scenario 1 (T3723 regression): the system-declared
-          // skill-collection-review job reaches the agent's fallback when its
-          // pinned primary is rate-limited.
-          {
-            const pair = PROVIDER_PAIRS["review-main"];
-            setScenario(pair, "rate-limit", "ok");
-            const job = await reviewJobFor("main");
-            const completion = await runJob(job.id, "review rate-limit fallback");
-            expect(completion, diagnostics(completion)).toMatchObject({ status: "ok" });
-            expect(countFor(pair.primary), diagnostics(completion)).toBeGreaterThanOrEqual(1);
-            expect(countFor(pair.fallback), diagnostics(completion)).toBeGreaterThanOrEqual(1);
-          }
-
-          // Scenario 2: a generic agentTurn with a rate-limited primary falls
+          // Scenario 1: a generic agentTurn with a rate-limited primary falls
           // through to the configured fallback, which serves the turn.
           {
             const pair = PROVIDER_PAIRS["generic-a"];
@@ -443,7 +382,7 @@ describe("cron agentTurn rate-limit fallback", () => {
             );
           }
 
-          // Scenario 3: primary AND fallback rate-limited — the existing
+          // Scenario 2: primary AND fallback rate-limited — the existing
           // chain-exhausted failure is preserved, with bounded request counts.
           {
             const pair = PROVIDER_PAIRS["generic-b"];
@@ -455,19 +394,6 @@ describe("cron agentTurn rate-limit fallback", () => {
             expect(countFor(pair.fallback), diagnostics(completion)).toBeGreaterThanOrEqual(1);
             expect(countFor(pair.primary), diagnostics(completion)).toBeLessThanOrEqual(12);
             expect(countFor(pair.fallback), diagnostics(completion)).toBeLessThanOrEqual(12);
-          }
-
-          // Scenario 4 (guard): a non-rate-limit failure (HTTP 400) on a review
-          // job's primary must NOT trigger the new switch — the fallback
-          // provider is never contacted and the run surfaces the error.
-          {
-            const pair = PROVIDER_PAIRS["review-aux"];
-            setScenario(pair, "bad-request", "ok");
-            const job = await reviewJobFor("aux");
-            const completion = await runJob(job.id, "review bad-request guard");
-            expect(completion, diagnostics(completion)).toMatchObject({ status: "error" });
-            expect(countFor(pair.primary), diagnostics(completion)).toBeGreaterThanOrEqual(1);
-            expect(countFor(pair.fallback), diagnostics(completion)).toBe(0);
           }
 
           expect(providerErrors).toEqual([]);

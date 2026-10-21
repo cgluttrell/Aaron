@@ -11,7 +11,7 @@ vi.mock("./session-catalog-executable.js", () => ({
   resolveClaudeTerminalExecutable: vi.fn(),
 }));
 
-const subsystemLogMock = vi.hoisted(() => ({ warn: vi.fn(), verbose: vi.fn() }));
+const subsystemLogMock = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn(), verbose: vi.fn() }));
 
 vi.mock("openclaw/plugin-sdk/runtime-env", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/runtime-env")>()),
@@ -111,6 +111,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.unstubAllEnvs();
+  subsystemLogMock.info.mockClear();
   subsystemLogMock.warn.mockClear();
   subsystemLogMock.verbose.mockClear();
 });

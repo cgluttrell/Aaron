@@ -55,7 +55,10 @@ export function createClaudeCodeVersionProbe(
       );
       installedVersion ??= readVersion(result);
       if (!installedVersion) {
-        lastFailure = `code=${result.code} termination=${result.termination}`;
+        lastFailure =
+          result.code === 0 && result.termination === "exit"
+            ? "unparseable-output"
+            : `code=${result.code} termination=${result.termination}`;
       }
       return installedVersion;
     } catch {

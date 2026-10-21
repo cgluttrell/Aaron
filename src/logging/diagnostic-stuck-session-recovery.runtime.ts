@@ -319,9 +319,7 @@ export async function recoverStuckDiagnosticSession(
     });
     if (globalLaneWaitDeadlock) {
       diag.warn(
-        `stuck session recovery releasing stale global lane slot: ${formatRecoveryContext(params, {
-          activeSessionId: activeWorkSessionId,
-        })} globalLane=${globalLaneWaitDeadlock.lane} laneActive=${globalLaneWaitDeadlock.activeCount} laneQueued=${globalLaneWaitDeadlock.queuedCount} replyIdleMs=${activeReplyAgeMs}`,
+        `stuck session recovery releasing stale global lane slot: ${formatRecoveryContext(params, activeWorkSessionId ?? "unknown")} globalLane=${globalLaneWaitDeadlock.lane} laneActive=${globalLaneWaitDeadlock.activeCount} laneQueued=${globalLaneWaitDeadlock.queuedCount} replyIdleMs=${activeReplyAgeMs}`,
       );
     }
     if (

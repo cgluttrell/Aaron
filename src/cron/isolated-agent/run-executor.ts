@@ -51,6 +51,7 @@ import {
   resolveCurrentChannelTarget,
 } from "./channel-output-policy.js";
 import { resolveCronPayloadOutcome } from "./helpers.js";
+import { resolveIsolatedCronPromptCacheKey } from "./prompt-cache-key.js";
 import { assertCronRuntimeAuthorityCandidate } from "./run-admission.js";
 import { createCronCandidateExecutionResolver } from "./run-candidate-runtime.js";
 import { finalizeCronPromptForResolvedTools } from "./run-delivery-trace.js";
@@ -66,10 +67,7 @@ import {
   runCliAgent,
 } from "./run-execution.runtime.js";
 import type { CronRunExecutionParams } from "./run-execution.types.js";
-import {
-  isSkillCollectionReviewCronJob,
-  resolveCronFallbacksOverride,
-} from "./run-fallback-policy.js";
+import { resolveCronFallbacksOverride } from "./run-fallback-policy.js";
 import {
   setCronSessionAgentHarnessId,
   setCronSessionRuntimeModel,
@@ -125,7 +123,6 @@ function createCronPromptExecutor(
       useSubagentFallbacks: params.useSubagentFallbacks,
       inheritDefaultFallbacksForAgentStringModel: params.inheritDefaultFallbacksForAgentStringModel,
     });
-  const isSkillCollectionReview = isSkillCollectionReviewCronJob(params.job);
   const fastModeStartedAtMs = Date.now();
   const fastModeAutoProgressState: FastModeAutoProgressState = {
     offAnnounced: false,
@@ -265,9 +262,6 @@ function createCronPromptExecutor(
             ? params.liveSelection.authProfileId
             : undefined,
         fallbacksOverride: cronFallbacksOverride,
-        // The system review keeps its selected model except when the primary is
-        // rate-limited; every other failure class surfaces instead of switching.
-        ...(isSkillCollectionReview ? { fallbackReasonAllowlist: ["rate_limit" as const] } : {}),
       },
       identity: {
         runId,

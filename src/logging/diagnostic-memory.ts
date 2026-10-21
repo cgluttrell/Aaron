@@ -15,6 +15,12 @@ import { createSubsystemLogger } from "./subsystem.js";
 
 const WARNING_RATIO = 0.8;
 const CRITICAL_RATIO = 0.9;
+const GIB = 1024 ** 3;
+const DEFAULT_CGROUP_WARNING_BYTES = 4 * GIB;
+const DEFAULT_CGROUP_CRITICAL_BYTES = 6 * GIB;
+const DEFAULT_CGROUP_GROWTH_WARNING_BYTES = GIB;
+const DEFAULT_CGROUP_GROWTH_CRITICAL_BYTES = 2 * GIB;
+const DEFAULT_CGROUP_GROWTH_WINDOW_MS = 10 * 60_000;
 const DEFAULT_PRESSURE_REPEAT_MS = 5 * 60 * 1000;
 const BYTE_UNITS = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
 
@@ -31,6 +37,11 @@ type DiagnosticMemoryThresholds = {
   rssCriticalBytes?: number;
   heapUsedWarningBytes?: number;
   heapUsedCriticalBytes?: number;
+  cgroupMemoryWarningBytes?: number;
+  cgroupMemoryCriticalBytes?: number;
+  cgroupMemoryGrowthWarningBytes?: number;
+  cgroupMemoryGrowthCriticalBytes?: number;
+  growthWindowMs?: number;
   pressureRepeatMs?: number;
 };
 
@@ -39,6 +50,76 @@ type MemoryPressure = Omit<DiagnosticMemoryPressureEvent, "seq" | "ts" | "type">
   thresholdBytes: number;
 };
 const lastPressureAtByKey = new Map<string, number>();
+let lastCgroupSample: { ts: number; workingSetBytes: number } | undefined;
+
+function cgroupMetrics(sample: DispatchPressureSample) {
+  return {
+    cgroupMemoryBytes: sample.currentBytes,
+    cgroupMemoryWorkingSetBytes: sample.workingSetBytes,
+    cgroupMemoryFileCacheBytes: sample.fileCacheBytes,
+    ...(sample.maxBytes !== undefined ? { cgroupMemoryMaxBytes: sample.maxBytes } : {}),
+  };
+}
+
+function pickCgroupPressure(
+  memory: DiagnosticMemoryUsage,
+  sample: DispatchPressureSample | undefined,
+  now: number,
+  thresholds: DiagnosticMemoryThresholds | undefined,
+): { threshold: MemoryPressure | null; growth: MemoryPressure | null } {
+  const previous = lastCgroupSample;
+  lastCgroupSample = sample ? { ts: now, workingSetBytes: sample.workingSetBytes } : undefined;
+  if (!sample) {
+    return { threshold: null, growth: null };
+  }
+  const metrics = cgroupMetrics(sample);
+  const thresholdCandidates = [
+    ["critical", thresholds?.cgroupMemoryCriticalBytes ?? DEFAULT_CGROUP_CRITICAL_BYTES],
+    ["warning", thresholds?.cgroupMemoryWarningBytes ?? DEFAULT_CGROUP_WARNING_BYTES],
+  ] as const;
+  const matchedThreshold = thresholdCandidates.find(([, limit]) => sample.workingSetBytes >= limit);
+  const threshold: MemoryPressure | null = matchedThreshold
+    ? {
+        level: matchedThreshold[0],
+        reason: "cgroup_memory_threshold",
+        memory,
+        usedBytes: sample.workingSetBytes,
+        thresholdBytes: matchedThreshold[1],
+        ...metrics,
+      }
+    : null;
+  if (
+    !previous ||
+    now <= previous.ts ||
+    now - previous.ts > (thresholds?.growthWindowMs ?? DEFAULT_CGROUP_GROWTH_WINDOW_MS)
+  ) {
+    return { threshold, growth: null };
+  }
+  const change = sample.workingSetBytes - previous.workingSetBytes;
+  const growthCandidates = [
+    [
+      "critical",
+      thresholds?.cgroupMemoryGrowthCriticalBytes ?? DEFAULT_CGROUP_GROWTH_CRITICAL_BYTES,
+    ],
+    ["warning", thresholds?.cgroupMemoryGrowthWarningBytes ?? DEFAULT_CGROUP_GROWTH_WARNING_BYTES],
+  ] as const;
+  const matchedGrowth = growthCandidates.find(([, limit]) => change >= limit);
+  return {
+    threshold,
+    growth: matchedGrowth
+      ? {
+          level: matchedGrowth[0],
+          reason: "cgroup_memory_growth",
+          memory,
+          usedBytes: change,
+          thresholdBytes: matchedGrowth[1],
+          cgroupMemoryGrowthBytes: change,
+          windowMs: now - previous.ts,
+          ...metrics,
+        }
+      : null,
+  };
+}
 
 function isPositiveMemoryLimit(value: number | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
@@ -210,6 +291,17 @@ function logMemoryPressure(pressure: MemoryPressure): void {
     formatOptionalPressureMetric("limitBytes", pressure.limitBytes) +
     formatOptionalPressureMetric("usedBytes", pressure.usedBytes) +
     formatOptionalPressureMetric("workerThreadId", pressure.workerThreadId) +
+    formatOptionalPressureMetric("cgroupMemoryBytes", pressure.cgroupMemoryBytes) +
+    formatOptionalPressureMetric(
+      "cgroupMemoryWorkingSetBytes",
+      pressure.cgroupMemoryWorkingSetBytes,
+    ) +
+    formatOptionalPressureMetric(
+      "cgroupMemoryFileCacheBytes",
+      pressure.cgroupMemoryFileCacheBytes,
+    ) +
+    formatOptionalPressureMetric("cgroupMemoryGrowthBytes", pressure.cgroupMemoryGrowthBytes) +
+    formatOptionalPressureMetric("cgroupMemoryMaxBytes", pressure.cgroupMemoryMaxBytes) +
     (pressure.memory.workerCount
       ? " workerLimitScope=js-heap-only; external/ArrayBuffers are not capped; nested workers are not included."
       : "") +
@@ -258,7 +350,17 @@ export function emitDiagnosticMemorySample(options?: {
     });
   }
 
-  const pressure = pickPressure(memory, heapLimitBytes, rssLimitBytes, options?.thresholds);
+  const cgroup =
+    options?.cgroupMemory !== undefined
+      ? (options.cgroupMemory ?? undefined)
+      : options?.memoryUsage
+        ? undefined
+        : readCgroupMemorySample();
+  const cgroupPressure = pickCgroupPressure(memory, cgroup, now, options?.thresholds);
+  const pressure =
+    cgroupPressure.threshold ??
+    pickPressure(memory, heapLimitBytes, rssLimitBytes, options?.thresholds) ??
+    cgroupPressure.growth;
   if (pressure?.level === "critical") {
     channel("openclaw.memory.critical").publish(undefined);
   }
@@ -281,6 +383,7 @@ export function emitDiagnosticMemorySample(options?: {
 
 export function resetDiagnosticMemoryForTest(): void {
   lastPressureAtByKey.clear();
+  lastCgroupSample = undefined;
 }
 
 // The logging-core SDK shipped these optional inputs before automatic bundles retired.

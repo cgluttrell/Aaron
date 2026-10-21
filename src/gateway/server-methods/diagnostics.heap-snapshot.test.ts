@@ -7,8 +7,8 @@ import { createDeferred } from "../../../test/helpers/promise.js";
 import { runNodeScript } from "../../../test/helpers/run-node-script.js";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { resolveRuntimeWorkerUrl } from "../../infra/runtime-worker-url.js";
-import { diagnosticProfileEntrypoints } from "../../logging/diagnostic-profile-runtime.test-support.js";
 import { captureDiagnosticHeapSnapshot } from "../../logging/diagnostic-heap-snapshot.js";
+import { diagnosticProfileEntrypoints } from "../../logging/diagnostic-profile-runtime.test-support.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import { setActivePluginRegistry } from "../../plugins/runtime.js";
 import { resolveTestNodeExecPath } from "../../test-utils/node-process.js";
@@ -146,6 +146,7 @@ describe("diagnostics.heapSnapshot", () => {
       expect.objectContaining({ code: options.role === "node" ? "INVALID_REQUEST" : "FORBIDDEN" }),
     );
   });
+  it.each([
     {
       hostAvailableBytes: 512 * 1024 ** 2,
       cgroupWorkingSetBytes: 0,
@@ -173,7 +174,6 @@ describe("diagnostics.heapSnapshot", () => {
       expect(await fs.readdir(stateDir)).toEqual([]);
     },
   );
-
 
   it("rejects path-controlling params", async () => {
     const call = request({ params: { path: "/tmp/override" } });

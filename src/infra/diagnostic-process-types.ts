@@ -87,6 +87,11 @@ export const DIAGNOSTIC_MEMORY_PRESSURE_METRICS = [
   "workerThreadId",
   "rssGrowthBytes",
   "windowMs",
+  "cgroupMemoryBytes",
+  "cgroupMemoryWorkingSetBytes",
+  "cgroupMemoryFileCacheBytes",
+  "cgroupMemoryGrowthBytes",
+  "cgroupMemoryMaxBytes",
 ] as const;
 
 export type DiagnosticMemoryPressureMetrics = Partial<
@@ -96,7 +101,13 @@ export type DiagnosticMemoryPressureMetrics = Partial<
 export type DiagnosticMemoryPressureFields = DiagnosticMemoryPressureMetrics & {
   type: "diagnostic.memory.pressure";
   level: "warning" | "critical";
-  reason: "rss_threshold" | "heap_threshold" | "worker_heap_threshold" | "rss_growth";
+  reason:
+    | "rss_threshold"
+    | "heap_threshold"
+    | "worker_heap_threshold"
+    | "rss_growth"
+    | "cgroup_memory_threshold"
+    | "cgroup_memory_growth";
   memory: DiagnosticMemoryUsage;
 };
 

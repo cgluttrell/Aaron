@@ -724,7 +724,9 @@ function isMemoryPressureReason(
     reason === "rss_threshold" ||
     reason === "heap_threshold" ||
     reason === "worker_heap_threshold" ||
-    reason === "rss_growth"
+    reason === "rss_growth" ||
+    reason === "cgroup_memory_threshold" ||
+    reason === "cgroup_memory_growth"
   );
 }
 

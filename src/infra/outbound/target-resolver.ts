@@ -19,7 +19,6 @@ import {
   reservedTargetLiteralError,
   unknownTargetError,
 } from "./target-errors.js";
-import { maybeResolveIdLikeTarget } from "./target-id-resolution.js";
 import {
   buildTargetResolverSignature,
   looksLikeTargetId,
@@ -336,9 +335,6 @@ export async function resolveChannelTarget(params: {
   const hint = plugin?.messaging?.targetResolver?.hint;
   if (!raw) {
     return { ok: false, error: missingTargetError(providerLabel, hint) };
-  }
-  if (/^(me|self|owner)$/i.test(raw)) {
-    return { ok: false, error: reservedTargetLiteralError(providerLabel, raw, hint) };
   }
   const kind = detectTargetKind(params.channel, raw, params.preferredKind, plugin);
   const normalizedInput = resolveNormalizedTargetInput(params.channel, raw, plugin);

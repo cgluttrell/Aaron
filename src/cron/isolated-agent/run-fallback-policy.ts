@@ -15,11 +15,6 @@ const cronModelPreflightRuntimeLoader = createLazyImportLoader(
   () => import("./model-preflight.runtime.js"),
 );
 
-/** The system review pins model and runtime; fallback serves only rate limits. */
-export function isSkillCollectionReviewCronJob(job: Pick<CronJob, "declarationKey">): boolean {
-  return job.declarationKey?.startsWith(SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX) === true;
-}
-
 /** Resolves cron model fallbacks, giving explicit payload fallbacks precedence over subagent/default policy. */
 export function resolveCronFallbacksOverride(params: {
   cfg: OpenClawConfig;
@@ -96,11 +91,6 @@ export async function resolveCronPreflight(
     });
     if (candidatePreflight.status === "unavailable") {
       firstUnavailableReason ??= candidatePreflight.reason;
-      // The review job never preflight-switches its pinned primary; its chain
-      // only serves live rate-limit failover during execution.
-      if (isSkillCollectionReviewCronJob(params.job)) {
-        break;
-      }
       continue;
     }
     const modelFallbacksOverride =

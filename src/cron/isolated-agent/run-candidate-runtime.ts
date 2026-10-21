@@ -1,6 +1,6 @@
 import { resolveCliRuntimeExecutionProvider } from "../../agents/model-runtime-aliases.js";
 import { isCliProvider } from "./run-execution.runtime.js";
-import type { MutableCronSession } from "./run-session-state.js";
+import type { CronRunExecutionParams } from "./run-execution.types.js";
 import { resolveEffectiveAgentRuntime } from "./run.runtime.js";
 
 /** Shares candidate execution policy between harness preparation and dispatch. */
@@ -32,7 +32,7 @@ export function createCronCandidateExecutionResolver(
         sessionEntry: params.cronSession.sessionEntry,
       });
     return {
-      sessionRuntimeOverride: rootedRuntimeOverride,
+      sessionRuntimeOverride,
       executionProvider,
       cliExecution: isCliProvider(executionProvider, params.cfgWithAgentDefaults),
       runtime,
