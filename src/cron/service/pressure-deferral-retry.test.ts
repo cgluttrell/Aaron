@@ -14,13 +14,14 @@ import {
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import {
   CRON_PRESSURE_DEFER_ERROR,
-  PRESSURE_RETRY_INTERVAL_MS,
-  PRESSURE_RETRY_MAX_ATTEMPTS,
   resolvePressureDeferralRetry,
 } from "./pressure-deferral-retry.js";
 import { createDueIsolatedAgentJob } from "./timer.seam.test-support.js";
 
 const { makeStorePath } = setupCronServiceSuite({ prefix: "cron-pressure-deferral-retry" });
+
+const PRESSURE_RETRY_INTERVAL_MS = 10 * 60_000;
+const PRESSURE_RETRY_MAX_ATTEMPTS = 18;
 
 const GIB = 1024 * 1024 * 1024;
 const DEFER_LOG = "cron: isolated agent dispatch deferred by gateway pressure guard";

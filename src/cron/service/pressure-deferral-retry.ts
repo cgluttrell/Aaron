@@ -17,9 +17,9 @@
 
 export const CRON_PRESSURE_DEFER_ERROR =
   "gateway memory pressure guard deferred isolated cron agent dispatch";
-export const PRESSURE_RETRY_INTERVAL_MS = 10 * 60_000;
-export const PRESSURE_RETRY_WINDOW_MS = 3 * 60 * 60_000;
-export const PRESSURE_RETRY_MAX_ATTEMPTS = Math.floor(
+const PRESSURE_RETRY_INTERVAL_MS = 10 * 60_000;
+const PRESSURE_RETRY_WINDOW_MS = 3 * 60 * 60_000;
+const PRESSURE_RETRY_MAX_ATTEMPTS = Math.floor(
   PRESSURE_RETRY_WINDOW_MS / PRESSURE_RETRY_INTERVAL_MS,
 );
 
