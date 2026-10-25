@@ -155,6 +155,12 @@ describe("runCronIsolatedAgentTurn - meta.error status propagation", () => {
 
   it.each([
     { text: "PARTIAL FAILURE: one source was unavailable", status: "error" },
+    { text: "**PARTIAL FAILURE:** Autonomous Nightly Work stopped", status: "error" },
+    { text: "__BLOCKED__ approval needed", status: "error" },
+    { text: "## __BLOCKED__: approval needed", status: "error" },
+    { text: "## BLOCKED: none", status: "ok" },
+    { text: "All checks passed\n## **BLOCKED: none**", status: "ok" },
+    { text: "Nightly run: **PARTIAL FAILURE:** quoted status", status: "ok" },
     { text: "## BLOCKED — approval needed", status: "error" },
     { text: "CRON_FAILURE: processing stopped", status: "error" },
     { text: "FAILED: processing stopped", status: "error" },
