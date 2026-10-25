@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { FailoverError } from "../../agents/failover-error.js";
+import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { expectObjectFields } from "../../test-utils/mock-call-assertions.js";
 import { makeCronJob } from "../delivery.test-helpers.js";
 import { createCronServiceState, type DeferredCronNotifications } from "../service/state.js";
@@ -216,6 +217,7 @@ describe("runCronIsolatedAgentTurn - meta.error status propagation", () => {
       failureAlert: { after: 1, mode: "webhook", to: "https://example.invalid/cron-alert" },
     });
     const state = createCronServiceState({
+      scheduler: createTestGatewayScheduler(),
       storePath: "/tmp/cron-marker-alert-test.json",
       nowMs: () => 2_000,
       cronEnabled: true,
