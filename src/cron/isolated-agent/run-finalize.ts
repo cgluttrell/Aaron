@@ -45,6 +45,31 @@ import { cleanupCronRunSessionAfterRun } from "./session-cleanup.js";
 
 const cronContextRuntimeLoader = createLazyImportLoader(() => import("./run-context.runtime.js"));
 
+const DEFAULT_AGENT_TURN_FAILURE_MARKERS = ["PARTIAL FAILURE", "BLOCKED", "CRON_FAILURE", "FAILED"];
+
+function findAgentTurnFailureMarker(text: string | undefined, markers: readonly string[]) {
+  if (!text) {
+    return undefined;
+  }
+  const lines = text.split(/\r?\n/);
+  for (const line of lines) {
+    // Only an unquoted line-start label or Markdown heading is a status declaration.
+    const declaration = line.match(/^(?:#{1,6}\s+)?([^\s].*)$/)?.[1];
+    if (!declaration) {
+      continue;
+    }
+    const marker = markers.find(
+      (candidate) =>
+        declaration.toUpperCase().startsWith(candidate.toUpperCase()) &&
+        /^(?:$|[\s:—–-])/.test(declaration.slice(candidate.length)),
+    );
+    if (marker) {
+      return marker;
+    }
+  }
+  return undefined;
+}
+
 export async function finalizeCronRun(params: {
   prepared: PreparedCronRunContext;
   execution: CronExecutionResult;
@@ -228,13 +253,19 @@ export async function finalizeCronRun(params: {
     hasFatalErrorPayload,
     embeddedRunError,
   } = cronPayloadOutcome;
+  const failureMarker = findAgentTurnFailureMarker(
+    finalRunResult.meta?.finalAssistantVisibleText ?? outputText,
+    prepared.cfgWithAgentDefaults.cron?.agentTurnFailureMarkers ??
+      DEFAULT_AGENT_TURN_FAILURE_MARKERS,
+  );
+  const hasFailedAgentReply = failureMarker !== undefined;
   const terminalToolFailure = finalRunResult.meta?.terminalToolFailure;
   const hasTerminalToolFailure = isEmbeddedRunTerminalToolFailure(terminalToolFailure);
   if (hasFatalErrorPayload && hasTerminalToolFailure) {
     summary = CODE_MODE_MCP_CATALOG_MISS_MESSAGE;
   }
   const agentDiagnostics = createCronRunDiagnosticsFromAgentResult(finalRunResult, {
-    finalStatus: hasFatalErrorPayload ? "error" : "ok",
+    finalStatus: hasFatalErrorPayload || hasFailedAgentReply ? "error" : "ok",
   });
   const runDiagnostics = mergeCronRunDiagnostics(prepared.preflightDiagnostics, agentDiagnostics);
   const resolveRunOutcome = (
@@ -243,8 +274,10 @@ export async function finalizeCronRun(params: {
     const disposition = result?.disposition;
     const failure = disposition?.kind === "error" ? disposition : undefined;
     // A failed handoff wins; a non-error delivery stop must retain the run's fatal outcome.
-    const useRunFailure = hasFatalErrorPayload && !failure;
-    const runError = embeddedRunError ?? "cron isolated run returned an error payload";
+    const useRunFailure = (hasFatalErrorPayload || hasFailedAgentReply) && !failure;
+    const runError = failureMarker
+      ? `cron agent reply reported ${failureMarker}`
+      : (embeddedRunError ?? "cron isolated run returned an error payload");
     const deliveryError = disposition && useRunFailure ? undefined : result?.deliveryError;
     const deliveryDiagnosticError = deliveryError ?? failure?.error;
     const output =
@@ -254,10 +287,10 @@ export async function finalizeCronRun(params: {
           ? { summary: result?.summary, outputText: result?.outputText }
           : { summary, outputText };
     return prepared.withRunSession({
-      status: failure || hasFatalErrorPayload ? "error" : "ok",
+      status: failure || hasFatalErrorPayload || hasFailedAgentReply ? "error" : "ok",
       ...(failure
         ? { error: failure.error, ...(failure.errorKind ? { errorKind: failure.errorKind } : {}) }
-        : hasFatalErrorPayload
+        : hasFatalErrorPayload || hasFailedAgentReply
           ? { error: runError }
           : {}),
       ...output,

@@ -401,6 +401,8 @@ export const OpenClawSchemaShape = {
        * Default: "24h".
        */
       sessionRetention: z.union([z.string(), z.literal(false)]).optional(),
+      /** Agent-turn final-reply markers that classify a cron run as failed. Empty disables matching. */
+      agentTurnFailureMarkers: z.array(z.string().min(1)).optional(),
       failureAlert: z
         .strictObject({
           enabled: z.boolean().optional(),
