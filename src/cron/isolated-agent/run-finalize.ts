@@ -61,11 +61,16 @@ function findAgentTurnFailureMarker(text: string | undefined, markers: readonly 
     if (!declaration) {
       continue;
     }
-    const marker = markers.find(
-      (candidate) =>
-        declaration.startsWith(candidate) &&
-        /^(?:$|[\s:—–-])/.test(declaration.slice(candidate.length)),
-    );
+    const unwrappedDeclaration = declaration.replace(/^(?:\*\*|__|\*|_)/, "");
+    const marker = markers.find((candidate) => {
+      if (!unwrappedDeclaration.startsWith(candidate)) {
+        return false;
+      }
+      const remainder = unwrappedDeclaration
+        .slice(candidate.length)
+        .replace(/^(?:\*\*|__|\*|_)/, "");
+      return /^(?:$|[\s:—–-])/.test(remainder) && !/^[:\s—–-]+none\b/i.test(remainder);
+    });
     if (marker) {
       return marker;
     }
