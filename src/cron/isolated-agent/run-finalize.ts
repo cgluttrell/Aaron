@@ -52,15 +52,18 @@ function findAgentTurnFailureMarker(text: string | undefined, markers: readonly 
     return undefined;
   }
   const lines = text.split(/\r?\n/);
-  for (const line of lines) {
-    // Only an unquoted line-start label or Markdown heading is a status declaration.
-    const declaration = line.match(/^(?:#{1,6}\s+)?([^\s].*)$/)?.[1];
+  const firstContentLine = lines.findIndex((line) => line.trim().length > 0);
+  for (const [index, line] of lines.entries()) {
+    // A status is declared in the opening line or a Markdown heading, not later prose.
+    const declaration =
+      line.match(/^#{1,6} +([^\s].*)$/)?.[1] ??
+      (index === firstContentLine ? line.match(/^([^\s#].*)$/)?.[1] : undefined);
     if (!declaration) {
       continue;
     }
     const marker = markers.find(
       (candidate) =>
-        declaration.toUpperCase().startsWith(candidate.toUpperCase()) &&
+        declaration.startsWith(candidate) &&
         /^(?:$|[\s:—–-])/.test(declaration.slice(candidate.length)),
     );
     if (marker) {

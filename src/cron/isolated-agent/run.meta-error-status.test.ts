@@ -158,7 +158,13 @@ describe("runCronIsolatedAgentTurn - meta.error status propagation", () => {
     { text: "## BLOCKED — approval needed", status: "error" },
     { text: "CRON_FAILURE: processing stopped", status: "error" },
     { text: "FAILED: processing stopped", status: "error" },
+    { text: "Summary\n## FAILED: processing stopped", status: "error" },
     { text: "ok: all sources synchronized", status: "ok" },
+    { text: "All checks passed\nPARTIAL FAILURE: quoted status from an earlier run", status: "ok" },
+    {
+      text: "All checks passed\n## partial failure: quoted status from an earlier run",
+      status: "ok",
+    },
     { text: "> PARTIAL FAILURE is a quoted example\nAll checks passed", status: "ok" },
     { text: "All checks passed; the phrase PARTIAL FAILURE was quoted", status: "ok" },
   ])("classifies final assistant reply '$text' as $status", async ({ text, status }) => {
