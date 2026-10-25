@@ -706,6 +706,7 @@ describe("verify-stable-main-closeout", () => {
     const version = "2026.9.6";
     const tag = `v${version}`;
     const mainSha = "a".repeat(40);
+    const repository = process.env.GITHUB_REPOSITORY ?? "openclaw/openclaw";
     for (const name of ["main", "tag"]) {
       const root = path.join(dir, name);
       mkdirSync(root);
@@ -726,7 +727,7 @@ describe("verify-stable-main-closeout", () => {
     writeFileSync(
       path.join(bin, "gh"),
       `#!/usr/bin/env node
-const expected = 'repos/openclaw/openclaw/commits?sha=${mainSha}&path=appcast.xml&per_page=100';
+const expected = 'repos/${repository}/commits?sha=${mainSha}&path=appcast.xml&per_page=100';
 if (process.argv[2] !== 'api' || process.argv[3] !== expected || process.env.WITHDRAWAL_LOOKUPS !== 'allowed') {
   throw new Error('Unexpected GitHub operation: ' + process.argv.slice(2).join(' '));
 }
