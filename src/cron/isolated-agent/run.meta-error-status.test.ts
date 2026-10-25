@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 import { FailoverError } from "../../agents/failover-error.js";
 import { expectObjectFields } from "../../test-utils/mock-call-assertions.js";
+import { makeCronJob } from "../delivery.test-helpers.js";
+import { createCronServiceState, type DeferredCronNotifications } from "../service/state.js";
+import { applyJobResult } from "../service/timer-outcomes.js";
 import { makeIsolatedAgentJobFixture, makeIsolatedAgentParamsFixture } from "./job-fixtures.js";
 import { setupRunCronIsolatedAgentTurnSuite } from "./run.suite-helpers.js";
 import {
@@ -148,6 +151,76 @@ describe("runCronIsolatedAgentTurn - meta.error status propagation", () => {
     const result = await runTurn();
     expect(dispatchCronDeliveryMock).toHaveBeenCalled();
     expectObjectFields(result, { status: "ok", error: undefined });
+  });
+
+  it.each([
+    { text: "PARTIAL FAILURE: one source was unavailable", status: "error" },
+    { text: "## BLOCKED — approval needed", status: "error" },
+    { text: "CRON_FAILURE: processing stopped", status: "error" },
+    { text: "FAILED: processing stopped", status: "error" },
+    { text: "ok: all sources synchronized", status: "ok" },
+    { text: "> PARTIAL FAILURE is a quoted example\nAll checks passed", status: "ok" },
+    { text: "All checks passed; the phrase PARTIAL FAILURE was quoted", status: "ok" },
+  ])("classifies final assistant reply '$text' as $status", async ({ text, status }) => {
+    await useRealOutcome();
+    mockAgentRun({ payloads: [{ text }], meta: { finalAssistantVisibleText: text } });
+    const result = await runTurn();
+    expect(result.status).toBe(status);
+    expect(result.outputText).toBe(text);
+    if (status === "error") {
+      expect(result.error).toContain("cron agent reply reported");
+    } else {
+      expect(result.error).toBeUndefined();
+    }
+  });
+
+  it("allows replacement and disabling of agent-turn failure markers", async () => {
+    await useRealOutcome();
+    mockAgentRun({
+      payloads: [{ text: "PARTIAL FAILURE: ignored by configured list" }],
+      meta: { finalAssistantVisibleText: "PARTIAL FAILURE: ignored by configured list" },
+    });
+    expect(
+      (await runTurn({ cfg: { cron: { agentTurnFailureMarkers: ["CUSTOM_FAILURE"] } } })).status,
+    ).toBe("ok");
+    mockAgentRun({
+      payloads: [{ text: "CUSTOM_FAILURE: stopped" }],
+      meta: { finalAssistantVisibleText: "CUSTOM_FAILURE: stopped" },
+    });
+    expect(
+      (await runTurn({ cfg: { cron: { agentTurnFailureMarkers: ["CUSTOM_FAILURE"] } } })).status,
+    ).toBe("error");
+  });
+
+  it("records a PARTIAL FAILURE run as error and queues its failure alert", async () => {
+    await useRealOutcome();
+    const text = "PARTIAL FAILURE: one source was unavailable";
+    mockAgentRun({ payloads: [{ text }], meta: { finalAssistantVisibleText: text } });
+    const run = await runTurn();
+    const job = makeCronJob({
+      id: "marker-alert-job",
+      name: "Marker alert job",
+      payload: { kind: "agentTurn", message: "report" },
+      failureAlert: { after: 1, mode: "webhook", to: "https://example.invalid/cron-alert" },
+    });
+    const state = createCronServiceState({
+      storePath: "/tmp/cron-marker-alert-test.json",
+      nowMs: () => 2_000,
+      cronEnabled: true,
+      log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeat: vi.fn(),
+      runIsolatedAgentJob: vi.fn(async () => ({ status: "ok" as const })),
+    });
+    const deferredNotifications: DeferredCronNotifications = [];
+    applyJobResult(
+      state,
+      job,
+      { ...run, startedAt: 1_000, endedAt: 2_000 },
+      { deferredNotifications },
+    );
+    expect(job.state.lastStatus).toBe("error");
+    expect(deferredNotifications).toEqual([expect.objectContaining({ kind: "failure-alert" })]);
   });
 
   it("records a real tool error when the terminal assistant reply is silent", async () => {
