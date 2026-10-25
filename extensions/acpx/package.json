@@ -13,7 +13,7 @@
     "@openclaw/fs-safe": "0.21.1",
     "acpx": "0.19.1",
     "smol-toml": "1.8.0",
-    "zod": "4.6.5"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@openclaw/plugin-sdk": "workspace:*"

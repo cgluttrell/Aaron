@@ -10,6 +10,9 @@ minimumReleaseAgeStrict: true
 
 # Trusted Codex runtimes are outside the dependency cooldown.
 minimumReleaseAgeExclude:
+  # T4030 security patches; remove after the seven-day cooldown.
+  - "body-parser@2.4.0" # 2026-10-29T11:39:38.614Z
+  - "fast-uri@4.2.3" # 2026-10-26T22:51:36.634Z
   # Security fix for GHSA-68fv-2mgg-jv7q (released 2026-09-30); remove after 2026-10-07T14:08:09.382Z.
   - "source-map-js@1.2.2"
   # Maintainer-approved for Bun-only npm plugin installs; remove after 2026-09-29T21:29:31.258Z.
@@ -55,8 +58,14 @@ overrides:
   "@aws-sdk/xml-builder": 3.972.40
   "@hono/node-server": 2.1.1
   axios: 1.20.0
-  fast-uri: 4.2.1
-  follow-redirects: 1.16.0
+  fast-uri: 4.2.3
+  follow-redirects: 1.16.1
+  "@modelcontextprotocol/sdk": 1.32.0
+  body-parser: 2.4.0
+  dompurify: 3.4.17
+  markdown-it: 15.0.3
+  undici: 8.12.2
+  vite: 8.3.3
   defu: 6.1.7
   fast-xml-parser: 5.11.1
   request: "npm:@cypress/request@4.0.1"
@@ -68,11 +77,11 @@ overrides:
   file-type: 22.1.1
   form-data: 4.0.6
   "werift-ice@0.2.2>ip": "npm:neoip@3.1.0"
-  ip-address: 10.7.2
-  "mailauth@5.0.3>nodemailer": 10.0.10
+  ip-address: 10.7.4
+  "mailauth@5.0.3>nodemailer": 10.1.4
   "mailauth@5.0.3>joi": 18.2.9
-  # Mailauth pins vulnerable Undici; remove when its direct dependency is fixed.
-  "mailauth@5.0.3>undici": 8.10.2
+  # Mailauth pins Undici; keep it on the patched 8.x line until its direct dependency is fixed.
+  "mailauth@5.0.3>undici": 8.12.2
   minimatch: 10.2.6
   path-to-regexp: 8.4.2
   proxy-addr: 2.0.8
