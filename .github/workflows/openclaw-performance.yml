@@ -86,12 +86,12 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  OCM_VERSION: v0.2.47
-  OCM_LINUX_X64_SHA256: 05e0bb598fe391c75fe7668e159d7eb09168b4298b5d8d0999786e79e97d0642
+  OCM_VERSION: v0.2.48
+  OCM_LINUX_X64_SHA256: d0bdb49d69fa8bf3c3487ff04f4be82126828876f81690afdc002c427e22c1ac
   KOVA_REPOSITORY: openclaw/Kova
-  KOVA_CANONICAL_CONFIG_REF: 4b8b1681446b868a44193ed6e97253a6c8bcbbbf
+  KOVA_CANONICAL_CONFIG_REF: 31e109b6f230180f086a539a0bd3a9d774f44566
   KOVA_LEGACY_LIST_CONFIG_REF: d69b2209905195bea06980721a92ad8b70808c5d
-  KOVA_TRUSTED_LIVE_REF: 4b8b1681446b868a44193ed6e97253a6c8bcbbbf
+  KOVA_TRUSTED_LIVE_REF: 31e109b6f230180f086a539a0bd3a9d774f44566
   PERFORMANCE_MODEL_ID: gpt-5.6-luna
   # Release matrices cold-build the candidate runtime before measurement.
   KOVA_SCENARIO_TIMEOUT_MS: ${{ inputs.profile == 'release' && '900000' || '300000' }}
@@ -131,7 +131,7 @@ jobs:
       - name: Setup supported Node runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           package-manager-cache: false
 
       - name: Resolve OpenClaw target ref
@@ -173,11 +173,6 @@ jobs:
               if (typeof version !== "string") process.exit(1);
               process.stdout.write(version);
             ' "$TARGET_CHECKOUT_DIR/package.json")"
-            if [[ "$target_version" == "2026.7.33" || "$target_version" == "2026.7.34" ]]; then
-              # This compatibility ref keeps Kova #116's historical 250% status CLI calibration
-              # while backporting #118-#120's complete CPU-accounting fixes for this release only.
-              kova_ref="18c9eb8c3950a35794d196f4e40ad471e9308e27"
-            fi
           fi
           if [[ "$kova_ref" == *$'\n'* || "$kova_ref" == *$'\r'* ]]; then
             echo "::error::kova_ref must be a single line."
@@ -192,7 +187,7 @@ jobs:
             schema_path="${TARGET_CHECKOUT_DIR}/src/config/zod-schema.agent-defaults.ts"
             # Follow the shipped composition only when the wrapper has no inline contract.
             if [[ -f "$schema_path" ]] &&
-              ! grep -Fqx '    mediaModels: z' "$schema_path" &&
+              ! grep -Eq '^[[:space:]]*mediaModels: z$' "$schema_path" &&
               ! grep -Fqx '    imageGenerationModel: AgentToolModelSchema.optional(),' "$schema_path" &&
               grep -Fqx 'import { AgentDefaultsBaseSchema } from "./zod-schema.agent-defaults-base.js";' "$schema_path" &&
               grep -Fqx 'export const AgentDefaultsSchema = AgentDefaultsBaseSchema.safeExtend({' "$schema_path"; then
@@ -206,7 +201,7 @@ jobs:
             else
               schema_content=""
             fi
-            if [[ -n "$schema_content" ]] && grep -Fqx '    mediaModels: z' <<<"$schema_content"; then
+            if [[ -n "$schema_content" ]] && grep -Eq '^[[:space:]]*mediaModels: z$' <<<"$schema_content"; then
               detected_kova_config_contract="canonical"
               default_kova_ref="$KOVA_CANONICAL_CONFIG_REF"
             elif [[ -n "$schema_content" ]] && grep -Fqx '    imageGenerationModel: AgentToolModelSchema.optional(),' <<<"$schema_content"; then
@@ -283,8 +278,8 @@ jobs:
             deep_profile: "false"
             live: "false"
             managed_service: "true"
-            include_filters: "scenario:fresh-install,scenario:bundled-plugin-startup"
-            expected_release_entries: "fresh-install:fresh,fresh-install:onboarded-user,bundled-plugin-startup:fresh"
+            include_filters: "scenario:fresh-install,scenario:gateway-performance,scenario:bundled-plugin-startup,scenario:agent-cold-warm-message"
+            expected_release_entries: "fresh-install:fresh,fresh-install:onboarded-user,bundled-plugin-startup:fresh,agent-cold-warm-message:mock-openai-provider,gateway-performance:many-bundled-plugins"
           - lane: mock-deep-profile
             title: Kova mock provider deep profile
             auth: mock
@@ -1256,7 +1251,7 @@ jobs:
         if: steps.download.outcome == 'success'
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           package-manager-cache: false
 
       - name: Prepare clawgrit report commit
@@ -1814,7 +1809,7 @@ jobs:
       - name: Set up benchmark Node
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 24.21.0
+          node-version: 24.22.1
           check-latest: false
 
       - name: Install benchmark pnpm
@@ -1823,9 +1818,9 @@ jobs:
           set -euo pipefail
           pnpm_prefix="$RUNNER_TEMP/vitest-pair-pnpm"
           npm_config_cache="$RUNNER_TEMP/vitest-pair-npm-cache" \
-            npm install --global --prefix "$pnpm_prefix" pnpm@12.5.1
+            npm install --global --prefix "$pnpm_prefix" pnpm@12.15.0
           pnpm_bin="$pnpm_prefix/bin/pnpm"
-          [[ "$("$pnpm_bin" --version)" == "12.5.1" ]]
+          [[ "$("$pnpm_bin" --version)" == "12.15.0" ]]
           echo "VITEST_PAIR_PNPM_BIN=$pnpm_bin" >> "$GITHUB_ENV"
 
       - name: Run Vitest pair benchmark

@@ -5,6 +5,10 @@ import {
   clearRuntimeConfigSnapshot,
   getRuntimeConfigSnapshot,
 } from "./config.js";
+import {
+  resolveConfiguredTalkRealtimeProviderId,
+  resolveConfiguredTalkSpeechProviderId,
+} from "./talk.js";
 import { withTempHomeConfig } from "./test-helpers.js";
 
 describe("talk config validation fail-closed behavior", () => {
@@ -25,12 +29,28 @@ describe("talk config validation fail-closed behavior", () => {
     });
   });
 
-  it.each([
-    {
-      name: "invalid silence timeout",
-      talk: { silenceTimeoutMs: true },
-      message: /silenceTimeoutMs|talk/i,
+  it.each(["speech", "realtime"] as const)(
+    "loads a %s provider whose key differs in case and surrounding whitespace",
+    async (scope) => {
+      const selection = {
+        provider: " ACME ",
+        providers: { " Acme ": { voiceId: "synthetic-voice" } },
+      };
+      const talk = scope === "speech" ? selection : { realtime: selection };
+      await withTempHomeConfig({ agents: { entries: { main: {} } }, talk }, async () => {
+        const config = getRuntimeConfig({ skipPluginValidation: true, pin: false });
+        const resolveProvider =
+          scope === "speech"
+            ? resolveConfiguredTalkSpeechProviderId
+            : resolveConfiguredTalkRealtimeProviderId;
+        expect(resolveProvider(config)).toBe("Acme");
+        const selected = scope === "speech" ? config.talk : config.talk?.realtime;
+        expect(selected?.providers?.Acme).toEqual({ voiceId: "synthetic-voice" });
+      });
     },
+  );
+
+  it.each([
     {
       name: "provider absent from providers",
       talk: { provider: "acme", providers: { elevenlabs: { voiceId: "voice-123" } } },
@@ -44,7 +64,7 @@ describe("talk config validation fail-closed behavior", () => {
       message: /talk\.provider|required/i,
     },
   ])("rejects $name during config load", async ({ talk, message }) => {
-    await withTempHomeConfig({ agents: { list: [{ id: "main" }] }, talk }, async () => {
+    await withTempHomeConfig({ agents: { entries: { main: {} } }, talk }, async () => {
       const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       let thrown: unknown;
       try {

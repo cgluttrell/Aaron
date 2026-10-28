@@ -55,7 +55,6 @@ describe("resolveWorkspaceBootstrapRouting", () => {
     expect(isWorkspaceBootstrapPending).not.toHaveBeenCalledWith(sandboxWorkspace);
     expect(routing.bootstrapMode).toBe("none");
     expect(routing.includeBootstrapInSystemContext).toBe(false);
-    expect(routing.includeBootstrapInRuntimeContext).toBe(false);
   });
 
   it("falls back to limited bootstrap wording when a primary run cannot read files", async () => {
@@ -66,15 +65,36 @@ describe("resolveWorkspaceBootstrapRouting", () => {
 
     expect(routing.bootstrapMode).toBe("limited");
     expect(routing.includeBootstrapInSystemContext).toBe(false);
-    expect(routing.includeBootstrapInRuntimeContext).toBe(false);
+    expect(routing.deliversCompleteWorkspaceContext).toBe(false);
+  });
+
+  it("records a completed workspace as delivering the whole bootstrap context", async () => {
+    // A setup-complete workspace has no BOOTSTRAP.md to withhold, so its turns
+    // carry every bootstrap file even though onboarding leaves the mode at "none".
+    const routing = await resolveWorkspaceBootstrapRouting({
+      isWorkspaceBootstrapPending: vi.fn(async () => false),
+      trigger: "user",
+      isPrimaryRun: true,
+      isCanonicalWorkspace: true,
+      effectiveWorkspace: "/tmp/openclaw-workspace",
+      resolvedWorkspace: "/tmp/openclaw-workspace",
+      hasBootstrapFileAccess: true,
+    });
+
+    expect(routing.bootstrapMode).toBe("none");
+    expect(routing.deliversCompleteWorkspaceContext).toBe(true);
   });
 
   it("treats hook-provided BOOTSTRAP.md content as pending bootstrap context", async () => {
-    const routing = await resolveRouting({ bootstrapFiles: [bootstrapFile] });
+    const isWorkspaceBootstrapPending = vi.fn(async () => false);
+    const routing = await resolveRouting({
+      bootstrapFiles: [bootstrapFile],
+      isWorkspaceBootstrapPending,
+    });
 
     expect(routing.bootstrapMode).toBe("full");
     expect(routing.includeBootstrapInSystemContext).toBe(true);
-    expect(routing.includeBootstrapInRuntimeContext).toBe(false);
+    expect(isWorkspaceBootstrapPending).not.toHaveBeenCalled();
   });
 
   it("uses hook-provided BOOTSTRAP.md content even when normal file reads are unavailable", async () => {
@@ -85,7 +105,6 @@ describe("resolveWorkspaceBootstrapRouting", () => {
 
     expect(routing.bootstrapMode).toBe("full");
     expect(routing.includeBootstrapInSystemContext).toBe(true);
-    expect(routing.includeBootstrapInRuntimeContext).toBe(false);
   });
 
   it("does not infer file access from loaded bootstrap content when the caller opts out", async () => {
@@ -97,7 +116,6 @@ describe("resolveWorkspaceBootstrapRouting", () => {
 
     expect(routing.bootstrapMode).toBe("limited");
     expect(routing.includeBootstrapInSystemContext).toBe(false);
-    expect(routing.includeBootstrapInRuntimeContext).toBe(false);
   });
 
   it("does not treat empty hook-provided BOOTSTRAP.md as pending bootstrap context", async () => {
@@ -107,6 +125,5 @@ describe("resolveWorkspaceBootstrapRouting", () => {
 
     expect(routing.bootstrapMode).toBe("none");
     expect(routing.includeBootstrapInSystemContext).toBe(false);
-    expect(routing.includeBootstrapInRuntimeContext).toBe(false);
   });
 });

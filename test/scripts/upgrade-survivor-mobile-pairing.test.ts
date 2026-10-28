@@ -829,6 +829,7 @@ ${helper}
 phase() { printf '%s\\n' "$1"; shift; "$@"; }
 stop_update_restart_probe_gateway() { :; }
 prepare_restart_inference() { :; }
+prepare_restart_plugin_release_selectors() { :; }
 prepare_restart_fixture() {
   restart_fixture_package=/tmp/future-package.tgz
   restart_fixture_version=2100.1.0
@@ -852,6 +853,7 @@ repair_update_restart_auth
       expect(result.trim().split("\n")).toEqual([
         "stop-recovery-service",
         "prepare-restart-inference",
+        "prepare-restart-plugin-selectors",
         "prepare-restart-fixture",
         "prepare-restart-manager",
         "prepare-recovery-service",

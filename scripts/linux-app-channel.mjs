@@ -146,7 +146,9 @@ function authorizeWrite(mode, options) {
     workflowPath:
       mode === "finalize-core"
         ? ".github/workflows/openclaw-release-publish.yml"
-        : ".github/workflows/linux-app-release.yml",
+        : mode === "publish"
+          ? ".github/workflows/linux-app-release.yml"
+          : ".github/workflows/linux-app-mirror.yml",
     workflowEvent: mode === "publish" ? "workflow_run" : "workflow_dispatch",
     runStatePolicy: "active",
     ...(runGh ? { runGh } : {}),
@@ -324,7 +326,12 @@ class GitHub {
     return path;
   }
 
-  publicAsset(release, entry, limit = METADATA_LIMIT) {
+  publicAsset(
+    release,
+    entry,
+    limit = METADATA_LIMIT,
+    { expectedHash, url = entry.browser_download_url } = {},
+  ) {
     assert(
       Number.isSafeInteger(entry.id) &&
         entry.id > 0 &&
@@ -334,14 +341,48 @@ class GitHub {
         entry.state === "uploaded",
       `Invalid asset identity: ${entry.name}`,
     );
-    const url = assetUrl(release.tag_name, entry.name);
-    assert.equal(entry.browser_download_url, url, "Unexpected public asset URL");
-    const path = this.download(url, limit);
-    assert.equal(lstatSync(path).size, entry.size, "Public asset size mismatch");
-    if (entry.digest != null) {
-      assert.equal(entry.digest, `sha256:${fileDigest(path)}`, "Public asset digest mismatch");
+    assert.equal(
+      entry.browser_download_url,
+      assetUrl(release.tag_name, entry.name),
+      "Unexpected public asset URL",
+    );
+    if (expectedHash && entry.digest != null) {
+      assert.equal(
+        entry.digest,
+        `sha256:${expectedHash}`,
+        `Uploaded asset digest mismatch: asset=${entry.id} expected=${expectedHash} observed=${entry.digest}`,
+      );
     }
-    return path;
+    assert(
+      entry.digest == null || /^sha256:[0-9a-f]{64}$/u.test(entry.digest),
+      "Invalid asset digest",
+    );
+    const expected = expectedHash ?? entry.digest?.slice(7);
+    // Only API-confirmed mutable metadata gets a convergence window. Immutable
+    // bundles and uncertain uploads remain fail-fast; these reads never repeat a write.
+    const converging = entry.digest != null && limit === METADATA_LIMIT;
+    const delays = converging ? [0, 2, 5, 10] : [0];
+    let observed;
+    for (const delay of delays) {
+      if (delay) {
+        command("sleep", [String(delay)]);
+      }
+      const path = this.download(url, limit);
+      observed = fileDigest(path);
+      if (converging) {
+        assert.deepEqual(
+          assetIdentity(this.api(`releases/assets/${entry.id}`)),
+          assetIdentity(entry),
+          "Asset changed during public readback",
+        );
+      }
+      if (lstatSync(path).size === entry.size && (!expected || observed === expected)) {
+        return path;
+      }
+    }
+    throw new Error(
+      `Public asset digest mismatch: ${url} asset=${entry.id} expected=${expected} observed=${observed}. Retry readback, not upload or rebuild.`,
+    );
   }
 
   metadata(release, name) {
@@ -360,9 +401,9 @@ class GitHub {
     const bytesHash = fileDigest(path);
     const previous = asset(release, name);
     if (previous) {
-      const old = this.publicAsset(release, previous, BUNDLE_LIMIT);
+      const old = this.publicAsset(release, previous, mutable ? METADATA_LIMIT : BUNDLE_LIMIT);
       if (fileDigest(old) === bytesHash) {
-        return;
+        return previous;
       }
       assert(mutable, `Immutable asset conflict: ${name}`);
     }
@@ -396,11 +437,11 @@ class GitHub {
     const published = this.unchanged(release, source);
     const uploaded = asset(published, name);
     assert(uploaded, `Upload missing from release: ${name}`);
-    assert.equal(
-      fileDigest(this.publicAsset(published, uploaded, BUNDLE_LIMIT)),
-      bytesHash,
-      `Public upload readback failed: ${name}`,
-    );
+    assert.equal(uploaded.size, lstatSync(path).size, `Uploaded asset size mismatch: ${name}`);
+    this.publicAsset(published, uploaded, mutable ? METADATA_LIMIT : BUNDLE_LIMIT, {
+      expectedHash: bytesHash,
+    });
+    return uploaded;
   }
 }
 
@@ -526,8 +567,15 @@ function publishedManifest(github, bytes, publicKey) {
   );
   // Core consumes the publisher's verified immutable asset IDs, not a claimed signature field.
   // GitHub replacement creates a new ID. Check its digest too when the API supplies one.
+  // Linux updater assets are permanent; a non-Linux companion built by the same
+  // workflow may be withdrawn by deleting it, but a present one must still match.
+  const names = bundleNames(manifest.version);
+  const linuxAssets = new Set([names.appimage, names.deb, names.checksums]);
   for (const entry of proof.assets) {
     const current = asset(release, entry.name);
+    if (!current && !linuxAssets.has(entry.name)) {
+      continue;
+    }
     assert(
       current &&
         current.id === entry.id &&
@@ -676,7 +724,7 @@ function mirror(github, publicKey, target) {
   beforeWrite();
   const path = github.temp("latest.json");
   writeFileSync(path, selected.bytes, { flag: "wx" });
-  github.upload(latest, source, "latest.json", path, true, beforeWrite);
+  const mirrored = github.upload(latest, source, "latest.json", path, true, beforeWrite);
   assert.deepEqual(identity(github.latest()), identity(latest), "Core latest changed after mirror");
   assert.deepEqual(
     canonical(github, publicKey).bytes,
@@ -689,11 +737,10 @@ function mirror(github, publicKey, target) {
     selected.manifest.linuxPublication.channelSha,
     selected.manifest.version,
   );
-  const publicPath = github.download(
-    `https://github.com/${REPOSITORY}/releases/latest/download/latest.json`,
-    METADATA_LIMIT,
-  );
-  assert.deepEqual(readFileSync(publicPath), selected.bytes, "Legacy endpoint readback failed");
+  github.publicAsset(latest, mirrored, METADATA_LIMIT, {
+    expectedHash: digest(selected.bytes),
+    url: `https://github.com/${REPOSITORY}/releases/latest/download/latest.json`,
+  });
   assert.deepEqual(
     identity(github.latest()),
     identity(latest),
@@ -985,14 +1032,9 @@ function publish(github, options, publicKey) {
   const publicKeyPath = github.temp("updater.pub");
   writeFileSync(signaturePath, Buffer.from(signature, "base64"), { flag: "wx" });
   writeFileSync(publicKeyPath, Buffer.from(publicKey, "base64"), { flag: "wx" });
-  command("minisign", [
-    "-Vm",
-    join(directory, names.appimage),
-    "-x",
-    signaturePath,
-    "-p",
-    publicKeyPath,
-  ]);
+  const verifySignature = (name) =>
+    command("minisign", ["-Vm", join(directory, name), "-x", signaturePath, "-p", publicKeyPath]);
+  verifySignature(names.appimage);
 
   // Detect every immutable conflict before uploading any missing file.
   for (const entry of inputs) {
@@ -1080,14 +1122,7 @@ function publish(github, options, publicKey) {
       signaturePath,
       Buffer.from(retained.platforms["linux-x86_64"].signature, "base64"),
     );
-    command("minisign", [
-      "-Vm",
-      join(directory, names.appimage),
-      "-x",
-      signaturePath,
-      "-p",
-      publicKeyPath,
-    ]);
+    verifySignature(names.appimage);
   } else {
     assert(
       typeof published.published_at === "string" &&
@@ -1107,14 +1142,7 @@ function publish(github, options, publicKey) {
             signaturePath,
             Buffer.from(legacy.platforms["linux-x86_64"].signature, "base64"),
           );
-          command("minisign", [
-            "-Vm",
-            join(directory, names.appimage),
-            "-x",
-            signaturePath,
-            "-p",
-            publicKeyPath,
-          ]);
+          verifySignature(names.appimage);
         }
       }
     }
@@ -1208,14 +1236,7 @@ function publish(github, options, publicKey) {
           "Invalid retained desktop signature",
         );
         writeFileSync(signaturePath, Buffer.from(previousSignature, "base64"));
-        command("minisign", [
-          "-Vm",
-          join(directory, name),
-          "-x",
-          signaturePath,
-          "-p",
-          publicKeyPath,
-        ]);
+        verifySignature(name);
       }
       // Keep the previously published date/notes on an identical bundle replay.
       writeFileSync(desktopPath, previous);

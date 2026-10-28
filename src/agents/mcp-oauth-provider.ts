@@ -25,11 +25,6 @@ export type McpOAuthLoginLifecycle = {
   onTokensSaved: () => void;
 };
 
-type McpOAuthMutationAuthority = {
-  assertCurrent: () => void;
-  beforeCommit?: () => void;
-};
-
 function resolveTokenExpiresAt(tokens: OAuthTokens): number | undefined {
   const expiresIn = tokens.expires_in;
   return typeof expiresIn === "number" && Number.isFinite(expiresIn)
@@ -55,21 +50,20 @@ function resolveOAuthRedirectUrl(config: McpOAuthConfig, store: McpOAuthStore = 
   );
 }
 
-function buildOAuthClientMetadata(
-  config: McpOAuthConfig,
-  store: McpOAuthStore = {},
-): OAuthClientMetadata {
-  const redirectUrl = resolveOAuthRedirectUrl(config, store);
-  return {
-    client_name: "OpenClaw MCP",
-    redirect_uris: [redirectUrl],
-    grant_types: ["authorization_code", "refresh_token"],
-    response_types: ["code"],
-    token_endpoint_auth_method: "none",
-    ...(normalizeOptionalString(config.scope)
-      ? { scope: normalizeOptionalString(config.scope) }
-      : {}),
-  };
+function hasRegisteredOAuthRedirect(redirectUris: string[], redirectUrl: string): boolean {
+  if (redirectUris.includes(redirectUrl)) {
+    return true;
+  }
+  const loopback = URL.parse(redirectUrl);
+  if (
+    !loopback ||
+    loopback.protocol !== "http:" ||
+    !["127.0.0.1", "[::1]", "localhost"].includes(loopback.hostname)
+  ) {
+    return false;
+  }
+  // RFC 8252 exempts the port, not other callback bytes changed by URL serialization.
+  return redirectUris.includes(redirectUrl.replace(/^(http:\/\/[^/?#]+):\d+(?=[/?#]|$)/iu, "$1"));
 }
 
 /** Bind OAuth network work to the lease that fences its persisted side effects. */
@@ -137,7 +131,7 @@ export async function createMcpOAuthClientProvider(params: {
     params.login?.assertCurrent();
     preparation++;
     const write = ++nextWrite;
-    const authority: McpOAuthMutationAuthority | undefined = params.login
+    const authority = params.login
       ? { assertCurrent: params.login.assertCurrent, beforeCommit: options.beforeCommit }
       : undefined;
     try {
@@ -176,8 +170,17 @@ export async function createMcpOAuthClientProvider(params: {
       return resolveOAuthRedirectUrl(config, preparedStore());
     },
     clientMetadataUrl: normalizeOptionalString(config.clientMetadataUrl),
-    get clientMetadata() {
-      return buildOAuthClientMetadata(config, preparedStore());
+    get clientMetadata(): OAuthClientMetadata {
+      const redirectUrl = resolveOAuthRedirectUrl(config, preparedStore());
+      const scope = normalizeOptionalString(config.scope);
+      return {
+        client_name: "OpenClaw MCP",
+        redirect_uris: [redirectUrl],
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+        token_endpoint_auth_method: "none",
+        ...(scope ? { scope } : {}),
+      };
     },
     async state() {
       assertAuthorizationRedirectAllowed();
@@ -214,7 +217,10 @@ export async function createMcpOAuthClientProvider(params: {
         clientInformation &&
         "redirect_uris" in clientInformation &&
         Array.isArray(clientInformation.redirect_uris) &&
-        !clientInformation.redirect_uris.includes(resolveOAuthRedirectUrl(config, store))
+        !hasRegisteredOAuthRedirect(
+          clientInformation.redirect_uris,
+          resolveOAuthRedirectUrl(config, store),
+        )
       ) {
         return undefined;
       }

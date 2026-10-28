@@ -39,12 +39,12 @@ Interactive OpenClaw opens the same TUI shell as `openclaw tui`, with an OpenCla
 
 - config validity and the default agent
 - the verified model OpenClaw is using
-- Gateway reachability from the first startup probe
+- Gateway reachability from the first startup check
 - the next recommended debug action
 
 It does not dump secrets or load plugin CLI commands just to start.
 
-Use `status` for the detailed inventory: config path, docs/source paths, local CLI probes, key/token presence, agents, model, and Gateway details.
+Use `status` for the detailed inventory: config path, docs/source paths, local CLI checks, key/token presence, agents, model, and Gateway details.
 
 OpenClaw uses the same reference discovery as regular agents: in a Git checkout it points at local `docs/` and the source tree; in an npm install it uses bundled docs and links to [https://github.com/openclaw/openclaw](https://github.com/openclaw/openclaw), with guidance to check source when docs are not enough.
 
@@ -139,8 +139,15 @@ cannot start a wizard, even when a model proposes it.
 While a human reviews the proposal, the requesting tool stays open. **Allow once**
 applies the exact proposal and returns its application outcome; **Deny** or expiry
 returns a non-applied outcome instead of leaving the agent reporting a pending
-change. Stopping the requesting run cancels its approval. A late approval cannot
-restart a closed run: request the change again from an active run if still needed.
+change. Approval requests expire after 10 minutes without a decision. An expired
+request cannot be approved: if the change is still needed, submit a fresh request
+and approve it through one of the controls above. Retrying the request alone does
+not grant approval.
+
+Stopping the requesting run cancels its approval. A late approval cannot restart
+a closed run. If an approved change fails to complete, check the current settings
+and OpenClaw status before retrying; approval alone does not confirm that the
+change was applied.
 
 Configured agents can ask OpenClaw to create another agent through their
 `openclaw` tool. The request enters the same typed create-agent operation and

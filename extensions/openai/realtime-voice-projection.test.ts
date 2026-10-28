@@ -11,7 +11,10 @@ vi.mock("node:child_process", async (importOriginal) => ({
   ...(await importOriginal<typeof import("node:child_process")>()),
   execFileSync: mocks.execFileSyncMock,
 }));
-vi.mock("ws", () => ({ default: mocks.FakeWebSocket }));
+vi.mock("openclaw/plugin-sdk/websocket-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/websocket-runtime")>()),
+  WebSocket: mocks.FakeWebSocket,
+}));
 vi.mock("openclaw/plugin-sdk/ssrf-runtime", () => ({
   fetchWithSsrFGuard: mocks.fetchWithSsrFGuardMock,
 }));
@@ -63,6 +66,8 @@ describe("OpenAI realtime public projection", () => {
       for (const [azureConfig, supportsRelay] of [
         [{ azureEndpoint: " https://example.openai.azure.com " }, false],
         [{ azureDeployment: " live-deployment " }, false],
+        [{ baseUrl: " wss://voice.example.test/realtime " }, false],
+        [{ baseUrl: " " }, true],
         [{ azureEndpoint: "", azureDeployment: " \t " }, true],
         [{ azureEndpoint: " \t ", azureDeployment: "" }, true],
       ] as const) {

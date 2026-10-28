@@ -1,11 +1,26 @@
 import { randomUUID } from "node:crypto";
+import { expectDefined } from "@openclaw/normalization-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { prepareCompaction } from "../../../packages/agent-core/src/harness/compaction/compaction.js";
+import { awaitGateBeforeSettlement, createDeferred } from "../../../test/helpers/promise.js";
+import { refreshSessionEntryFromStore } from "../../auto-reply/reply/agent-runner-core.js";
+import { getReplyOperationSessionReader } from "../../auto-reply/reply/reply-run-registry.state.js";
+import {
+  appendTranscriptMessage,
+  upsertSessionEntryCore,
+} from "../../config/sessions/session-accessor.js";
 import type { ContextEngineRuntimeContext } from "../../context-engine/types.js";
+import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
+import type { PersistedUserTurnMessage } from "../../sessions/user-turn-transcript.types.js";
+import { makeAgentAssistantMessage } from "../test-helpers/agent-message-fixtures.js";
+import { resolveCompactionTimeoutMs } from "./compaction-safety-timeout.js";
 import {
   type RecoveryFixture,
+  recoveryCompaction,
   waitForCompactionAbort,
   withRecoveryFixture,
 } from "./run.compaction-runtime.test-support.js";
+import { readCompactionAccountingRecorder as readRecoveryAccountingRecorder } from "./run/compaction-accounting-bridge.js";
 
 type Snapshot = Awaited<ReturnType<RecoveryFixture["snapshot"]>>;
 
@@ -34,6 +49,31 @@ function expectStoppedBeforePublication(fixture: RecoveryFixture) {
   fixture.expectNoContinuation();
 }
 
+// Only deadline tests control timers; real persistence must reach its checkpoint first.
+async function recoverAtSafetyDeadline(
+  fixture: RecoveryFixture,
+  kind: Parameters<RecoveryFixture["recover"]>[0],
+  checkpoint: Promise<void>,
+) {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  const pending = fixture.recover(kind);
+  try {
+    await awaitGateBeforeSettlement(
+      checkpoint,
+      pending,
+      "Recovery settled before the safety-timeout checkpoint",
+    );
+    await vi.advanceTimersByTimeAsync(resolveCompactionTimeoutMs());
+    return await pending;
+  } catch (error) {
+    fixture.stop();
+    throw error;
+  } finally {
+    await pending.catch(() => undefined);
+    vi.useRealTimers();
+  }
+}
+
 // These counters observe recovery continuation only, not another model request:
 // downstream dispatch already has its own authority and cancellation guards.
 describe("embedded compaction recovery authority", () => {
@@ -57,6 +97,215 @@ describe("embedded compaction recovery authority", () => {
       expect(after.eventDigests.length - before.eventDigests.length).toBeLessThanOrEqual(5);
       expect(after.toolResultChars).toBeLessThan(before.toolResultChars);
       fixture.assertActive();
+    },
+  );
+
+  it.each(["human", "internal"] as const)(
+    "keeps the admitted %s source after a later internal observation",
+    async (source) => {
+      await withRecoveryFixture({ oversized: false }, async (fixture) => {
+        const writer = await fixture.openWriter();
+        const request = {
+          role: "user" as const,
+          content: "Review this patch; do not publish it.",
+          timestamp: 10,
+          idempotencyKey: `${fixture.runId}:user`,
+          ...(source === "internal" ? { provenance: { kind: "internal_system" as const } } : {}),
+        };
+        const appended = await writer.appendMessageWithTranscriptAnchorAsync(request);
+        const recorder = createUserTurnTranscriptRecorder({
+          target: { ...fixture.target, sessionEntry: fixture.loadEntry() },
+          message: request,
+        });
+        recorder.markRuntimePersisted(
+          request,
+          expectDefined(appended.anchor, "Fixture requires a durable input admission"),
+          { appended: false },
+        );
+        await recorder.waitForRuntimePersistence();
+        fixture.runParams.userTurnTranscriptRecorder = recorder;
+        const observation: PersistedUserTurnMessage = {
+          role: "user",
+          content: "A child reports progress on the same active run.",
+          timestamp: 11,
+          provenance: { kind: "inter_session" },
+        };
+        await writer.appendMessageAsync(observation);
+        let selectedRequest: string | undefined;
+        fixture.compact.mockImplementation(async (params) => {
+          const owned = await fixture.openWriter();
+          const preparation = prepareCompaction(
+            owned.getBranch(),
+            { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1 },
+            "unresolved",
+            readRecoveryAccountingRecorder(params.runtimeContext),
+          );
+          if (!preparation.ok || !preparation.value) {
+            throw new Error("Expected compactable admitted fixture history");
+          }
+          selectedRequest = preparation.value.latestUnresolvedUserRequest;
+          await owned.appendCompactionAsync(
+            "Previous work completed; continue the admitted source run.",
+            preparation.value.firstKeptEntryId,
+            preparation.value.tokensBefore,
+            selectedRequest ? { latestUnresolvedUserRequest: selectedRequest } : {},
+          );
+          return {
+            ok: true,
+            compacted: true,
+            result: { tokensBefore: preparation.value.tokensBefore, tokensAfter: 3_000 },
+          };
+        });
+        await expect(fixture.recover("overflow")).resolves.toEqual({ action: "retry" });
+        expect(selectedRequest).toBe(source === "human" ? request.content : undefined);
+        const reopened = await fixture.openWriter();
+        expect(reopened.getBranch().at(-1)).toMatchObject({
+          type: "compaction",
+          details: source === "human" ? { latestUnresolvedUserRequest: request.content } : {},
+        });
+      });
+    },
+  );
+
+  it("keeps the admitted request identity after compaction rotates the session", async () => {
+    await withRecoveryFixture({ oversized: false }, async (fixture) => {
+      const writer = await fixture.openWriter();
+      const request = {
+        role: "user" as const,
+        content: "Review this patch; do not publish it.",
+        timestamp: 10,
+        idempotencyKey: `${fixture.runId}:user`,
+      };
+      const appended = await writer.appendMessageWithTranscriptAnchorAsync(request);
+      const admission = expectDefined(
+        appended.anchor,
+        "Fixture requires a durable input admission",
+      );
+      const recorder = createUserTurnTranscriptRecorder({
+        target: { ...fixture.target, sessionEntry: fixture.loadEntry() },
+        message: request,
+      });
+      recorder.markRuntimePersisted(request, admission, { appended: false });
+      await recorder.waitForRuntimePersistence();
+      fixture.runParams.userTurnTranscriptRecorder = recorder;
+
+      const successorId = randomUUID();
+      fixture.compact.mockResolvedValueOnce(recoveryCompaction({ sessionId: successorId }));
+      await expect(fixture.recover("overflow")).resolves.toEqual({ action: "retry" });
+      const successorTarget = expectDefined(
+        fixture.getSessionTarget(),
+        "Compaction must install a successor session target",
+      );
+      expect(successorTarget.sessionId).toBe(successorId);
+
+      const observation: PersistedUserTurnMessage = {
+        role: "user",
+        content: "A child reports progress on the active request.",
+        timestamp: 12,
+        provenance: { kind: "inter_session" },
+      };
+      await appendTranscriptMessage(successorTarget, {
+        cwd: fixture.runParams.workspaceDir,
+        eventId: admission.entryId,
+        parentId: null,
+        message: request,
+        now: request.timestamp,
+      });
+      const observationAppend = await appendTranscriptMessage(successorTarget, {
+        cwd: fixture.runParams.workspaceDir,
+        message: observation,
+        now: observation.timestamp,
+      });
+      await appendTranscriptMessage(successorTarget, {
+        cwd: fixture.runParams.workspaceDir,
+        message: makeAgentAssistantMessage({
+          content: [{ type: "text", text: "The active review continues." }],
+          timestamp: 13,
+        }),
+        now: 13,
+      });
+
+      fixture.compact.mockImplementationOnce(async (params) => {
+        const accounting = readRecoveryAccountingRecorder(params.runtimeContext);
+        expect(accounting?.requestFromEntryId).toBe(admission.entryId);
+        const compactionTarget = expectDefined(
+          params.sessionTarget,
+          "Recovery compaction must receive the successor target",
+        );
+        const compactionSessionId = expectDefined(
+          compactionTarget.sessionId,
+          "Recovery compaction target must identify the successor session",
+        );
+        expect(compactionSessionId).toBe(successorId);
+        const { SessionManager } = await import("../sessions/session-manager.js");
+        const successor = await SessionManager.openAsync(
+          { ...fixture.target, sessionId: compactionSessionId },
+          fixture.runParams.workspaceDir,
+        );
+        expect(successor.getBranch().at(-2)?.id).toBe(observationAppend.messageId);
+        const missingRequest = prepareCompaction(
+          successor.getBranch().filter((entry) => entry.id !== admission.entryId),
+          { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1 },
+          "unresolved",
+          accounting,
+        );
+        expect(missingRequest).toMatchObject({
+          ok: false,
+          error: { code: "invalid_session" },
+        });
+        const preparation = prepareCompaction(
+          successor.getBranch(),
+          { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1 },
+          "unresolved",
+          accounting,
+        );
+        if (!preparation.ok) {
+          throw preparation.error;
+        }
+        if (!preparation.value) {
+          throw new Error("Expected compactable successor history");
+        }
+        expect(preparation.value.latestUnresolvedUserRequest).toBe(request.content);
+        return recoveryCompaction();
+      });
+      await expect(fixture.recover("overflow")).resolves.toEqual({ action: "retry" });
+    });
+  });
+
+  it.each(["truncate", "small", "beyond-reader-window"] as const)(
+    "preserves archived resets while recovering %s output",
+    async (mode) => {
+      await withRecoveryFixture(
+        {
+          historicalTurns: 4,
+          ...(mode === "small" ? { oversized: false } : {}),
+          ...(mode === "beyond-reader-window"
+            ? { contextTokenBudget: 200_000, toolResultText: "x".repeat(1_200_000) }
+            : {}),
+        },
+        async (fixture) => {
+          const before = await fixture.snapshot();
+          if (mode === "beyond-reader-window") {
+            fixture.compact.mockRejectedValueOnce(new Error("independent engine failure"));
+          }
+          await expect(
+            fixture.recover("overflow", mode !== "beyond-reader-window"),
+          ).resolves.toEqual({ action: "retry" });
+          const after = await fixture.snapshot();
+          expectArchivedEvents(before, after);
+          expect(after).toMatchObject({ resetCount: before.resetCount });
+          if (mode === "small") {
+            expect(after).toMatchObject({ toolResultChars: before.toolResultChars });
+            expect(after.eventDigests).toHaveLength(before.eventDigests.length + 1);
+          } else {
+            expect(after.toolResultChars).toBeLessThan(before.toolResultChars);
+            if (mode === "truncate") {
+              expect(after.eventDigests.length - before.eventDigests.length).toBeLessThanOrEqual(5);
+              fixture.assertActive();
+            }
+          }
+        },
+      );
     },
   );
 
@@ -92,25 +341,20 @@ describe("embedded compaction recovery authority", () => {
     },
   );
 
-  it.each([
-    { kind: "overflow", ok: true },
-    { kind: "timeout", ok: false },
-  ] as const)("settles no-op engine hooks for $kind recovery (ok=$ok)", async ({ kind, ok }) => {
+  it("settles successful no-op engine hooks for overflow recovery", async () => {
     await withRecoveryFixture({ oversized: false }, async (fixture) => {
       const before = await fixture.snapshot();
       const entry = fixture.loadEntry();
-      fixture.compact.mockResolvedValueOnce({ ok, compacted: false, reason: "proof no-op" });
+      fixture.compact.mockResolvedValueOnce({ ok: true, compacted: false, reason: "proof no-op" });
 
-      await fixture.recover(kind);
+      await fixture.recover("overflow");
 
       expect(fixture.beforeHook).toHaveBeenCalledTimes(1);
-      expect(fixture.afterHook).toHaveBeenCalledTimes(ok ? 1 : 0);
-      if (ok) {
-        expect(fixture.afterHook).toHaveBeenCalledWith(
-          expect.objectContaining({ compactedCount: 0 }),
-          expect.objectContaining({ sessionKey: fixture.getSessionTarget()?.sessionKey }),
-        );
-      }
+      expect(fixture.afterHook).toHaveBeenCalledTimes(1);
+      expect(fixture.afterHook).toHaveBeenCalledWith(
+        expect.objectContaining({ compactedCount: 0 }),
+        expect.objectContaining({ sessionKey: fixture.getSessionTarget()?.sessionKey }),
+      );
       expect(fixture.maintain).not.toHaveBeenCalled();
       expect(fixture.getCommittedSuccessor()).toBeUndefined();
       expect(fixture.recoveryState.autoCompactionCount).toBe(0);
@@ -122,7 +366,7 @@ describe("embedded compaction recovery authority", () => {
   it.each(["overflow", "timeout"] as const)(
     "accepts a healthy declared successor through the host writer (%s)",
     async (kind) => {
-      await withRecoveryFixture({ oversized: false }, async (fixture) => {
+      await withRecoveryFixture({ oversized: false, replyAdmission: true }, async (fixture) => {
         const before = fixture.loadEntry();
         expect(before).toHaveProperty("activeWriterRunId", fixture.runId);
         const successorId = randomUUID();
@@ -163,13 +407,27 @@ describe("embedded compaction recovery authority", () => {
           expect.objectContaining({ sessionId: successorId }),
         );
         fixture.assertActive();
+        const refresh = () =>
+          refreshSessionEntryFromStore({
+            ...fixture.target,
+            expectedGeneration: after,
+            reader: getReplyOperationSessionReader(fixture.replyOperation),
+          });
+        await expect(refresh()).resolves.toMatchObject({ sessionId: successorId });
+        await upsertSessionEntryCore(fixture.target, {
+          ...after,
+          sessionId: successorId,
+          lifecycleRevision: "external-reset-after-compaction",
+          updatedAt: Date.now(),
+        });
+        await expect(refresh()).rejects.toThrow("Session entry changed during read");
       });
     },
   );
 
   recoveryTest(
     "records successor target and tokens before an identity observer aborts recovery",
-    { oversized: false },
+    { oversized: false, replyAdmission: true },
     async (fixture) => {
       const { onSessionIdentityMutation } =
         await import("../../sessions/session-lifecycle-events.js");
@@ -286,37 +544,31 @@ describe("embedded compaction recovery authority", () => {
     },
   );
 
-  it.each([
-    { kind: "overflow", oversized: true },
-    { kind: "timeout", oversized: true },
-  ] as const)(
-    "preserves the exact caller error without post-abort work ($kind, oversized=$oversized)",
-    async ({ kind, oversized }) => {
-      await withRecoveryFixture({ oversized }, async (fixture) => {
-        const before = await fixture.snapshot();
-        fixture.updates.mockClear();
-        fixture.compact.mockImplementationOnce(({ abortSignal }) =>
-          waitForCompactionAbort(abortSignal, () => queueMicrotask(fixture.stop)),
-        );
+  it("preserves the exact caller error without post-abort overflow work", async () => {
+    await withRecoveryFixture({ oversized: true }, async (fixture) => {
+      const before = await fixture.snapshot();
+      fixture.updates.mockClear();
+      fixture.compact.mockImplementationOnce(({ abortSignal }) =>
+        waitForCompactionAbort(abortSignal, () => queueMicrotask(fixture.stop)),
+      );
 
-        const outcome = await fixture.recover(kind).then(
-          (value) => ({ value }),
-          (error: unknown) => ({ error }),
-        );
+      const outcome = await fixture.recover("overflow").then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      );
 
-        expect.soft(outcome).toEqual({ error: fixture.callerError });
-        if ("error" in outcome) {
-          expect.soft(outcome.error).toBe(fixture.callerError);
-        }
-        expect.soft(await fixture.snapshot()).toEqual(before);
-        expect(fixture.compact).toHaveBeenCalledOnce();
-        expect(fixture.beforeHook).toHaveBeenCalledOnce();
-        expect(fixture.maintain).not.toHaveBeenCalled();
-        expect(fixture.recoveryState.autoCompactionCount).toBe(0);
-        expectStoppedBeforePublication(fixture);
-      });
-    },
-  );
+      expect.soft(outcome).toEqual({ error: fixture.callerError });
+      if ("error" in outcome) {
+        expect.soft(outcome.error).toBe(fixture.callerError);
+      }
+      expect.soft(await fixture.snapshot()).toEqual(before);
+      expect(fixture.compact).toHaveBeenCalledOnce();
+      expect(fixture.beforeHook).toHaveBeenCalledOnce();
+      expect(fixture.maintain).not.toHaveBeenCalled();
+      expect(fixture.recoveryState.autoCompactionCount).toBe(0);
+      expectStoppedBeforePublication(fixture);
+    });
+  });
 
   it.each([
     { kind: "overflow", loss: "closed" },
@@ -387,16 +639,60 @@ describe("embedded compaction recovery authority", () => {
   );
 
   recoveryTest(
+    "refuses a pending writer append when the safety deadline precedes persistence",
+    { oversized: false },
+    async (fixture) => {
+      const { SessionManager } = await import("../sessions/session-manager.js");
+      const before = await fixture.snapshot();
+      const opened = createDeferred();
+      const release = createDeferred();
+      const originalOpen = SessionManager.openAsync.bind(SessionManager);
+      const originalCompact = fixture.compact.getMockImplementation();
+      if (!originalCompact) {
+        throw new Error("Fixture must provide the real append implementation");
+      }
+      let committed = false;
+      fixture.compact.mockImplementationOnce(async (params) => {
+        vi.spyOn(SessionManager, "openAsync").mockImplementationOnce(async (...args) => {
+          const manager = await originalOpen(...args);
+          opened.resolve();
+          await release.promise;
+          return manager;
+        });
+        const result = await originalCompact(params);
+        committed = true;
+        return result;
+      });
+      try {
+        await expect(recoverAtSafetyDeadline(fixture, "timeout", opened.promise)).resolves.toBe(
+          false,
+        );
+      } finally {
+        release.resolve();
+      }
+      await expect(fixture.compact.mock.results[0]?.value).rejects.toThrow("Compaction timed out");
+      expect(committed).toBe(false);
+      expect(await fixture.snapshot()).toEqual(before);
+      expect(fixture.recoveryState.autoCompactionCount).toBe(0);
+      fixture.assertActive();
+      expectStoppedBeforePublication(fixture);
+    },
+  );
+
+  recoveryTest(
     "still truncates overflow after an independent safety timeout while the caller is active",
     {},
     async (fixture) => {
       const before = await fixture.snapshot();
       fixture.updates.mockClear();
+      const backendWaiting = createDeferred();
       fixture.compact.mockImplementationOnce(async ({ abortSignal }) => {
-        return await waitForCompactionAbort(abortSignal);
+        return await waitForCompactionAbort(abortSignal, backendWaiting.resolve);
       });
 
-      await expect(fixture.recover("overflow")).resolves.toEqual({ action: "retry" });
+      await expect(
+        recoverAtSafetyDeadline(fixture, "overflow", backendWaiting.promise),
+      ).resolves.toEqual({ action: "retry" });
 
       fixture.assertActive();
       expect(fixture.controller.signal.aborted).toBe(false);
@@ -430,6 +726,7 @@ describe("embedded compaction recovery authority", () => {
         if (!originalCompact) {
           throw new Error("Fixture must provide the real append implementation");
         }
+        const committedAndWaiting = createDeferred();
         let childSignal: AbortSignal | undefined;
         fixture.compact.mockImplementationOnce(async (params) => {
           const committed = await originalCompact(params);
@@ -450,10 +747,13 @@ describe("embedded compaction recovery authority", () => {
           if (failure === "throw") {
             throw sourceError;
           }
-          return await waitForCompactionAbort(childSignal);
+          return await waitForCompactionAbort(childSignal, committedAndWaiting.resolve);
         });
 
-        const outcome = await fixture.recover(kind);
+        const outcome =
+          failure === "safety timeout"
+            ? await recoverAtSafetyDeadline(fixture, kind, committedAndWaiting.promise)
+            : await fixture.recover(kind);
 
         fixture.assertActive();
         expect(fixture.controller.signal.aborted).toBe(false);
@@ -503,12 +803,14 @@ describe("embedded compaction recovery authority", () => {
         const before = await fixture.snapshot();
         fixture.updates.mockClear();
         if (owner !== "active") {
-          const retainedWriter = fixture.openWriter();
+          const retainedWriter = await fixture.openWriter();
           await fixture.invalidate(owner);
           if (owner === "writer-replaced") {
             // The existing SQLite fence works for an explicitly fenced manager;
             // the retained capability must not reopen an unfenced replacement.
-            expect(() => retainedWriter.appendMessage(fixture.replacement.message)).toThrow();
+            await expect(
+              retainedWriter.appendMessageAsync(fixture.replacement.message),
+            ).rejects.toThrow();
           }
         }
 

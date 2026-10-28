@@ -52,6 +52,15 @@ pnpm's isolated linker, which keeps dependencies in `node_modules/.pnpm` and lin
 them into each workspace package. On supported macOS volumes, this also lets pnpm
 reuse whole-package APFS clones instead of importing every file separately.
 
+Installation also prepares Kysely declarations from the SQL schemas in `src/state`.
+The generated files live in ignored `.artifacts/kysely/`; build, typecheck,
+type-aware lint, and test entrypoints refresh them automatically, including after an install with
+`--ignore-scripts`. Unchanged inputs reuse the declarations without rewriting
+them. `pnpm db:kysely:check` checks schema projection and generator contracts.
+Sparse core, script, and root-test lint prepare only the available schemas and
+retire declarations for omitted schemas. Normal source generation, verification,
+and extension-boundary builds still require complete schemas.
+
 Give each source checkout its own physical dependency installation. Tooling does
 not automatically link a missing `node_modules` to another checkout. Existing
 borrowed installs can still serve direct Node tooling. Normal pnpm install checks
@@ -72,8 +81,8 @@ must declare their own development dependencies rather than rely on hoisting.
 
 ## Before You PR
 
-- Use **Node 24.16+ LTS** or **Node 26.1+** for source checkouts. Older Node releases can truncate SQLite TEXT reads; Node 22, 23, and 25 are unsupported. See [Node install guidance](docs/install/node.md) if your local version is too old.
-- Run the Vitest 5 suite on Node 24.16+ or Node 26.1+, matching the packaged runtime floor.
+- Use **Node 24.22.1+ LTS** or **Node 26.12.1+** for source checkouts. Older Node releases can truncate SQLite TEXT reads; Node 22, 23, and 25 are unsupported. See [Node install guidance](docs/install/node.md) if your local version is too old.
+- Run the Vitest 5 suite on Node 24.22.1+ or Node 26.12.1+, matching the packaged runtime floor.
 - Test locally with your OpenClaw instance
 - An explicit maintainer repair-and-land request covers internal database scheduling, admission, and lifecycle decisions. The implementer owns the design and its verification. Get separate design acceptance when changing public contracts, schemas, durability, retention, or permissions; see the [database schema review checkpoint](docs/reference/database-schemas.md#review-checkpoint-for-material-changes).
 - External PRs must describe the user, product, or operational problem in **What Problem This Solves** and include useful validation in **Evidence**. Focused tests, CI results, screenshots, recordings, terminal output, live observations, redacted logs, and artifact links all count. Reviewers will inspect the code, tests, and CI; use the PR body to explain intent and make validation easy to understand.

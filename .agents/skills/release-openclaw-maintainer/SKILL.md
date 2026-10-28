@@ -20,7 +20,10 @@ Read only the references needed for the selected phase:
 - Validation selection or failed proof: [validation and confidence](references/validation.md), with `$release-openclaw-ci` for workflow execution and immutable manifests.
 - Interrupted publication or registry promotion: [publication recovery](references/publication-recovery.md).
 - Native assets: [platform publication](references/platform-publication.md), with `$release-openclaw-mac` for macOS operations.
-- Stable postpublish synchronization: [main closeout](references/stable-main-closeout.md).
+- Stable postpublish synchronization and the exact-SHA deployment handoff:
+  [main closeout](references/stable-main-closeout.md).
+- Release retrospective and shared issue ledger (every track, and any handoff
+  snapshot): [retrospective](references/retrospective.md).
 - Release notes: `$openclaw-changelog-update`, including its separate approved post-release docs-mirror route. Initial release generation keeps its existing format; docs publication does not run automatically during release. Requested announcements: `$release-openclaw-announcement` for Discord, `$release-tweets` for X. Announcements never gate publication and require explicit posting authorization.
 - Published artifact verification: `$verify-release`. GHSA operations: `$openclaw-ghsa-maintainer` only with explicit security-workflow authorization.
 
@@ -112,7 +115,8 @@ possible. If those notes are final, **Code SHA and Release SHA are the same
 commit**: one successful fresh full qualification can supply both roles and
 their exact publication bytes. Do not create another commit or run solely to
 separate the labels. If notes change after qualification, a descendant whose
-complete delta includes `CHANGELOG/YYYY.M.PATCH.md` and only that entry, its
+complete delta includes `CHANGELOG/<version>.md` (exact beta version or stable
+base) and only that entry, its
 matching record, and root index may use `split-changelog-release-v1`
 to reuse product proof while qualifying new publication bytes. Any other
 source delta, rename, or deletion returns to the Code SHA loop. Historical
@@ -146,7 +150,10 @@ final report, list every PR created during the release (`gh pr list --author
 @me --state open` plus any PR bound to the session) and land or explicitly close
 each one with a reason; confirm its fix is on `main` and, when it is release
 tooling, on the release branch. Also remove the release's temporary worktrees,
-abandoned local cut branches, and stale `scripts/pr` worktrees.
+abandoned local cut branches, and stale `scripts/pr` worktrees. Then write the
+[retrospective](references/retrospective.md) and open its `openclaw/maintainers`
+PR with the issue-ledger update; keep a findings notes file from the start of the
+release so it can be written from evidence.
 
 Published versions and final tags are immutable. Reuse successful exact-source
 artifacts; do not rebuild or republish as an implicit retry. The active release

@@ -4,12 +4,11 @@ import { withTimeout } from "openclaw/plugin-sdk/time-runtime";
 import { parseClaudeCodeVersion, supportsClaudeDynamicSystemPromptSections } from "./cli-shared.js";
 import { resolveClaudeTerminalExecutable } from "./session-catalog-executable.js";
 
+const log = createSubsystemLogger("anthropic-cli-version");
 // A failed probe falls back to the transport floor; retry later rather than pin that floor for
 // the process lifetime (T2831: one timed-out probe kept Opus 5.5 rejected until restart).
 const FAILED_PROBE_RETRY_MS = 60_000;
 const LATE_RESULT_GRACE_MS = 200;
-const log = createSubsystemLogger("anthropic-cli-version");
-
 /** Share one lazy discovery result between native CLI capabilities and OAuth identity. */
 export function createClaudeCodeVersionProbe(
   api: OpenClawPluginApi,
@@ -25,7 +24,7 @@ export function createClaudeCodeVersionProbe(
       // Login-shell PATH discovery can block well beyond the request probe budget.
       const executable = resolveClaudeTerminalExecutable(process.env, { pathStrategy: "direct" });
       if (!executable) {
-        lastFailure = "no claude executable on PATH";
+        lastFailure = "executable-missing";
         return undefined;
       }
       // The runner retains process cleanup; requests need not wait for a slow tree kill.
@@ -56,11 +55,14 @@ export function createClaudeCodeVersionProbe(
       );
       installedVersion ??= readVersion(result);
       if (!installedVersion) {
-        lastFailure = `code=${result.code} termination=${result.termination}`;
+        lastFailure =
+          result.code === 0 && result.termination === "exit"
+            ? "unparseable-output"
+            : `code=${result.code} termination=${result.termination}`;
       }
       return installedVersion;
-    } catch (error) {
-      lastFailure = String(error);
+    } catch {
+      lastFailure = "probe-error";
       return undefined;
     }
   };

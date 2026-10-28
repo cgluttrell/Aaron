@@ -1,11 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { DatabaseSync } from "node:sqlite";
 import { readRegularFileSync } from "@openclaw/fs-safe/advanced";
 import { replaceFileAtomicSync } from "@openclaw/fs-safe/atomic";
 import {
   decodeSessionArchiveBytes,
-  encodeSessionArchiveContent,
   readSessionArchiveContentSync,
   SESSION_ARCHIVE_ZSTD_SUFFIX,
 } from "../config/sessions/archive-compression.js";
@@ -21,6 +19,7 @@ import {
   renewAgentDatabaseMaintenanceAuthorityIfPresent,
 } from "../state/openclaw-agent-db-lease.js";
 import { agentDatabaseLifecycle } from "../state/openclaw-agent-db-lifecycle.js";
+import { withAgentDatabaseMaintenanceLease } from "../state/openclaw-agent-db-maintenance-lease.js";
 import { assertOpenClawAgentDatabaseOwner } from "../state/openclaw-agent-db-maintenance.js";
 import {
   registerOpenClawAgentDatabase,
@@ -29,21 +28,18 @@ import {
 import {
   assertOpenClawAgentSchemaContains,
   assertSupportedAgentSchemaVersion,
+  getOpenClawAgentMigrationSchema,
 } from "../state/openclaw-agent-db-schema-helpers.js";
 import {
   ensureOpenClawAgentDatabaseSchemaSteps,
   migrateOpenClawAgentDatabaseToMediaPrerequisiteSchemaSteps,
 } from "../state/openclaw-agent-db-schema.js";
+import { assertSupportedAgentMigrationSchemas } from "../state/openclaw-agent-db-session-migrations.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../state/openclaw-agent-db.generated.js";
 import {
   OPENCLAW_AGENT_SCHEMA_VERSION,
   clearOpenClawAgentDatabaseOpenFailure,
-  withAgentDatabaseMaintenanceLease,
-  type OpenClawAgentDatabase,
 } from "../state/openclaw-agent-db.js";
-import { withLegacySessionParticipantsSchema } from "../state/openclaw-agent-participants-migration.js";
-import { OPENCLAW_AGENT_SCHEMA_SQL } from "../state/openclaw-agent-schema.js";
-import { withLegacyAgentStorageSchema } from "../state/openclaw-agent-storage-schema.js";
 import { readOpenClawDatabaseQuarantineFailure } from "../state/openclaw-quarantine-store.js";
 import { getOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
 import { OPENCLAW_SQLITE_BUSY_TIMEOUT_MS } from "../state/openclaw-state-db.js";
@@ -53,7 +49,6 @@ import { formatErrorMessage } from "./errors.js";
 import {
   executeSqliteQuerySync,
   getNodeSqliteKysely,
-  clearNodeSqliteKyselyCacheForDatabase,
   enableNodeSqliteKyselyStatementCache,
 } from "./kysely-sync.js";
 import { openNodeSqliteDatabase } from "./node-sqlite.js";
@@ -62,17 +57,17 @@ import { repairCanonicalSqliteIndexes } from "./sqlite-index-schema.js";
 import { runSqliteIntegrityOperationInWorker } from "./sqlite-integrity-operation.js";
 import { assertSqliteIntegrity, isTerminalSqliteIntegrityError } from "./sqlite-integrity.js";
 import { configureSqliteMaintenanceCache } from "./sqlite-maintenance-cache.js";
+import { refreshSqlitePlannerStatistics } from "./sqlite-planner-statistics.js";
 import { resolveSqliteInspectionSignal } from "./sqlite-readonly-worker.js";
+import { readSqliteDataVersion } from "./sqlite-schema-facts.js";
 import {
   runSqliteDeferredTransactionSync,
   runSqliteImmediateTransactionSync,
 } from "./sqlite-transaction.js";
 import { readSqliteUserVersion } from "./sqlite-user-version.js";
-import { createSqliteWalReclamationResult } from "./sqlite-wal-reclamation.js";
+import { createMigrationDatabaseHandle } from "./state-migrations.agent-database.js";
 import { recoverMisplacedAgentDatabaseCopies } from "./state-migrations.agent-owner-recovery.js";
 import {
-  mediaSourceDriftMessage,
-  readMediaSourceVersion,
   scanTranscriptRows,
   scanTrajectoryRows,
 } from "./state-migrations.media-persistence-database.js";
@@ -85,7 +80,9 @@ import {
   type PreparedAgentDatabaseMigrationDiscovery,
 } from "./state-migrations.media-persistence-targets.js";
 import { transformMediaArchiveContent } from "./state-migrations.media-persistence-transform.js";
+import { repairDoctorSessionWindowOrphans } from "./state-migrations.session-window-repair.js";
 import {
+  encodeArchiveContent,
   MEDIA_ARCHIVE_VERIFICATION_KEY,
   migrateCanonicalTranscriptArchives,
 } from "./state-migrations.transcript-directives-archives.js";
@@ -95,29 +92,6 @@ const PREVIOUS_MEDIA_SCHEMA_VERSION = AGENT_MEDIA_SCHEMA_VERSION - 1;
 const ARCHIVE_TEMP_MARKER = ".media-retirement";
 
 type MediaMigrationDatabase = Pick<OpenClawAgentKyselyDatabase, "schema_meta">;
-
-function createMigrationDatabaseHandle(
-  database: DatabaseSync,
-  agentId: string,
-  pathname: string,
-): OpenClawAgentDatabase {
-  return {
-    agentId,
-    db: database,
-    path: pathname,
-    walMaintenance: {
-      checkpoint: () => false,
-      close: () => false,
-      reclaimFreePages: createSqliteWalReclamationResult,
-    },
-  };
-}
-
-function refreshAgentDatabasePlannerStatistics(database: DatabaseSync): void {
-  // Doctor owns a stopped-writer maintenance window here. Explicitly analyze every
-  // table because the supported pre-3.46 SQLite floor lacks optimize's all-table bit.
-  database.exec("PRAGMA analysis_limit=1000; ANALYZE main;");
-}
 
 async function migrateAgentDatabase(params: {
   agentId: string;
@@ -129,7 +103,6 @@ async function migrateAgentDatabase(params: {
   maintenance: OpenClawStateLeaseContext;
   preparedArchives?: ReadonlySet<string>;
 }) {
-  invalidateOpenClawAgentDatabaseIntegrityBeforeMutation(params.pathname);
   const database = openNodeSqliteDatabase(params.pathname);
   const schemaWarnings: string[] = [];
   const schemaOptions = {
@@ -148,23 +121,6 @@ async function migrateAgentDatabase(params: {
         assertSupportedAgentSchemaVersion(database, params.pathname);
       },
     });
-  const migrateArchives = async () => {
-    const archives = await migrateCanonicalTranscriptArchives({
-      agentId: params.agentId,
-      database,
-      pathname: params.pathname,
-      signal: params.maintenance.signal,
-      start: { generation: "", sessionId: "" },
-      verification: {
-        key: MEDIA_ARCHIVE_VERIFICATION_KEY,
-        prepared: params.preparedArchives,
-      },
-      onArchive: (archivePath) => params.canonicalArchivePaths.add(archivePath),
-      transformContent: transformMediaArchiveContent,
-    });
-    schemaWarnings.push(...archives.warnings);
-    return archives.rewrittenArchives;
-  };
   try {
     configureSqliteMaintenanceCache(database);
     database.exec(`PRAGMA busy_timeout = ${OPENCLAW_SQLITE_BUSY_TIMEOUT_MS};`);
@@ -175,6 +131,10 @@ async function migrateAgentDatabase(params: {
     });
     assertSupportedAgentSchemaVersion(database, params.pathname);
     let userVersion = readSqliteUserVersion(database);
+    if (userVersion < OPENCLAW_AGENT_SCHEMA_VERSION) {
+      assertSupportedAgentMigrationSchemas(database, params.pathname, userVersion);
+    }
+    invalidateOpenClawAgentDatabaseIntegrityBeforeMutation(params.pathname);
     const initialVersion = userVersion;
     const prepareSchema = async () => {
       userVersion = readSqliteUserVersion(database);
@@ -200,7 +160,7 @@ async function migrateAgentDatabase(params: {
         userVersion = readSqliteUserVersion(database);
       }
     };
-    let indexChanges: string[] = [];
+    let integrityChanges: string[] = [];
     try {
       await prepareSchema();
     } catch (error) {
@@ -209,25 +169,33 @@ async function migrateAgentDatabase(params: {
       }
       // Admission already checks the whole file. Only a proven integrity failure
       // needs Doctor's preserving repair scan under an immediate transaction.
-      indexChanges = repairDoctorSqliteIndexCorruption(database, params.pathname, {
+      const assertCurrent = () => {
+        assertAgentDatabaseMaintenanceAuthority(params.maintenance);
+        assertOpenClawAgentDatabaseOwner(database, params);
+      };
+      integrityChanges = repairDoctorSqliteIndexCorruption(database, params.pathname, {
         label: `agent ${params.agentId}`,
-        assertCurrent: () => {
-          assertAgentDatabaseMaintenanceAuthority();
-          assertOpenClawAgentDatabaseOwner(database, params);
-        },
+        assertCurrent,
       });
-      params.changes.push(...indexChanges);
+      if (integrityChanges.length === 0) {
+        integrityChanges = repairDoctorSessionWindowOrphans(
+          database,
+          params.pathname,
+          assertCurrent,
+        );
+      }
+      params.changes.push(...integrityChanges);
       await prepareSchema();
     }
     if (
-      indexChanges.length > 0 ||
+      integrityChanges.length > 0 ||
       agentDatabaseLifecycle.terminal.peek(params.pathname) ||
       readOpenClawDatabaseQuarantineFailure("agent", params.pathname, { env: params.env })
     ) {
       runSqliteImmediateTransactionSync(
         database,
         () => {
-          if (indexChanges.length === 0) {
+          if (integrityChanges.length === 0) {
             assertSqliteIntegrity(database, params.pathname);
           }
           assertAgentDatabaseMaintenanceAuthority();
@@ -259,12 +227,7 @@ async function migrateAgentDatabase(params: {
     };
     assertMediaSchemaMigration();
     const schemaMode = userVersion < OPENCLAW_AGENT_SCHEMA_VERSION ? "legacy" : "current";
-    const schemaSql =
-      schemaMode === "legacy"
-        ? withLegacySessionParticipantsSchema(
-            withLegacyAgentStorageSchema(OPENCLAW_AGENT_SCHEMA_SQL),
-          )
-        : OPENCLAW_AGENT_SCHEMA_SQL;
+    const schemaSql = getOpenClawAgentMigrationSchema(userVersion);
     // Remove after 2026-10-12: drop the v15-to-v16 media cutover once schema 16 is the support floor.
     if (userVersion === PREVIOUS_MEDIA_SCHEMA_VERSION) {
       repairCanonicalSqliteIndexes(database, params.pathname, schemaSql, {
@@ -274,8 +237,9 @@ async function migrateAgentDatabase(params: {
     }
     assertOpenClawAgentSchemaContains(database, params.pathname, schemaSql, schemaMode);
     const legacyTextStorage = userVersion < AGENT_STORAGE_SCHEMA_VERSION;
-    if (!mediaSchemaUpgrade) {
-      const needsRepair = runSqliteDeferredTransactionSync(
+    const needsRepair =
+      mediaSchemaUpgrade ||
+      runSqliteDeferredTransactionSync(
         database,
         () =>
           scanTranscriptRows({
@@ -290,104 +254,98 @@ async function migrateAgentDatabase(params: {
           }) > 0,
         { databaseLabel: params.pathname, operationLabel: "media-persistence-detection" },
       );
-      if (!needsRepair) {
-        const rewrittenArchives = await migrateArchives();
-        refreshAgentDatabasePlannerStatistics(database);
-        return {
-          rewrittenSessions: 0,
-          rewrittenTrajectoryRows: 0,
-          rewrittenArchives,
-          warnings: schemaWarnings,
-          initialVersion,
-          finalVersion: userVersion,
-        };
-      }
-    }
-
-    const sourceVersion = readMediaSourceVersion(database, legacyTextStorage);
-    const changedLegacySessions = new Set<string>();
-    params.beforeTransaction?.();
-    const owner = createMigrationDatabaseHandle(database, params.agentId, params.pathname);
-    const rewritten = runSqliteImmediateTransactionSync(
-      database,
-      () => {
-        assertMediaSchemaMigration();
-        const currentSourceVersion = readMediaSourceVersion(database, legacyTextStorage);
-        if (currentSourceVersion.dataVersion !== sourceVersion.dataVersion) {
-          throw new Error(
-            mediaSourceDriftMessage(params.pathname, sourceVersion, currentSourceVersion),
-          );
-        }
-        const rewrittenSessions = scanTranscriptRows({
-          database,
-          pathname: params.pathname,
-          writer: owner,
-          legacyTextStorage,
-          onChangedSession: legacyTextStorage
-            ? (sessionId) => {
-                changedLegacySessions.add(sessionId);
-              }
-            : undefined,
-        });
-        const rewrittenTrajectoryRows = scanTrajectoryRows({
-          database,
-          pathname: params.pathname,
-          rewrite: true,
-        });
-        if (mediaSchemaUpgrade) {
-          const db = getNodeSqliteKysely<MediaMigrationDatabase>(database);
-          database.exec(`PRAGMA user_version = ${AGENT_MEDIA_SCHEMA_VERSION};`);
-          executeSqliteQuerySync(
-            database,
-            db
-              .updateTable("schema_meta")
-              .set({
-                app_version: VERSION,
-                schema_version: AGENT_MEDIA_SCHEMA_VERSION,
-                updated_at: Date.now(),
-              })
-              .where("meta_key", "=", "primary"),
-          );
-        }
-        assertMediaSchemaMigration();
-        return { rewrittenSessions, rewrittenTrajectoryRows };
-      },
-      {
-        busyTimeoutMs: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
-        databaseLabel: params.pathname,
-        operationLabel: "media-persistence-retirement",
-      },
-    );
-    await runSchema(ensureOpenClawAgentDatabaseSchemaSteps(database, schemaOptions));
-    if (changedLegacySessions.size > 0) {
-      runSqliteImmediateTransactionSync(
+    let rewritten = { rewrittenSessions: 0, rewrittenTrajectoryRows: 0 };
+    if (needsRepair) {
+      const sourceVersion = readSqliteDataVersion(database);
+      const changedLegacySessions = new Set<string>();
+      params.beforeTransaction?.();
+      const owner = createMigrationDatabaseHandle(database, params.agentId, params.pathname);
+      rewritten = runSqliteImmediateTransactionSync(
         database,
         () => {
-          assertAgentDatabaseMaintenanceAuthority();
-          for (const sessionId of changedLegacySessions) {
-            renewAgentDatabaseMaintenanceAuthorityIfPresent();
-            reconcileSessionTranscriptIndexInTransaction(database, sessionId);
+          assertMediaSchemaMigration();
+          if (readSqliteDataVersion(database) !== sourceVersion) {
+            throw new Error(`${params.pathname} source changed before migration transaction`);
           }
-          assertAgentDatabaseMaintenanceAuthority();
+          const rewrittenSessions = scanTranscriptRows({
+            database,
+            pathname: params.pathname,
+            writer: owner,
+            legacyTextStorage,
+            onChangedSession: legacyTextStorage
+              ? (sessionId) => {
+                  changedLegacySessions.add(sessionId);
+                }
+              : undefined,
+          });
+          const rewrittenTrajectoryRows = scanTrajectoryRows({
+            database,
+            pathname: params.pathname,
+            rewrite: true,
+          });
+          if (mediaSchemaUpgrade) {
+            const db = getNodeSqliteKysely<MediaMigrationDatabase>(database);
+            database.exec(`PRAGMA user_version = ${AGENT_MEDIA_SCHEMA_VERSION};`);
+            executeSqliteQuerySync(
+              database,
+              db
+                .updateTable("schema_meta")
+                .set({
+                  app_version: VERSION,
+                  schema_version: AGENT_MEDIA_SCHEMA_VERSION,
+                  updated_at: Date.now(),
+                })
+                .where("meta_key", "=", "primary"),
+            );
+          }
+          assertMediaSchemaMigration();
+          return { rewrittenSessions, rewrittenTrajectoryRows };
         },
         {
           busyTimeoutMs: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
           databaseLabel: params.pathname,
-          operationLabel: "media-persistence-projection",
+          operationLabel: "media-persistence-retirement",
         },
       );
+      await runSchema(ensureOpenClawAgentDatabaseSchemaSteps(database, schemaOptions));
+      if (changedLegacySessions.size > 0) {
+        runSqliteImmediateTransactionSync(
+          database,
+          () => {
+            assertAgentDatabaseMaintenanceAuthority();
+            for (const sessionId of changedLegacySessions) {
+              renewAgentDatabaseMaintenanceAuthorityIfPresent();
+              reconcileSessionTranscriptIndexInTransaction(database, sessionId);
+            }
+            assertAgentDatabaseMaintenanceAuthority();
+          },
+          {
+            busyTimeoutMs: OPENCLAW_SQLITE_BUSY_TIMEOUT_MS,
+            databaseLabel: params.pathname,
+            operationLabel: "media-persistence-projection",
+          },
+        );
+      }
     }
-    const rewrittenArchives = await migrateArchives();
-    refreshAgentDatabasePlannerStatistics(database);
+    const archives = await migrateCanonicalTranscriptArchives({
+      agentId: params.agentId,
+      database,
+      pathname: params.pathname,
+      signal: params.maintenance.signal,
+      start: { generation: "", sessionId: "" },
+      verification: { key: MEDIA_ARCHIVE_VERIFICATION_KEY, prepared: params.preparedArchives },
+      onArchive: (archivePath) => params.canonicalArchivePaths.add(archivePath),
+      transformContent: transformMediaArchiveContent,
+    });
+    refreshSqlitePlannerStatistics(database);
     return {
       ...rewritten,
-      rewrittenArchives,
-      warnings: schemaWarnings,
+      ...archives,
+      warnings: [...schemaWarnings, ...archives.warnings],
       initialVersion,
-      finalVersion: readSqliteUserVersion(database),
+      finalVersion: needsRepair ? readSqliteUserVersion(database) : userVersion,
     };
   } finally {
-    clearNodeSqliteKyselyCacheForDatabase(database);
     database.close();
   }
 }
@@ -421,16 +379,15 @@ function migrateTranscriptArchive(
   if (!transformed.changed) {
     return false;
   }
-  const encoded = compressed
-    ? encodeSessionArchiveContent(transformed.content)
-    : { bytes: Buffer.from(transformed.content, "utf8"), suffix: "" as const };
-  if (compressed && encoded.suffix !== SESSION_ARCHIVE_ZSTD_SUFFIX) {
-    throw new Error(`${filePath} could not be re-encoded with its zstd codec`);
-  }
+  const encoded = encodeArchiveContent(
+    transformed.content,
+    compressed ? "zstd" : "identity",
+    filePath,
+  );
   options.beforeReplace?.();
   replaceFileAtomicSync({
     filePath,
-    content: encoded.bytes,
+    content: encoded,
     preserveExistingMode: true,
     syncParentDir: true,
     syncTempFile: true,

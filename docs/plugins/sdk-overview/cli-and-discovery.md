@@ -40,9 +40,10 @@ own trust.
 
 ## CLI registration metadata
 
-The executable CLI also owns provider callbacks borrowed through
+The executable CLI owns uncached plugin registries acquired for help and command
+metadata, along with provider callbacks borrowed through
 `openclaw/plugin-sdk/provider-catalog-runtime` during registration, actions, or
-cleanup. It releases those SDK claims after the invocation's actual work
+cleanup. It releases those resources after the invocation's actual work
 settles, even when a cleanup warning has already reported a timeout. Forced
 process exit can still interrupt asynchronous disposal. Caller-owned programs
 and Gateway startup do not become executable CLI owners merely by calling a CLI
@@ -147,6 +148,11 @@ rejects new callback invocations while admitted asynchronous actions finish.
 AI CLI backend such as `claude-cli` or `my-cli`.
 
 - The backend `id` becomes the provider prefix in model refs like `my-cli/gpt-5`.
+- Set `modelProvider` to the canonical model provider id to bind that provider's
+  models to this CLI runtime. There is no inferred default. A missing or blank
+  value emits a warning during runtime or setup-only registration naming the
+  plugin, backend, and missing field; direct CLI references remain available,
+  but no provider-to-runtime binding is created.
 - The backend `config` is the authoritative command adapter: argv, environment,
   parser, session, image, and reliability behavior live in plugin code.
 - Users select the backend through model refs or model-scoped `agentRuntime.id`;

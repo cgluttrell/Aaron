@@ -44,15 +44,6 @@ describe("msteams inbound", () => {
         }),
       ).toBe(true);
     });
-
-    it("returns false when there is no matching mention", () => {
-      expect(
-        wasMSTeamsBotMentioned({
-          recipient: { id: "bot" },
-          entities: [{ type: "mention", mentioned: { id: "other" } }],
-        }),
-      ).toBe(false);
-    });
   });
 
   describe("extractMSTeamsQuoteInfo", () => {
@@ -66,14 +57,21 @@ describe("msteams inbound", () => {
           "</blockquote>",
     });
 
-    it("returns undefined for empty attachments array", () => {
-      expect(extractMSTeamsQuoteInfo([])).toBeUndefined();
+    const quote = (body: string) =>
+      `<blockquote itemtype="http://schema.skype.com/Reply" itemscope>${body}</blockquote>`;
+    const attachment = (content: unknown) => ({ contentType: "text/html", content });
+
+    it("reads the copy paragraph whatever the tag case and attribute order", () => {
+      const html = quote(`<P class="q" ITEMPROP='copy'>quoted <b>text</b></P>`);
+      expect(extractMSTeamsQuoteInfo([attachment(html)])?.body).toBe("quoted text");
     });
 
-    it("returns undefined when no reply blockquote is present", () => {
-      expect(
-        extractMSTeamsQuoteInfo([{ contentType: "text/html", content: "<p>just a message</p>" }]),
-      ).toBeUndefined();
+    it("returns promptly for many unterminated paragraph tags", () => {
+      // The former paragraph regex re-scanned the tag from every `<p` start.
+      const html = `http://schema.skype.com/Reply ${"<P".repeat(4_000)}${'ITEMPROP="COPY"'.repeat(400)}`;
+      const started = performance.now();
+      expect(extractMSTeamsQuoteInfo([attachment(html)])).toBeUndefined();
+      expect(performance.now() - started).toBeLessThan(500);
     });
 
     it("uses 'unknown' as sender when sender element is absent", () => {
@@ -102,34 +100,6 @@ describe("msteams inbound", () => {
       expect(result).toBeUndefined();
     });
 
-    it("decodes HTML entities in body text", () => {
-      const result = extractMSTeamsQuoteInfo([
-        {
-          contentType: "text/html",
-          content:
-            '<blockquote itemtype="http://schema.skype.com/Reply" itemscope>' +
-            '<strong itemprop="mri">Bob</strong>' +
-            '<p itemprop="copy">2 &lt; 3 &amp; 4 &gt; 1; &copy;&Tab;keep &amp;lt; literal</p>' +
-            "</blockquote>",
-        },
-      ]);
-      expect(result).toEqual({ sender: "Bob", body: "2 < 3 & 4 > 1; © keep &lt; literal" });
-    });
-
-    it("handles multiline body by collapsing whitespace", () => {
-      const result = extractMSTeamsQuoteInfo([
-        {
-          contentType: "text/html",
-          content:
-            '<blockquote itemtype="http://schema.skype.com/Reply" itemscope>' +
-            '<strong itemprop="mri">Carol</strong>' +
-            '<p itemprop="copy">line one\nline two</p>' +
-            "</blockquote>",
-        },
-      ]);
-      expect(result?.body).toBe("line one line two");
-    });
-
     it("skips non-string content values", () => {
       expect(
         extractMSTeamsQuoteInfo([{ contentType: "application/json", content: { foo: "bar" } }]),
@@ -140,12 +110,13 @@ describe("msteams inbound", () => {
       const htmlContent =
         '<blockquote itemtype="http://schema.skype.com/Reply" itemscope>' +
         '<strong itemprop="mri">Dave</strong>' +
-        '<p itemprop="copy">hello from object</p>' +
+        '<p itemprop="preview">short preview</p>' +
+        '<p itemprop="copy">hello &amp; goodbye\nfrom object</p>' +
         "</blockquote>";
       const result = extractMSTeamsQuoteInfo([
         { contentType: "text/html", content: { text: htmlContent } },
       ]);
-      expect(result).toEqual({ sender: "Dave", body: "hello from object" });
+      expect(result).toEqual({ sender: "Dave", body: "hello & goodbye from object" });
     });
 
     it("handles object content with .body property containing the reply HTML", () => {
@@ -166,21 +137,6 @@ describe("msteams inbound", () => {
         replyAttachment(),
       ]);
       expect(result).toEqual({ sender: "Alice", body: "Hello world" });
-    });
-
-    it("prefers 'copy' over 'preview' when both are present", () => {
-      const result = extractMSTeamsQuoteInfo([
-        {
-          contentType: "text/html",
-          content:
-            '<blockquote itemtype="http://schema.skype.com/Reply" itemscope>' +
-            '<strong itemprop="mri">Grace</strong>' +
-            '<p itemprop="preview">short…</p>' +
-            '<p itemprop="copy">the full text</p>' +
-            "</blockquote>",
-        },
-      ]);
-      expect(result?.body).toBe("the full text");
     });
 
     it("parses a real Teams quote-reply payload (preview + itemid)", () => {

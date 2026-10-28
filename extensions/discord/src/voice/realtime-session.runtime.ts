@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
+import { toErrorObject, toStringifiedError } from "openclaw/plugin-sdk/error-runtime";
+import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import {
   registerRealtimeVoiceSelection,
   type RealtimeVoiceCloseDisposition,
@@ -17,6 +18,7 @@ import {
 } from "./realtime-speaker-session.js";
 import type {
   VoiceRealtimeSession,
+  VoiceRealtimeAgentTurnParams,
   VoiceRealtimeSpeakerContext,
   VoiceRealtimeSpeakerTurn,
   VoiceSessionEntry,
@@ -41,6 +43,7 @@ export class DiscordRealtimeVoiceSession implements VoiceRealtimeSession {
   private warmSession: DiscordRealtimeSpeakerSession | undefined;
   private nextSessionId = 0;
   private closed = false;
+  private textFallback = false;
   private readonly closingSpeakers = new Set<Promise<void>>();
   private closeCompletion: Promise<void> | undefined;
   private idleTimer: ReturnType<typeof setInterval> | undefined;
@@ -50,7 +53,16 @@ export class DiscordRealtimeVoiceSession implements VoiceRealtimeSession {
   private readonly callAbort = new AbortController();
   private readonly candidates = new Set<DiscordRealtimeSpeakerSession>();
 
-  constructor(private readonly params: DiscordRealtimeSessionParams) {
+  constructor(
+    private readonly params: DiscordRealtimeSessionParams & {
+      signal: AbortSignal;
+      deliverText: (
+        turn: VoiceRealtimeAgentTurnParams,
+        text: string,
+        signal: AbortSignal,
+      ) => Promise<void>;
+    },
+  ) {
     this.player = new DiscordRealtimePlayer(params.entry.audio);
   }
 
@@ -77,11 +89,15 @@ export class DiscordRealtimeVoiceSession implements VoiceRealtimeSession {
     this.idleTimer.unref?.();
   }
 
-  close(disposition: RealtimeVoiceCloseDisposition = "abort"): void | Promise<void> {
+  close(
+    disposition: RealtimeVoiceCloseDisposition | "text-fallback" = "abort",
+  ): void | Promise<void> {
     if (this.closed) {
       return this.closeCompletion;
     }
     this.closed = true;
+    this.textFallback = disposition === "text-fallback";
+    const speakerDisposition = disposition === "text-fallback" ? "detach" : disposition;
     this.voiceSelection?.unregister();
     if (disposition === "abort") {
       this.callAbort.abort(new Error("Discord voice call closed"));
@@ -91,14 +107,14 @@ export class DiscordRealtimeVoiceSession implements VoiceRealtimeSession {
     // Retire the physical player first: lane teardown must not start the next queued response.
     this.player.close();
     if (this.warmSession) {
-      void this.closeSpeaker(this.warmSession, disposition);
+      void this.closeSpeaker(this.warmSession, speakerDisposition);
       this.warmSession = undefined;
     }
     for (const { session } of this.sessions) {
-      void this.closeSpeaker(session, disposition);
+      void this.closeSpeaker(session, speakerDisposition);
     }
     for (const session of this.candidates) {
-      void this.closeSpeaker(session, disposition);
+      void this.closeSpeaker(session, speakerDisposition);
     }
     this.candidates.clear();
     this.speakers.clear();
@@ -182,15 +198,23 @@ export class DiscordRealtimeVoiceSession implements VoiceRealtimeSession {
       standby: previous !== undefined,
       conversationHistory: previous?.snapshotConversation(),
       runAgentTurn: async (turn) => {
-        const signal = turn.signal
-          ? AbortSignal.any([turn.signal, this.callAbort.signal])
-          : this.callAbort.signal;
+        const signal = AbortSignal.any([
+          this.params.signal,
+          this.callAbort.signal,
+          ...(turn.signal ? [turn.signal] : []),
+        ]);
         const text = await this.params.runAgentTurn({
           ...turn,
           signal,
           voiceSelection: this.voiceSelection,
         });
         signal.throwIfAborted();
+        if (this.textFallback) {
+          if (text.trim()) {
+            await this.params.deliverText(turn, text, signal);
+          }
+          return "";
+        }
         return text;
       },
       onTerminalError: (error) => this.handleSpeakerFailure(session, error),
@@ -203,7 +227,7 @@ export class DiscordRealtimeVoiceSession implements VoiceRealtimeSession {
       return;
     }
     if (this.warmSession === session) {
-      this.params.onTerminalError(error instanceof Error ? error : new Error(String(error)));
+      this.params.onTerminalError(toStringifiedError(error));
       return;
     }
     for (const speaker of this.sessions) {
@@ -411,25 +435,20 @@ export class DiscordRealtimeVoiceSession implements VoiceRealtimeSession {
 
   private async connectCandidate(
     session: DiscordRealtimeSpeakerSession,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<void> {
-    signal?.throwIfAborted();
-    let abort: (() => void) | undefined;
+    signal.throwIfAborted();
+    const cancelled = createDeferred<never>();
+    const abort = () => {
+      void this.closeSpeaker(session);
+      cancelled.reject(toErrorObject(signal.reason, "Discord voice change cancelled"));
+    };
     try {
-      await Promise.race([
-        session.connect(),
-        new Promise<never>((_resolve, reject) => {
-          abort = () => {
-            void this.closeSpeaker(session);
-            reject(toErrorObject(signal?.reason, "Discord voice change cancelled"));
-          };
-          signal?.addEventListener("abort", abort, { once: true });
-        }),
-      ]);
+      const connecting = session.connect();
+      signal.addEventListener("abort", abort, { once: true });
+      await Promise.race([connecting, cancelled.promise]);
     } finally {
-      if (abort) {
-        signal?.removeEventListener("abort", abort);
-      }
+      signal.removeEventListener("abort", abort);
     }
   }
 

@@ -8,6 +8,7 @@ import {
   resolveControlUiRootOverrideSync,
   resolveControlUiRootSync,
 } from "../infra/control-ui-assets.js";
+import { LruCache } from "../infra/lru-cache.js";
 import { resolveRuntimeProcessEntrypointUrl } from "../infra/runtime-process-url.js";
 import { WorkerTaskPool } from "../infra/worker-task-pool.js";
 import {
@@ -47,9 +48,10 @@ export type ControlUiRootState =
 type ReadyRoot = Extract<ControlUiRootState, { path: string; kind: "bundled" | "resolved" }>;
 type RootFiles = {
   controller: AbortController;
+  generation: number;
+  cacheEnabled: boolean;
   pending: Map<string, Promise<ControlUiRootAsset | null>>;
-  cached: Map<string, { asset: ControlUiRootAsset; bytes: number }>;
-  bytes: number;
+  cached: LruCache<{ asset: ControlUiRootAsset; bytes: number }>;
 };
 type FileRuntime = {
   pool?: WorkerTaskPool<ControlUiFileRead, ControlUiFileSnapshot | null>;
@@ -74,7 +76,16 @@ function fileRuntime() {
 function rootFiles(runtime: FileRuntime, root: ControlUiRootState): RootFiles {
   let files = runtime.roots.get(root);
   if (!files) {
-    files = { controller: new AbortController(), pending: new Map(), cached: new Map(), bytes: 0 };
+    files = {
+      controller: new AbortController(),
+      generation: 0,
+      cacheEnabled: true,
+      pending: new Map(),
+      cached: new LruCache(MAX_PREPARED_ENTRIES, {
+        maxBytes: MAX_PREPARED_BYTES,
+        sizeOf: (entry) => entry.bytes,
+      }),
+    };
     runtime.roots.set(root, files);
   }
   return files;
@@ -89,23 +100,23 @@ export function readControlUiRootAsset(
   const runtime = fileRuntime();
   const owner = rootFiles(runtime, root);
   owner.controller.signal.throwIfAborted();
+  const generation = owner.generation;
   const key = `${readBody ? "body" : "metadata"}:${fileRel}`;
-  const cachedKey = owner.cached.has(`body:${fileRel}`) ? `body:${fileRel}` : key;
+  const pendingKey = `${generation}:${key}`;
+  const cachedKey = owner.cached.peek(`body:${fileRel}`) ? `body:${fileRel}` : key;
   const cached = owner.cached.get(cachedKey);
   if (cached) {
-    owner.cached.delete(cachedKey);
-    owner.cached.set(cachedKey, cached);
     return Promise.resolve(cached.asset);
   }
   const pending =
-    owner.pending.get(key) ?? (!readBody ? owner.pending.get(`body:${fileRel}`) : undefined);
+    owner.pending.get(pendingKey) ??
+    (!readBody ? owner.pending.get(`${generation}:body:${fileRel}`) : undefined);
   if (pending) {
     return pending;
   }
   const pool = (runtime.pool ??= new WorkerTaskPool({
     workerUrl: resolveRuntimeProcessEntrypointUrl("controlUiFile"),
-    maxWorkers: 2,
-    sharedCompute: true,
+    workerClass: "file-reader",
     maxPendingTasks: 2_048,
     maxPendingBytes: 8 * 1024 * 1024,
   }));
@@ -160,27 +171,24 @@ export function readControlUiRootAsset(
       [asset.br, asset.gzip] = await Promise.all([sidecar(".br"), sidecar(".gz")]);
     }
     owner.controller.signal.throwIfAborted();
-    if (root.kind === "bundled" && !(asset.br instanceof Error) && !(asset.gzip instanceof Error)) {
+    if (
+      root.kind === "bundled" &&
+      owner.cacheEnabled &&
+      owner.generation === generation &&
+      !(asset.br instanceof Error) &&
+      !(asset.gzip instanceof Error)
+    ) {
       const bytes =
         (file.body?.byteLength ?? 0) +
         (asset.br?.body?.byteLength ?? 0) +
         (asset.gzip?.body?.byteLength ?? 0);
       if (bytes <= MAX_PREPARED_BYTES) {
         owner.cached.set(key, { asset, bytes });
-        owner.bytes += bytes;
-        while (owner.bytes > MAX_PREPARED_BYTES || owner.cached.size > MAX_PREPARED_ENTRIES) {
-          const oldest = owner.cached.entries().next().value;
-          if (!oldest) {
-            break;
-          }
-          owner.cached.delete(oldest[0]);
-          owner.bytes -= oldest[1].bytes;
-        }
       }
     }
     return asset;
-  })().finally(() => owner.pending.delete(key));
-  owner.pending.set(key, preparation);
+  })().finally(() => owner.pending.delete(pendingKey));
+  owner.pending.set(pendingKey, preparation);
   return preparation;
 }
 
@@ -366,6 +374,12 @@ export function createGatewayControlUiRootLifecycle(
         return;
       }
       enabled = nextEnabled;
+      // Admitted HTTP reads may finish, but cannot refill a disabled cache or
+      // coalesce with reads after re-enable. Stop still joins every generation.
+      const files = rootFiles(fileRuntime(), state);
+      files.generation++;
+      files.cacheEnabled = enabled;
+      files.cached.clear();
       if (enabled) {
         if (state.kind === "failed") {
           Object.assign(state, { kind: "preparing" });
@@ -384,7 +398,6 @@ export function createGatewayControlUiRootLifecycle(
       files.controller.abort();
       await Promise.allSettled(files.pending.values());
       files.cached.clear();
-      files.bytes = 0;
     },
   };
 }

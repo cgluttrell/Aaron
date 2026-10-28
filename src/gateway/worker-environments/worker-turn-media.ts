@@ -22,7 +22,11 @@ import { resolvePreferredOpenClawTmpDir } from "../../infra/tmp-openclaw-dir.js"
 import { logWarn } from "../../logger.js";
 import { readLocalMediaFile } from "../../media/local-media-access.js";
 import { getAgentScopedMediaLocalRoots } from "../../media/local-roots.js";
-import { readPersistedMediaFacts, type MediaFact } from "../../media/media-facts.js";
+import {
+  applyRunHydrationSuppression,
+  readPersistedMediaFacts,
+  type MediaFact,
+} from "../../media/media-facts.js";
 import { resolveMediaReferenceLocalPath } from "../../media/media-reference.js";
 import {
   ensureStagedInputDirectory,
@@ -30,12 +34,8 @@ import {
   stagedInputFileName,
 } from "../../media/staged-inputs.js";
 import { MEDIA_MAX_BYTES } from "../../media/store.js";
-import type { WorkerLaunchPlan } from "../../worker/launch-descriptor.js";
-import {
-  cloneImageContent,
-  cloneTextContent,
-  isWorkerTranscriptMessageFrameSafe,
-} from "../../worker/transcript-message.js";
+import { projectWorkerTextOrImageContent } from "../../worker/assistant-message-projection.js";
+import { isWorkerTranscriptMessageFrameSafe } from "../../worker/transcript-message.js";
 import type { WorkerSessionWorkspace } from "./session-workspace.js";
 import type { WorkerTunnelHandle } from "./tunnel-contract.js";
 const MAX_WORKER_ATTACHMENT_BYTES = 256 * 1024 * 1024;
@@ -75,12 +75,7 @@ export async function prepareWorkerTurnMedia(params: {
   tunnel: WorkerTunnelHandle;
   isAuthorized: () => boolean;
   signal: AbortSignal;
-}): Promise<{
-  prompt: WorkerLaunchPlan["assignment"]["prompt"];
-  history: AgentMessage[];
-  images: Awaited<ReturnType<typeof detectAndLoadPromptImages>>["images"];
-  imageFactIndexes: Awaited<ReturnType<typeof detectAndLoadPromptImages>>["imageFactIndexes"];
-}> {
+}) {
   const { turn, signal } = params;
   const assertCurrent = () => {
     signal.throwIfAborted();
@@ -94,7 +89,9 @@ export async function prepareWorkerTurnMedia(params: {
     (await turn.userTurnTranscriptRecorder?.resolveMessage());
   assertCurrent();
   const recordedMedia = recorded ? readPersistedMediaFacts(recorded) : undefined;
-  const media = recordedMedia?.length ? recordedMedia : (turn.media ?? []);
+  const media = recordedMedia?.length
+    ? applyRunHydrationSuppression(recordedMedia, turn.media)
+    : (turn.media ?? []);
   const localWorkspace = params.workspace.kind === "local" ? params.workspace.path : undefined;
   const workspaceOnly = resolveEffectiveToolFsWorkspaceOnly({
     cfg: turn.config,
@@ -266,11 +263,12 @@ export async function prepareWorkerTurnMedia(params: {
   };
   const projectInput = (input: ReturnType<typeof prepareInput>) => {
     // Gateway bookkeeping is not part of the closed worker content contract.
-    const parts = input.parts.map((part) =>
-      part.type === "text"
-        ? { ...cloneTextContent(part), text: projectText(part.text) }
-        : cloneImageContent(part),
-    );
+    const parts = input.parts.map(projectWorkerTextOrImageContent);
+    for (const part of parts) {
+      if (part.type === "text") {
+        part.text = projectText(part.text);
+      }
+    }
     const text = parts.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
     const notes = [...input.files]
       .filter((file) => !text.includes(file))

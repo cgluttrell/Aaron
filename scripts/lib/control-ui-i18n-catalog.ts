@@ -5,6 +5,7 @@ import { buildBaseHints } from "../../src/config/schema.hints.js";
 import { configHintTranslationKey } from "../../ui/src/i18n/lib/config-hint-translation.ts";
 import { registerActivityEnglish } from "../../ui/src/i18n/locales/en-activity.ts";
 import { registerAgentsHomeEnglish } from "../../ui/src/i18n/locales/en-agents-home.ts";
+import { registerApprovalsEnglish } from "../../ui/src/i18n/locales/en-approvals.ts";
 import { registerAppsEnglish } from "../../ui/src/i18n/locales/en-apps.ts";
 import { registerBoardWebsiteEnglish } from "../../ui/src/i18n/locales/en-board-website.ts";
 import { registerBrowserEnglish } from "../../ui/src/i18n/locales/en-browser.ts";
@@ -24,7 +25,10 @@ import { registerFilePreviewEnglish } from "../../ui/src/i18n/locales/en-file-pr
 import { registerGitHubEnglish } from "../../ui/src/i18n/locales/en-github.ts";
 import { registerLabsEnglish } from "../../ui/src/i18n/locales/en-labs.ts";
 import { registerLinkReaderEnglish } from "../../ui/src/i18n/locales/en-link-reader.ts";
+import { registerLogbookEnglish } from "../../ui/src/i18n/locales/en-logbook.ts";
 import { registerLoginEnglish } from "../../ui/src/i18n/locales/en-login.ts";
+import { registerLogsEnglish } from "../../ui/src/i18n/locales/en-logs.ts";
+import { registerMcpAppEnglish } from "../../ui/src/i18n/locales/en-mcp-app.ts";
 import { registerMcpEnglish } from "../../ui/src/i18n/locales/en-mcp.ts";
 import { registerMeetingsEnglish } from "../../ui/src/i18n/locales/en-meetings.ts";
 import { registerMemoryImportEnglish } from "../../ui/src/i18n/locales/en-memory-import.ts";
@@ -36,7 +40,9 @@ import { registerPersonalInstructionsEnglish } from "../../ui/src/i18n/locales/e
 import { registerPluginConsentEnglish } from "../../ui/src/i18n/locales/en-plugin-consent.ts";
 import { registerPluginManagementEnglish } from "../../ui/src/i18n/locales/en-plugin-management.ts";
 import { registerPortalsEnglish } from "../../ui/src/i18n/locales/en-portals.ts";
+import { registerProcessesEnglish } from "../../ui/src/i18n/locales/en-processes.ts";
 import { registerProfileEnglish } from "../../ui/src/i18n/locales/en-profile.ts";
+import { registerSecretsStoreEnglish } from "../../ui/src/i18n/locales/en-secrets-store.ts";
 import { registerSessionPeopleEnglish } from "../../ui/src/i18n/locales/en-session-people.ts";
 import { registerSessionPlacementEnglish } from "../../ui/src/i18n/locales/en-session-placement.ts";
 import { registerSettingsEnglish } from "../../ui/src/i18n/locales/en-settings.ts";
@@ -68,6 +74,10 @@ const sourceFiles = [
   "en-activity.ts",
   "en-agents-home.ts",
   "en-apps.ts",
+  "en-logbook.ts",
+  "en-logs.ts",
+  "en-approvals.ts",
+  "en-secrets-store.ts",
   "en-board-website.ts",
   "en-browser.ts",
   "en-chat-camera.ts",
@@ -83,11 +93,13 @@ const sourceFiles = [
   "en-devices.ts",
   "en-dreaming.ts",
   "en-file-preview.ts",
+  "en-processes.ts",
   "en-labs.ts",
   "en-login.ts",
   "en-link-reader.ts",
   "en-github.ts",
   "en-mcp.ts",
+  "en-mcp-app.ts",
   "en-meetings.ts",
   "en-memory-import.ts",
   "en-model-accounts.ts",
@@ -151,6 +163,7 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     // Preserve partial-fragment key order while keeping shared labels eager.
     {
       ...en,
+      secretsStore: registerSecretsStoreEnglish.catalog.secretsStore,
       custodian: { ...registerPluginManagementEnglish.catalog.custodian, ...en.custodian },
       chat: {
         ...en.chat,
@@ -180,6 +193,10 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     registerActivityEnglish.catalog,
     registerAgentsHomeEnglish.catalog,
     registerAppsEnglish.catalog,
+    registerLogbookEnglish.catalog,
+    registerLogsEnglish.catalog,
+    registerApprovalsEnglish.catalog,
+    registerSecretsStoreEnglish.catalog,
     registerBrowserEnglish.catalog,
     registerChatCameraEnglish.catalog,
     registerChatCiEnglish.catalog,
@@ -190,10 +207,12 @@ export function loadControlUiSourceCatalog(): TranslationMap {
     registerDevicesEnglish.catalog,
     registerDreamingEnglish.catalog,
     registerFilePreviewEnglish.catalog,
+    registerProcessesEnglish.catalog,
     registerLabsEnglish.catalog,
     registerLoginEnglish.catalog,
     registerLinkReaderEnglish.catalog,
     registerMcpEnglish.catalog,
+    registerMcpAppEnglish.catalog,
     registerMeetingsEnglish.catalog,
     registerMemoryImportEnglish.catalog,
     registerModelAccountsEnglish.catalog,

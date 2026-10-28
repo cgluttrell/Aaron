@@ -5,7 +5,7 @@ import { theme } from "../../../packages/terminal-core/src/theme.js";
 import { resolveStateDir } from "../../config/paths.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { readRegularFile } from "../../infra/fs-safe.js";
-import type { PackageUpdateTransaction } from "../../infra/package-update-steps.js";
+import type { PackageUpdateTransaction } from "../../infra/package-update-swap-contract.js";
 import { hasNodeErrorCode } from "../../infra/path-guards.js";
 import { mergeProcessEnv } from "../../infra/process-env.js";
 import { assessInitialUpdateSnapshotCapacity } from "../../infra/update-candidate-snapshot.js";
@@ -19,7 +19,6 @@ import {
   type DevUpdateTarget,
 } from "../../infra/update-dev-target.js";
 import { getUpdateDoctorConfigFailureReason } from "../../infra/update-doctor-config.js";
-import { createFreeBsdPkgOwnershipInspection } from "../../infra/update-freebsd-pkg-ownership.js";
 import type { CommandRunner as GlobalCommandRunner } from "../../infra/update-global-command-runner.js";
 import {
   createGlobalInstallEnv,
@@ -35,8 +34,8 @@ import {
 import {
   buildUpdateCommandRunner,
   normalizeFallbackFailureReason,
+  reportUpdateStepCompletion,
 } from "../../infra/update-runner-command.js";
-import { readCurrentGitUpdateRecovery } from "../../infra/update-runner-git-recovery.js";
 import {
   readBranchName,
   readGitTargetSchemaVersions,
@@ -47,12 +46,13 @@ import type {
   CommandRunner as UpdateRunnerCommandRunner,
   UpdateRunnerOptions,
   UpdateRunResult,
+  UpdateStepProgress,
 } from "../../infra/update-runner-types.js";
+import { createSystemPackageOwnershipInspection } from "../../infra/update-system-package-ownership.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import { defaultRuntime } from "../../runtime.js";
 import type { OpenClawSchemaVersions } from "../../state/openclaw-schema-versions.js";
 import { splitShellArgs } from "../../utils/shell-argv.js";
-import { createUpdateProgress } from "./progress.js";
 import {
   DEFAULT_PACKAGE_NAME,
   ensureGitCheckout,
@@ -63,6 +63,7 @@ import {
 } from "./shared.js";
 import { readPackageUpdateIdentity } from "./update-command-package-identity.js";
 import { prepareGitPackageExposure, runPackageUpdateDoctor } from "./update-command-package.js";
+import { readOriginalUpdateRecovery } from "./update-command-recovery.js";
 import { gatewayServiceCommandUsesRoot } from "./update-command-service-plan.js";
 
 export async function retireStandaloneGitWrapper(params: {
@@ -133,12 +134,10 @@ export async function retireStandaloneGitWrapper(params: {
     if (!matchesWindows && !matchesPosix) {
       continue;
     }
+    await createSystemPackageOwnershipInspection(UPDATE_RUNNER_TIMEOUT_MS).assertEntryUnowned(
+      wrapperPath,
+    );
     try {
-      if (process.platform === "freebsd") {
-        await createFreeBsdPkgOwnershipInspection(UPDATE_RUNNER_TIMEOUT_MS).assertEntryUnowned(
-          wrapperPath,
-        );
-      }
       // Filesystem and pkg reads can outlive this wrapper or the update's authority.
       const currentFile = await readRegularFile({ filePath: wrapperPath, maxBytes: 4096 });
       const current = await fs.lstat(wrapperPath);
@@ -150,7 +149,12 @@ export async function retireStandaloneGitWrapper(params: {
       ) {
         throw new Error("The installer wrapper changed before retirement.");
       }
-      params.assertCurrent?.();
+    } catch (error) {
+      return { error: `Could not retire ${wrapperPath}: ${String(error)}` };
+    }
+    // Ownership refusals must remain errors, never optional filesystem warnings.
+    params.assertCurrent?.();
+    try {
       await fs.unlink(wrapperPath);
     } catch (error) {
       return { error: `Could not retire ${wrapperPath}: ${String(error)}` };
@@ -271,11 +275,7 @@ function readRemoteTagRevisions(stdout: string): Map<string, string> | null {
     if (!match) {
       return null;
     }
-    const tag = match[1];
-    if (!tag) {
-      return null;
-    }
-    (match[2] ? peeled : direct).set(tag, sha);
+    (match[2] ? peeled : direct).set(match[1]!, sha);
   }
   return new Map([...direct, ...peeled]);
 }
@@ -390,17 +390,23 @@ export async function inspectGitDryRunTargetSchemaVersions(params: {
     ? target.schemaVersions
       ? { schemaVersions: target.schemaVersions }
       : {}
-    : { metadataUnreadable: target.reason };
+    : {
+        metadataUnreadable: target.reason,
+        ...(target.reason.startsWith("git show ")
+          ? { failureCode: "target-git-cache-stale" as const }
+          : {}),
+      };
 }
 
 export async function updateGitInstall(params: {
   root: string;
+  restart?: boolean;
   sourceRuntimePrepared?: boolean;
   switchToGit: boolean;
   installKind: "git" | "package" | "unknown";
   timeoutMs: number | undefined;
   startedAt: number;
-  progress: ReturnType<typeof createUpdateProgress>["progress"];
+  progress: UpdateStepProgress;
   channel: UpdateChannel;
   devTarget?: DevUpdateTarget;
   beforeGitMutation: UpdateRunnerOptions["beforeGitMutation"];
@@ -419,11 +425,11 @@ export async function updateGitInstall(params: {
     installTarget?: ResolvedGlobalInstallTarget,
   ) => Promise<void>;
 }): Promise<UpdateRunResult> {
+  const assertCurrent = params.assertCurrent;
   let updateRoot = params.switchToGit ? resolveGitInstallDir() : params.root;
   const effectiveTimeout = params.timeoutMs ?? DEFAULT_UPDATE_STEP_TIMEOUT_MS;
-  const pkgOwnership = createFreeBsdPkgOwnershipInspection(effectiveTimeout);
+  const pkgOwnership = createSystemPackageOwnershipInspection(effectiveTimeout);
   await pkgOwnership.assertUnowned(updateRoot);
-  const installEnv = await createGlobalInstallEnv();
   const installTarget = params.switchToGit
     ? await resolveGlobalInstallTarget({
         manager: await resolveGlobalManager({
@@ -438,25 +444,30 @@ export async function updateGitInstall(params: {
         pkgOwnership,
       })
     : null;
+  const installEnv = await createGlobalInstallEnv(undefined, installTarget ?? {});
   const npmLifecycleGate = installTarget
     ? resolveNpmLifecyclePolicyGate(installTarget)
     : { policy: null, error: null };
+
+  const failed = async (
+    reason: string,
+    steps: UpdateRunResult["steps"],
+    recovery = readOriginalUpdateRecovery(params, effectiveTimeout),
+  ): Promise<UpdateRunResult> => ({
+    status: "error",
+    mode: "git",
+    root: params.root,
+    reason,
+    recovery: await recovery,
+    steps,
+    durationMs: Date.now() - params.startedAt,
+  });
 
   // Package-to-Git updates must settle package-manager policy before cloning or
   // updating the checkout; carry this exact decision into the later install.
   if (npmLifecycleGate.error) {
     defaultRuntime.error(npmLifecycleGate.error);
-    return {
-      status: "error",
-      mode: "git",
-      root: params.root,
-      reason: "npm lifecycle policy preflight",
-      recovery: await (params.installKind === "git"
-        ? readCurrentGitUpdateRecovery(params.root, effectiveTimeout)
-        : verifyPackageUpdateRecovery(params.root)),
-      steps: [],
-      durationMs: Date.now() - params.startedAt,
-    };
+    return failed("npm-lifecycle-policy-preflight", []);
   }
 
   const checkSnapshot = async () => {
@@ -466,14 +477,16 @@ export async function updateGitInstall(params: {
       index: 0,
       total: 0,
     };
-    params.progress.onStepStart?.(info);
+    await params.progress.onStepStart?.(info);
+    assertCurrent?.();
     const { config, env } = await params.getSnapshotSource();
     const snapshot = await assessInitialUpdateSnapshotCapacity({
       config,
       stateDir: resolveStateDir(env),
       env,
     });
-    params.progress.onStepComplete?.({ ...snapshot, index: 0, total: 0 });
+    await reportUpdateStepCompletion(params.progress, { ...snapshot, index: 0, total: 0 });
+    assertCurrent?.();
     if (snapshot.exitCode !== 0) {
       defaultRuntime.error(snapshot.stderrTail ?? "snapshot-capacity-insufficient");
     } else {
@@ -489,15 +502,11 @@ export async function updateGitInstall(params: {
   };
   const snapshotBeforeClone = params.switchToGit ? await checkSnapshot() : undefined;
   if (snapshotBeforeClone && snapshotBeforeClone.exitCode !== 0) {
-    return {
-      status: "error",
-      mode: "git",
-      root: params.root,
-      reason: "snapshot-capacity-insufficient",
-      steps: [snapshotBeforeClone],
-      recovery: await verifyPackageUpdateRecovery(params.root),
-      durationMs: Date.now() - params.startedAt,
-    };
+    return failed(
+      "snapshot-capacity-insufficient",
+      [snapshotBeforeClone],
+      verifyPackageUpdateRecovery(params.root),
+    );
   }
 
   const previousPackage = installTarget
@@ -529,16 +538,11 @@ export async function updateGitInstall(params: {
         progress: params.progress,
         channel: params.channel,
         devTarget: params.devTarget,
-        beforeGitMutation:
-          process.platform === "freebsd"
-            ? async (target) => {
-                await params.beforeGitMutation(target);
-                await createFreeBsdPkgOwnershipInspection(effectiveTimeout).assertUnowned(
-                  updateRoot,
-                );
-                params.assertCurrent?.();
-              }
-            : params.beforeGitMutation,
+        beforeGitMutation: async (target) => {
+          await params.beforeGitMutation(target);
+          await createSystemPackageOwnershipInspection(effectiveTimeout).assertUnowned(updateRoot);
+          params.assertCurrent?.();
+        },
         inspectGitTarget: (target) => params.inspectGitTarget(target, installTarget ?? undefined),
         beforeGitStaging: params.switchToGit
           ? undefined
@@ -593,7 +597,9 @@ export async function updateGitInstall(params: {
             // Exposure must use the clone owner's pinned destination, not a
             // caller alias that transport may have retargeted meanwhile.
             updateRoot = targetRoot;
-            await createFreeBsdPkgOwnershipInspection(effectiveTimeout).assertUnowned(updateRoot);
+            await createSystemPackageOwnershipInspection(effectiveTimeout).assertUnowned(
+              updateRoot,
+            );
             stagedUpdateResult = await runUpdate(stagingRoot, publish, storageRoot);
             if (stagedUpdateResult.root === stagingRoot) {
               stagedUpdateResult = {
@@ -609,17 +615,10 @@ export async function updateGitInstall(params: {
     updateRoot = checkout?.checkoutDir ?? updateRoot;
 
     if (cloneStep && cloneStep.exitCode !== 0) {
-      return {
-        status: "error",
-        mode: "git",
-        root: params.root,
-        reason: cloneStep.name,
-        recovery: await (params.installKind === "git"
-          ? readCurrentGitUpdateRecovery(params.root, effectiveTimeout)
-          : verifyPackageUpdateRecovery(params.root)),
-        steps: [...(snapshotBeforeClone ? [snapshotBeforeClone] : []), cloneStep],
-        durationMs: Date.now() - params.startedAt,
-      };
+      return await failed("git-clone-failed", [
+        ...(snapshotBeforeClone ? [snapshotBeforeClone] : []),
+        cloneStep,
+      ]);
     }
 
     const updateResult = stagedUpdateResult ?? (await runUpdate(updateRoot));

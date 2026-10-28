@@ -11,9 +11,42 @@ import {
   supportsClaude1MContext,
   supportsClaudeAdaptiveThinking,
   supportsClaudeFastMode,
+  supportsClaudeInHistorySystemMessages,
   supportsClaudeNativeMaxEffort,
   supportsClaudeNativeXhighEffort,
 } from "./anthropic.js";
+
+describe("supportsClaudeInHistorySystemMessages", () => {
+  it.each([
+    ["claude-opus-5", true],
+    ["claude-opus-5-5", true],
+    ["claude-opus-4-8", true],
+    ["claude-sonnet-5", true],
+    ["claude-sonnet-5-5", true],
+    ["claude-haiku-5-5", true],
+    ["claude-fable-5", true],
+    ["claude-fable-5-1", true],
+    ["claude-mythos-5", true],
+    ["claude-mythos-5-1", true],
+    ["opus", true],
+    ["sonnet", true],
+    ["anthropic/claude-opus-4.8", true],
+    ["claude-opus-4-7", false],
+    ["claude-sonnet-4-6", false],
+    ["claude-haiku-4-5", false],
+    ["claude-mythos-preview", false],
+    ["claude-opus-50", false],
+    ["", false],
+  ])("resolves the in-history protocol for %s to %s", (id, expected) => {
+    expect(supportsClaudeInHistorySystemMessages({ id })).toBe(expected);
+    expect(
+      supportsClaudeInHistorySystemMessages({
+        id: "deployment",
+        params: { canonicalModelId: id },
+      }),
+    ).toBe(expected);
+  });
+});
 
 describe("bindsClaudeThinkingPrefix", () => {
   it.each([
@@ -141,5 +174,43 @@ describe("Claude Opus 5.5 model contract", () => {
     expect(supportsClaudeNativeXhighEffort({ id })).toBe(true);
     expect(supportsClaudeNativeMaxEffort({ id })).toBe(true);
     expect(supportsClaudeFastMode({ id })).toBe(true);
+  });
+});
+
+describe("listed Claude capabilities", () => {
+  it("override id rules per flag without changing the context contract", () => {
+    const listedOff = {
+      id: "claude-opus-4-8",
+      params: { claudeCapabilities: { adaptiveThinking: false, maxEffort: false } },
+    };
+    expect(supportsClaudeAdaptiveThinking(listedOff)).toBe(false);
+    expect(supportsClaudeNativeMaxEffort(listedOff)).toBe(false);
+    // No listed xhigh flag: the id rule still answers.
+    expect(supportsClaudeNativeXhighEffort(listedOff)).toBe(true);
+    expect(supportsClaude1MContext(listedOff)).toBe(true);
+
+    const listedOn = {
+      id: "claude-zephyr-1",
+      params: {
+        claudeCapabilities: {
+          adaptiveThinking: true,
+          disabledThinking: false,
+          xhighEffort: true,
+          maxEffort: true,
+        },
+      },
+    };
+    expect(supportsClaudeAdaptiveThinking(listedOn)).toBe(true);
+    expect(requiresClaudeMandatoryAdaptiveThinking(listedOn)).toBe(true);
+    expect(supportsClaudeNativeXhighEffort(listedOn)).toBe(true);
+    expect(supportsClaudeNativeMaxEffort(listedOn)).toBe(true);
+    expect(supportsClaude1MContext(listedOn)).toBe(false);
+    // Sonnet 5.5 lists disabled thinking as unsupported but keeps its between-tools off mode.
+    expect(
+      requiresClaudeMandatoryAdaptiveThinking({
+        id: "claude-sonnet-5-5",
+        params: { claudeCapabilities: { ...listedOn.params.claudeCapabilities } },
+      }),
+    ).toBe(false);
   });
 });

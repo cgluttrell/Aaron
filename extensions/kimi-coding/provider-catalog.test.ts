@@ -80,7 +80,8 @@ describe("kimi provider catalog", () => {
       .models.filter((model) => model.thinkingLevelMap)
       .map((model) => model.id);
 
-    expect(thinkingRows).toEqual([...KIMI_K3_MODEL_IDS]);
+    // K3.1 rows come from the hosted catalog, so the policy may name more ids than the manifest.
+    expect(KIMI_K3_MODEL_IDS).toEqual(expect.arrayContaining(thinkingRows));
   });
 
   it.each([

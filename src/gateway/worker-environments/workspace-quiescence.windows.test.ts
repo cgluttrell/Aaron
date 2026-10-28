@@ -8,12 +8,22 @@ import { afterEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import { runCommandWithTimeout } from "../../process/exec.js";
 import {
-  REMOTE_WORKSPACE_QUIESCE_JS,
-  REMOTE_WORKSPACE_RENEW_QUIESCENCE_JS,
-  REMOTE_WORKSPACE_RESUME_JS,
+  legacyWindowsWorkspaceQuiescenceAcquireArgv,
+  workspaceQuiescenceArgv,
 } from "./workspace-quiescence-scripts.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+
+function quiescenceCommand(...args: Parameters<typeof workspaceQuiescenceArgv>) {
+  const [workspace, input, mode] = args;
+  return [
+    process.execPath,
+    ...(input.action === "acquire"
+      ? legacyWindowsWorkspaceQuiescenceAcquireArgv(workspace, input, mode)
+      : workspaceQuiescenceArgv(...args)
+    ).slice(1),
+  ];
+}
 
 function leaseDatabase(home: string) {
   return path.join(home, ".openclaw-worker", "quiescence", "windows-shared-host.sqlite");
@@ -43,7 +53,11 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     const environment = { ...process.env, HOME: home, USERPROFILE: home };
 
     const quiesced = await runCommandWithTimeout(
-      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, realWorkspace, "20000", "shared-host"],
+      quiescenceCommand(
+        realWorkspace,
+        { action: "acquire", nonce: "", timeoutMs: 20_000 },
+        "shared-host",
+      ),
       { timeoutMs: 10_000, baseEnv: environment },
     );
     expect(quiesced.code).toBe(0);
@@ -52,30 +66,29 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     expect(readLease(home, realWorkspace)?.lease_json).toContain('"sharedHost":true');
 
     const overlapping = await runCommandWithTimeout(
-      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, realWorkspace, "20000", "shared-host"],
+      quiescenceCommand(
+        realWorkspace,
+        { action: "acquire", nonce: "", timeoutMs: 20_000 },
+        "shared-host",
+      ),
       { timeoutMs: 10_000, baseEnv: environment },
     );
     expect(overlapping.code).not.toBe(0);
     expect(overlapping.stderr).toContain("workspace quiescence lease is already active");
 
     const renewed = await runCommandWithTimeout(
-      [
-        process.execPath,
-        "-e",
-        REMOTE_WORKSPACE_RENEW_QUIESCENCE_JS,
+      quiescenceCommand(
         realWorkspace,
-        nonce!,
-        "20000",
-        "final",
+        { action: "renew", nonce: nonce!, timeoutMs: 20_000, validationMode: "final" },
         "shared-host",
-      ],
+      ),
       { timeoutMs: 10_000, baseEnv: environment },
     );
     expect(renewed).toMatchObject({ code: 0, stdout: `renewed ${nonce}\n` });
 
     await expect(
       runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, realWorkspace, nonce!],
+        quiescenceCommand(realWorkspace, { action: "release", nonce: nonce! }, "dedicated"),
         { timeoutMs: 10_000, baseEnv: environment },
       ),
     ).resolves.toMatchObject({ code: 0 });
@@ -104,25 +117,19 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     database.close();
     const simultaneous = await Promise.all([
       runCommandWithTimeout(
-        [
-          process.execPath,
-          "-e",
-          REMOTE_WORKSPACE_QUIESCE_JS,
+        quiescenceCommand(
           realWorkspace,
-          "20000",
+          { action: "acquire", nonce: "", timeoutMs: 20_000 },
           "shared-host",
-        ],
+        ),
         { timeoutMs: 10_000, baseEnv: environment },
       ),
       runCommandWithTimeout(
-        [
-          process.execPath,
-          "-e",
-          REMOTE_WORKSPACE_QUIESCE_JS,
+        quiescenceCommand(
           realWorkspace,
-          "20000",
+          { action: "acquire", nonce: "", timeoutMs: 20_000 },
           "shared-host",
-        ],
+        ),
         { timeoutMs: 10_000, baseEnv: environment },
       ),
     ]);
@@ -137,14 +144,18 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     expect(winnerNonce).toBeDefined();
     await expect(
       runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, realWorkspace, winnerNonce!],
+        quiescenceCommand(realWorkspace, { action: "release", nonce: winnerNonce! }, "dedicated"),
         { timeoutMs: 10_000, baseEnv: environment },
       ),
     ).resolves.toMatchObject({ code: 0 });
     expect(readLease(home, realWorkspace)).toBeUndefined();
 
     const dedicated = await runCommandWithTimeout(
-      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, realWorkspace, "20000", "dedicated"],
+      quiescenceCommand(
+        realWorkspace,
+        { action: "acquire", nonce: "", timeoutMs: 20_000 },
+        "dedicated",
+      ),
       { timeoutMs: 10_000, baseEnv: environment },
     );
     expect(dedicated.code).not.toBe(0);
@@ -160,7 +171,11 @@ describe.runIf(process.platform === "win32")("Windows workspace quiescence", () 
     const realWorkspace = await fs.realpath(workspace);
     const environment = { ...process.env, HOME: home, USERPROFILE: home };
     const quiesced = await runCommandWithTimeout(
-      [process.execPath, "-e", REMOTE_WORKSPACE_QUIESCE_JS, realWorkspace, "20000", "shared-host"],
+      quiescenceCommand(
+        realWorkspace,
+        { action: "acquire", nonce: "", timeoutMs: 20_000 },
+        "shared-host",
+      ),
       { timeoutMs: 10_000, baseEnv: environment },
     );
     const nonce = /^quiesced ([a-f0-9]{32})\n$/u.exec(quiesced.stdout)?.[1];
@@ -191,22 +206,17 @@ setInterval(() => {}, 1000);`,
 
     await expect(
       runCommandWithTimeout(
-        [
-          process.execPath,
-          "-e",
-          REMOTE_WORKSPACE_RENEW_QUIESCENCE_JS,
+        quiescenceCommand(
           realWorkspace,
-          nonce!,
-          "20000",
-          "final",
+          { action: "renew", nonce: nonce!, timeoutMs: 20_000, validationMode: "final" },
           "shared-host",
-        ],
+        ),
         { timeoutMs: 10_000, baseEnv: environment },
       ),
     ).resolves.toMatchObject({ code: 0, stdout: `renewed ${nonce}\n` });
     await expect(
       runCommandWithTimeout(
-        [process.execPath, "-e", REMOTE_WORKSPACE_RESUME_JS, realWorkspace, nonce!],
+        quiescenceCommand(realWorkspace, { action: "release", nonce: nonce! }, "dedicated"),
         { timeoutMs: 10_000, baseEnv: environment },
       ),
     ).resolves.toMatchObject({ code: 0 });

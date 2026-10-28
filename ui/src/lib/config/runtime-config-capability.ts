@@ -1,7 +1,8 @@
+import { registerListener } from "../../../../src/shared/listeners.js";
 import { registerControlUiReloadGuard } from "../../app/document-reload-guard.ts";
 import { hasOperatorReadAccess } from "../../app/operator-access.ts";
 import { t } from "../../i18n/index.ts";
-import { canCallGatewayMethod, isGatewayMethodAdvertised } from "../gateway-methods.ts";
+import { canCallGatewayMethod } from "../gateway-methods.ts";
 import { showToast } from "../toast.ts";
 import { createAppliedConfigRefreshController } from "./applied-refresh.ts";
 import { clearConfigDraftTracking } from "./config-draft-model.ts";
@@ -118,7 +119,8 @@ export function createRuntimeConfigCapability(gateway: RuntimeConfigGateway) {
       "config",
     );
     if (state.configSchemaVersion !== null && canLoadConfigSchema()) {
-      void run(() => loadConfigSchema(state), "schema");
+      // Config success clears lastError; load the schema afterward to preserve its failures.
+      void config.then(() => run(() => loadConfigSchema(state), "schema"));
     }
     return config;
   };
@@ -137,9 +139,7 @@ export function createRuntimeConfigCapability(gateway: RuntimeConfigGateway) {
     },
     refreshConnectionState,
     canCallConfigMethod,
-    cancelAppliedRefresh: appliedRefresh.cancel,
-    reconcileAppliedRefresh: appliedRefresh.reconcile,
-    disposeAppliedRefresh: appliedRefresh.dispose,
+    appliedRefresh,
     isDisposed: () => disposed,
   });
 
@@ -149,15 +149,10 @@ export function createRuntimeConfigCapability(gateway: RuntimeConfigGateway) {
     }
     appliedRefresh.reconcile();
   };
-  // Schema reads fail open like operator-access: only a definitive denial
-  // (method advertised absent, or advertised scopes without read) skips the
-  // load, so legacy scope-less gateways keep schema-driven settings pages.
+  // Schema reads use the same read-access policy as the settings pages.
   const canLoadConfigSchema = () => {
     const snapshot = gateway.snapshot;
     if (!snapshot.client || snapshot.phase !== "connected") {
-      return false;
-    }
-    if (isGatewayMethodAdvertised(snapshot, "config.schema") === false) {
       return false;
     }
     return hasOperatorReadAccess(snapshot.hello?.auth ?? null);
@@ -217,8 +212,7 @@ export function createRuntimeConfigCapability(gateway: RuntimeConfigGateway) {
     runExternalMutation: writes.runExternalMutation,
     lookupSchemaPath: (path: string) => run(() => lookupConfigSchemaPath(state, path)),
     subscribe(listener: (state: RuntimeConfigState) => void) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
+      return registerListener(listeners, listener);
     },
     dispose() {
       stopReloadGuard();

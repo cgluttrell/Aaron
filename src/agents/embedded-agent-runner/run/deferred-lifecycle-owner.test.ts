@@ -1,3 +1,5 @@
+import { setImmediate as nextTurn } from "node:timers/promises";
+import { queryObjects } from "node:v8";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolveReplyOperationAbortReason } from "../../../auto-reply/reply/reply-operation-abort.js";
 import {
@@ -15,6 +17,7 @@ import {
   abortEmbeddedAgentRun,
   clearActiveEmbeddedRun,
   isEmbeddedAgentRunActive,
+  resolveActiveEmbeddedRunOwner,
   setActiveEmbeddedRun,
   type EmbeddedAgentQueueHandle,
 } from "../runs.js";
@@ -44,6 +47,49 @@ describe("deferred logical-turn lifecycle", () => {
     }
     handles.length = 0;
   });
+
+  it.each(["complete", "discard"] as const)(
+    "releases completed attempt callbacks and terminal data after %s",
+    async (settle) => {
+      class SessionPayload {
+        active = true;
+      }
+      const createOwner = () => {
+        const payload = new SessionPayload();
+        const owner = createEmbeddedAttemptDeferredLifecycleOwner({
+          runId: "retained-owner",
+          sessionId,
+          diagnosticOwner: createDiagnosticEmbeddedRunOwner({ runId: "retained-owner", sessionId }),
+          isCurrent: () => payload.active,
+          onRetryWaitCompleted: () => {
+            payload.active = true;
+          },
+          trajectoryRecorder: null,
+          clearActiveRun: () => {
+            payload.active = false;
+          },
+        });
+        owner.recordSessionEnd({ payload });
+        return owner;
+      };
+      const active = createOwner();
+      const completed = [];
+      for (let index = 0; index < 20; index++) {
+        const owner = createOwner();
+        await owner[settle]();
+        completed.push(owner);
+      }
+      // Count after the last awaited cleanup frame leaves the current job.
+      await nextTurn();
+      expect(queryObjects(SessionPayload)).toBe(1);
+      await active[settle]();
+      await nextTurn();
+      expect(queryObjects(SessionPayload)).toBe(0);
+      for (const owner of completed) {
+        await owner[settle]();
+      }
+    },
+  );
 
   it.each([
     { label: "omitted", reason: undefined },
@@ -130,6 +176,27 @@ describe("deferred logical-turn lifecycle", () => {
     await manager.complete();
     expect(isEmbeddedAgentRunActive(sessionId)).toBe(false);
     expect(resolveReplyOperationAbortReason(undefined, manager.signal.reason)).toBe("user");
+  });
+
+  it("keeps the logical turn start time on the CLI owner", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000_000);
+      const manager = createDeferredEmbeddedRunLifecycleManager({
+        runId: "long-cli-run",
+        sessionId,
+        sessionKey,
+      });
+      // Embedded preparation and fallback can run long before the CLI takes over.
+      vi.setSystemTime(1_000_000 + 5 * 60_000);
+
+      manager.handoffToCli();
+
+      expect(resolveActiveEmbeddedRunOwner(sessionId)?.startedAtMs).toBe(1_000_000);
+      await manager.complete();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("records only the accepted candidate terminal trajectory", async () => {

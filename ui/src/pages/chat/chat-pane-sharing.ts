@@ -18,8 +18,8 @@ import {
   scopedSessionArtifactKey,
   uiSessionEventMatches,
 } from "../../lib/sessions/session-key.ts";
+import { ChatPaneReactions } from "./chat-pane-reactions.ts";
 import { CHAT_COMPOSER_TEXTAREA_SELECTOR } from "./chat-pane-shared.ts";
-import { ChatPaneSharingActions } from "./chat-pane-sharing-actions.ts";
 import { selectedChatSessionRow } from "./chat-state-route.ts";
 import {
   typingActorIdForSessionMessage,
@@ -35,7 +35,7 @@ const TYPING_DRAFT_IDLE_MS = 30_000;
 const TYPING_DRAFT_EXIT_MS = 300;
 const TYPING_PREVIEW_INTERVAL_MS = 250;
 
-export abstract class ChatPaneSharing extends ChatPaneSharingActions {
+export abstract class ChatPaneSharing extends ChatPaneReactions {
   // The existing actor/timer owner also owns this bounded presentation cache.
   // Every mutation below refreshes it; reconnect, route, and teardown clear it.
   private readonly typingActiveIds = new Set<string>();
@@ -344,18 +344,13 @@ export abstract class ChatPaneSharing extends ChatPaneSharingActions {
       if (!isCurrentTarget()) {
         return;
       }
-      if (result.suggestion.author.id === this.context.gateway.snapshot.selfUser?.id) {
-        this.sessionSuggestions = [
-          ...this.sessionSuggestions.filter((item) => item.id !== suggestion.id),
-          result.suggestion,
-        ].toSorted(
-          (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
-        );
-      } else {
-        this.sessionSuggestions = this.sessionSuggestions.filter(
-          (item) => item.id !== suggestion.id,
-        );
-      }
+      const remaining = this.sessionSuggestions.filter((item) => item.id !== suggestion.id);
+      this.sessionSuggestions =
+        result.suggestion.author.id === this.context.gateway.snapshot.selfUser?.id
+          ? [...remaining, result.suggestion].toSorted(
+              (left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id),
+            )
+          : remaining;
     } catch (error) {
       if (isCurrentTarget()) {
         if (

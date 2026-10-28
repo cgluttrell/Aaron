@@ -3,8 +3,8 @@ import { createRuntimeEnv } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { afterAll, describe, expect, it, vi, beforeEach } from "vitest";
 import type { ClawdbotConfig, RuntimeEnv } from "../runtime-api.js";
 import {
+  expectFeishuCardButtonRow,
   expectFirstSentCardUsesFillWidthOnly,
-  expectSentCardHasP2pAction,
 } from "./card-test-helpers.js";
 import { maybeHandleFeishuQuickActionMenu } from "./card-ux-launcher.js";
 
@@ -46,8 +46,14 @@ describe("feishu quick-action launcher", () => {
     expect(sendArgs?.cfg).toBe(cfg);
     expect(sendArgs?.to).toBe("user:u123");
     expect(sendArgs?.accountId).toBe("main");
-    expectSentCardHasP2pAction(sendCardFeishuMock);
     expectFirstSentCardUsesFillWidthOnly(sendCardFeishuMock);
+    const buttons = expectFeishuCardButtonRow(sendArgs?.card);
+    expect(buttons).toHaveLength(3);
+    expect(buttons.map((button) => button.value)).toEqual([
+      expect.objectContaining({ q: "/help", c: { u: "u123", e: 600_100, t: "p2p" } }),
+      expect.objectContaining({ m: expect.objectContaining({ command: "/new" }) }),
+      expect.objectContaining({ m: expect.objectContaining({ command: "/reset" }) }),
+    ]);
   });
 
   it("does not send launcher cards when expiry would exceed a valid Date", async () => {

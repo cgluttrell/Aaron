@@ -13,6 +13,23 @@ const PROBE_TIMEOUT_MS = 2_000;
 const NATIVE_PROBE_TIMEOUT_MS = 10_000;
 declare const SEALED_RUNTIME_BUILD: boolean;
 
+export function resolveServiceProcessMembershipBlock(
+  membership: ServiceProcessMembership,
+  ancestryComplete: boolean,
+  platform: NodeJS.Platform = process.platform,
+) {
+  if (membership === "inside") {
+    return "inside-gateway-service";
+  }
+  if (membership === "unknown") {
+    return "service-membership-unverified";
+  }
+  // Darwin containment proves an external terminal even when a root-owned login is unreadable.
+  return !ancestryComplete && (platform !== "darwin" || membership !== "outside")
+    ? "service-ancestry-unverified"
+    : undefined;
+}
+
 // Koffi segfaults some Darwin hosts (x86_64 under Rosetta), so the query runs in a joined
 // child: a crash only loses the observation. Coalition IDs are kernel facts; the job name
 // comes from launchd and may be unavailable.
@@ -273,6 +290,31 @@ function readSystemdMembership(
   return selected[0]
     ? { hierarchy: selected[0][0], path: selected[0][1].path }
     : { hierarchy: null, atRoot: [...memberships.values()].every((entry) => entry.path === "/") };
+}
+
+/** One process against an observed systemd cgroup, including a stopped service. */
+export function inspectSystemdProcessMembershipSync(
+  pid: number,
+  controlGroup: string,
+): "inside" | "outside" | "unknown" {
+  if (
+    !Number.isSafeInteger(pid) ||
+    pid <= 0 ||
+    !isCgroupPath(controlGroup) ||
+    controlGroup === "/"
+  ) {
+    return "unknown";
+  }
+  try {
+    const membership = readSystemdMembership(pid);
+    return !membership || membership.hierarchy === null
+      ? "unknown"
+      : isWithinControlGroup(membership.path, controlGroup)
+        ? "inside"
+        : "outside";
+  } catch {
+    return "unknown";
+  }
 }
 
 /** Native containment survives parent exit; environment markers never establish it. */

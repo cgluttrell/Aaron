@@ -12,7 +12,6 @@ import {
   buildNotifyMessageUpsert,
   getAuthDir,
   startInboxMonitor,
-  waitForInboundWorkDrained,
   waitForMessageCalls,
   type InboxOnMessage,
 } from "./monitor-inbox.test-harness.js";
@@ -53,7 +52,6 @@ describe("web monitor inbox reply context", () => {
 
     sock.ev.emit("messages.upsert", upsert);
     await waitForMessageCalls(onMessage, 1);
-    await waitForInboundWorkDrained();
 
     const inbound = inboundMessage(onMessage);
     expect(inbound.quote?.id).toBe("q1");
@@ -75,9 +73,13 @@ describe("web monitor inbox reply context", () => {
     const self = inbound.platform.self as { e164?: string; jid?: string };
     expect(self.jid).toBe("123@s.whatsapp.net");
     expect(self.e164).toBe("+123");
-    expect(sock.sendMessage).toHaveBeenCalledWith("999@s.whatsapp.net", {
-      text: "pong",
-    });
+    expect(sock.sendMessage).toHaveBeenCalledWith(
+      "999@s.whatsapp.net",
+      {
+        text: "pong",
+      },
+      expect.objectContaining({ messageId: expect.any(String) }),
+    );
 
     await listener.close();
   }
@@ -111,14 +113,18 @@ describe("web monitor inbox reply context", () => {
       quality: 50,
       withoutEnlargement: true,
     });
-    expect(sock.sendMessage).toHaveBeenCalledWith("999@s.whatsapp.net", {
-      image,
-      caption: "cap",
-      mimetype: "image/png",
-      width: 640,
-      height: 480,
-      jpegThumbnail: thumbnail.toString("base64"),
-    });
+    expect(sock.sendMessage).toHaveBeenCalledWith(
+      "999@s.whatsapp.net",
+      {
+        image,
+        caption: "cap",
+        mimetype: "image/png",
+        width: 640,
+        height: 480,
+        jpegThumbnail: thumbnail.toString("base64"),
+      },
+      expect.objectContaining({ messageId: expect.any(String) }),
+    );
 
     await listener.close();
   });

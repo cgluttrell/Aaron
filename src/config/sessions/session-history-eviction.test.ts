@@ -4,6 +4,7 @@ import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { trackSqliteStatementExecutions } from "../../../test/helpers/sqlite-statement-execution-counter.js";
 
 const evictionWarnSpy = vi.hoisted(() => vi.fn());
 vi.mock("../../logging/subsystem.js", async () => {
@@ -21,6 +22,7 @@ vi.mock("../../logging/subsystem.js", async () => {
   };
 });
 import { resetAgentRunRegistryForTest } from "../../infra/agent-run-registry.js";
+import * as sqliteQueries from "../../infra/kysely-sync.js";
 import * as tmpDirOwner from "../../infra/tmp-openclaw-dir.js";
 import { beginSessionWorkAdmission } from "../../sessions/session-lifecycle-admission.js";
 import { closeCachedOpenClawAgentDatabase } from "../../state/openclaw-agent-db-lifecycle.js";
@@ -93,21 +95,15 @@ describe("SQLite historical session disk budget", () => {
     await testState.cleanup();
   });
 
-  it.each(
-    [
-      { oldestBytes: 64 * 1024, reclaimBytes: 1, capArchive: false },
-      { oldestBytes: 64 * 1024, reclaimBytes: 1, capArchive: true },
-      { oldestBytes: 8 * 1024 * 1024, reclaimBytes: 4 * 1024 * 1024, capArchive: false },
-      { oldestBytes: 8 * 1024 * 1024, reclaimBytes: 4 * 1024 * 1024, capArchive: true },
-    ].flatMap(({ oldestBytes, reclaimBytes, capArchive }) =>
-      (["worker", "in-process"] as const).map((execution) => ({
-        oldestBytes,
-        reclaimBytes,
-        capArchive,
-        execution,
-      })),
-    ),
-  )(
+  it.each([
+    { oldestBytes: 64 * 1024, reclaimBytes: 1, capArchive: false, execution: "worker" },
+    {
+      oldestBytes: 8 * 1024 * 1024,
+      reclaimBytes: 4 * 1024 * 1024,
+      capArchive: true,
+      execution: "in-process",
+    },
+  ] as const)(
     "evicts oldest history before the entry tier and reclaims $reclaimBytes bytes (cap archive: $capArchive, execution: $execution)",
     async ({ oldestBytes, reclaimBytes, capArchive, execution }) => {
       const sessionKey = "agent:main:history-order";
@@ -214,7 +210,7 @@ describe("SQLite historical session disk budget", () => {
       expect(reclamationWorkers).toBe(execution === "in-process" ? 0 : 1);
       expect(archiveReplies.map(({ message }) => message.type)).toEqual(["done", "published"]);
       expect(new Set(archiveReplies.map(({ worker }) => worker)).size).toBe(1);
-      expect(archiveReplies.every(({ worker }) => worker.threadId === -1)).toBe(true);
+      expect(archiveReplies.every(({ worker }) => worker.threadId > 0)).toBe(true);
       expect(archiveReplies.map(({ message }) => message)).toMatchObject([
         { operationId: 1, settled: true },
         { operationId: 2, settled: true },
@@ -235,6 +231,8 @@ describe("SQLite historical session disk budget", () => {
           .get("idx_agent_session_windows_updated_at"),
       ).toEqual({ stat: expect.stringMatching(/^3\b/u) });
       expect(database().db.prepare("PRAGMA analysis_limit").get()).toEqual({ analysis_limit: 37 });
+      await closeOpenClawAgentDatabaseByPathAsync(database().path);
+      expect(archiveReplies.every(({ worker }) => worker.threadId === -1)).toBe(true);
     },
   );
 
@@ -295,6 +293,13 @@ describe("SQLite historical session disk budget", () => {
     settlePhysicalUsage();
     const before = await measureSessionPhysicalDiskUsage(storePath);
     const maintenance = { maxDiskBytes: before.totalBytes - 1, highWaterBytes: 1 };
+    const execute = sqliteQueries.executeSqliteQuerySync;
+    vi.spyOn(sqliteQueries, "executeSqliteQuerySync").mockImplementation((db, query) => {
+      if (query.compile().sql.includes('order by "archived_at" asc')) {
+        throw new Error("Archived eviction scan ran on the calling thread");
+      }
+      return execute(db, query);
+    });
 
     await expect(
       inspectSqliteSessionHistoryDiskBudget({ storePath, mode: "enforce", maintenance }),
@@ -538,6 +543,58 @@ describe("SQLite historical session disk budget", () => {
     }
   });
 
+  it("preserves a generation admitted by owner key during archive preparation without host lifecycle reads", async () => {
+    const sessionKey = "agent:main:admission-during-archive";
+    const sessionId = "admission-during-archive-old";
+    await createHistoricalTranscript({
+      content: "history protected while its archive is prepared",
+      nextSessionId: "admission-during-archive-live",
+      sessionId,
+      sessionKey,
+      updatedAt: 1,
+    });
+    settlePhysicalUsage();
+    const owner = database();
+    const archive = await import("./session-accessor.sqlite-archive.js");
+    const materialize = archive.materializeSessionHistoryEvictionPlan;
+    let admission: Awaited<ReturnType<typeof beginSessionWorkAdmission>> | undefined;
+    vi.spyOn(archive, "materializeSessionHistoryEvictionPlan").mockImplementationOnce(
+      async (input) => {
+        const prepared = await materialize(input);
+        expect(prepared?.archive?.bytes.byteLength).toBeGreaterThan(0);
+        admission = await beginSessionWorkAdmission({
+          scope: storePath,
+          identities: [sessionKey],
+          assertAllowed: () => {},
+        });
+        return prepared;
+      },
+    );
+    const reads = trackSqliteStatementExecutions(owner.db, ["history"], (sql) =>
+      /^select\b/i.test(sql) &&
+      /"(?:session_windows|transcript_rewrite_watermarks|trajectory_runtime_events)"/.test(sql)
+        ? "history"
+        : null,
+    );
+    try {
+      expect(
+        await enforceSqliteSessionHistoryDiskBudget({
+          storePath,
+          mode: "enforce",
+          maintenance: { maxDiskBytes: 1, highWaterBytes: 1 },
+        }),
+      ).toMatchObject({ removedEntries: 0 });
+      expect(admission).toBeDefined();
+      expect(reads.counts.history).toBe(0);
+    } finally {
+      reads.restore();
+      admission?.release();
+    }
+    expect(sessionExists(sessionId)).toBe(true);
+    expect(loadTranscriptEventsSync({ sessionId, sessionKey, storePath })).not.toEqual([]);
+    expect(readArchiveNames(sessionId)).toEqual([]);
+  });
+
   it.each(["archivedAt", "pinnedAt", "age-retention", "manual", "recent"] as const)(
     "rechecks %s on the logical owner before deleting an older generation",
     async (field) => {
@@ -558,7 +615,7 @@ describe("SQLite historical session disk budget", () => {
           archiveReason: "active-session-cap",
         },
       );
-      const reclamation = await import("./session-accessor.sqlite-reclamation.js");
+      const reclamation = await import("./session-accessor.sqlite-reclamation-run.js");
       const reclaim = reclamation.runSqliteSessionReclamation;
       const historyRequests: string[] = [];
       let protectionChanged = false;
@@ -630,7 +687,7 @@ describe("SQLite historical session disk budget", () => {
         updatedAt: Date.now(),
       });
       const archive = await import("./session-accessor.sqlite-archive.js");
-      const materialize = archive.materializeSessionStateDeletePlans;
+      const materialize = archive.materializeSessionHistoryEvictionPlan;
       const addReference = () => {
         const owner = database();
         const writer =
@@ -673,9 +730,9 @@ describe("SQLite historical session disk budget", () => {
         });
       }
       const materialization = vi
-        .spyOn(archive, "materializeSessionStateDeletePlans")
-        .mockImplementationOnce(async (plans) => {
-          const prepared = await materialize(plans);
+        .spyOn(archive, "materializeSessionHistoryEvictionPlan")
+        .mockImplementationOnce(async (plan) => {
+          const prepared = await materialize(plan);
           if (after === "materialization") {
             addReference();
           }

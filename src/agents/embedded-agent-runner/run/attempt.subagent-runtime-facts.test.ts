@@ -2,6 +2,10 @@ import path from "node:path";
 import { Type } from "typebox";
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../../../test/helpers/temp-dir.js";
+import {
+  clearRuntimeConfigSnapshot,
+  setRuntimeConfigSnapshot,
+} from "../../../config/runtime-snapshot.js";
 import { resolvePhysicalSessionStorePath } from "../../../config/sessions/session-store-path.js";
 import { OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE } from "../../internal-runtime-context.js";
 import type { SubagentRunRecord } from "../../subagents/registry/subagent-registry.types.js";
@@ -22,6 +26,8 @@ let registry: typeof import("../../subagents/registry/subagent-registry.test-hel
 
 async function captureAttempt(codeModeOverride: boolean, sessionStore: string) {
   resetEmbeddedAttemptHarness();
+  const config = { session: { store: sessionStore } };
+  setRuntimeConfigSnapshot(config);
   getHoisted().createOpenClawCodingToolsMock.mockReturnValue([
     {
       name: "sessions_spawn",
@@ -37,7 +43,7 @@ async function captureAttempt(codeModeOverride: boolean, sessionStore: string) {
     sessionKey,
     tempPaths,
     attemptOverrides: {
-      config: { session: { store: sessionStore } },
+      config,
       sessionTarget: {
         agentId: "main",
         sessionId: "embedded-session",
@@ -80,10 +86,11 @@ describe("subagent facts through full attempt history preparation", () => {
     await preloadRunEmbeddedAttemptForTests();
     registry = await import("../../subagents/registry/subagent-registry.test-helpers.js");
   });
-  beforeEach(() => registry.resetSubagentRegistryForTests());
+  beforeEach(() => registry.resetSubagentRegistryForTests({ persist: false }));
   afterEach(async () => {
-    registry.resetSubagentRegistryForTests();
+    await registry.resetSubagentRegistryForTests({ persist: false });
     await cleanupTempPaths(tempPaths);
+    clearRuntimeConfigSnapshot();
   });
 
   it("preserves the complete system prompt across child state in code mode", async () => {
@@ -107,14 +114,14 @@ describe("subagent facts through full attempt history preparation", () => {
       createdAt: Date.now(),
       execution: { status: "queued" },
     } satisfies SubagentRunRecord;
-    registry.addSubagentRunForTests(run);
+    registry.seedSubagentRunForReadTest(run);
     const queued = await captureAttempt(codeModeOverride, sessionStore);
-    registry.addSubagentRunForTests({
+    registry.seedSubagentRunForReadTest({
       ...run,
       execution: { status: "running", startedAt: Date.now() },
     });
     const running = await captureAttempt(codeModeOverride, sessionStore);
-    registry.resetSubagentRegistryForTests();
+    await registry.resetSubagentRegistryForTests({ persist: false });
     const empty = await captureAttempt(codeModeOverride, sessionStore);
 
     expect(queued.systemPrompt).toContain("system prompt");
@@ -123,6 +130,8 @@ describe("subagent facts through full attempt history preparation", () => {
     expect(queued.systemPrompt).not.toContain("run-worker");
     expectSubagentCarrier(queued.messages, "status=queued");
     expectSubagentCarrier(running.messages, "status=running");
-    expectSubagentCarrier(empty.messages, "## Active Subagents\nnone");
+    expect(empty.messages).not.toContainEqual(
+      expect.objectContaining({ customType: OPENCLAW_RUNTIME_CONTEXT_CUSTOM_TYPE }),
+    );
   });
 });

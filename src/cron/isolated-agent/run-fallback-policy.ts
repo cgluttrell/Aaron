@@ -4,7 +4,6 @@ import type { ModelCandidate } from "../../agents/model-fallback.types.js";
 import { resolveAgentModelFallbackValues } from "../../config/model-input.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createLazyImportLoader } from "../../shared/lazy-promise.js";
-import { SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX } from "../system-owned-declaration.js";
 import type { CronJob } from "../types.js";
 import {
   resolveEffectiveModelFallbacks,
@@ -16,11 +15,6 @@ const cronModelPreflightRuntimeLoader = createLazyImportLoader(
   () => import("./model-preflight.runtime.js"),
 );
 
-/** The system review pins model and runtime; fallback serves only rate limits. */
-export function isSkillCollectionReviewCronJob(job: Pick<CronJob, "declarationKey">): boolean {
-  return job.declarationKey?.startsWith(SKILL_COLLECTION_REVIEW_DECLARATION_PREFIX) === true;
-}
-
 /** Resolves cron model fallbacks, giving explicit payload fallbacks precedence over subagent/default policy. */
 export function resolveCronFallbacksOverride(params: {
   cfg: OpenClawConfig;
@@ -29,12 +23,6 @@ export function resolveCronFallbacksOverride(params: {
   useSubagentFallbacks?: boolean;
   inheritDefaultFallbacksForAgentStringModel?: boolean;
 }): string[] | undefined {
-  // The system review previously pinned an empty chain here; a rate-limited
-  // primary then slept out provider retry floors until the cron timeout or the
-  // stuck-session watchdog killed the run and no fallback ever served it
-  // (T3723/T3726). Review jobs now resolve the normal chain; the executor
-  // restricts their fallback to rate_limit-class failures and keeps the
-  // Workshop-root OpenClaw runtime pin for every candidate.
   const payload = params.job.payload.kind === "agentTurn" ? params.job.payload : undefined;
   const payloadFallbacks = Array.isArray(payload?.fallbacks) ? payload.fallbacks : undefined;
   const hasCronPayloadModelOverride =
@@ -103,11 +91,6 @@ export async function resolveCronPreflight(
     });
     if (candidatePreflight.status === "unavailable") {
       firstUnavailableReason ??= candidatePreflight.reason;
-      // The review job never preflight-switches its pinned primary; its chain
-      // only serves live rate-limit failover during execution.
-      if (isSkillCollectionReviewCronJob(params.job)) {
-        break;
-      }
       continue;
     }
     const modelFallbacksOverride =

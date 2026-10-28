@@ -100,6 +100,7 @@ it.skipIf(!isLiveTestEnabled() || process.platform === "win32")(
             defaults: {
               workspace: instance.state.workspaceDir,
               model: { primary: MODEL_REF },
+              modelPolicy: { allow: [MODEL_REF] },
               models: { [MODEL_REF]: { agentRuntime: { id: "openclaw" } } },
               thinkingDefault: "low",
               heartbeat: { every: "0m" },
@@ -107,7 +108,7 @@ it.skipIf(!isLiveTestEnabled() || process.platform === "win32")(
               skills: [],
               timeoutSeconds: 240,
             },
-            entries: { main: { default: true } },
+            entries: { main: {} },
           },
           tools: {
             allow: ["exec", "process", "dashboard", "show_widget"],
@@ -127,13 +128,17 @@ it.skipIf(!isLiveTestEnabled() || process.platform === "win32")(
         const deviceIdentity = loadOrCreateDeviceIdentity({
           path: instance.state.path("proof-device.sqlite"),
         });
+        // A TEST observer must not replace the original Control UI token's issuer binding.
+        const observerDeviceIdentity = loadOrCreateDeviceIdentity({
+          path: instance.state.path("proof-observer-device.sqlite"),
+        });
         const connect = (controlUi: boolean) =>
           acquireGatewayTestClient(
             {
               url: instance.url,
               origin: controlUi ? `http://127.0.0.1:${instance.port}` : undefined,
               token: instance.gatewayToken,
-              deviceIdentity,
+              deviceIdentity: controlUi ? deviceIdentity : observerDeviceIdentity,
               clientName: controlUi ? GATEWAY_CLIENT_IDS.CONTROL_UI : GATEWAY_CLIENT_IDS.TEST,
               clientBuildId: controlUi ? buildId : undefined,
               mode: controlUi ? "webchat" : "test",

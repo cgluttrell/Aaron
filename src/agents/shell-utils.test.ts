@@ -602,4 +602,49 @@ describe("getShellConfig on Windows", () => {
 
     expect(getShellConfig().shell).toBe(ps51Path);
   });
+
+  function mockInaccessibleAlias(alias: string) {
+    // Windows AppExecLinks pass access(X_OK), but stat fails with EACCES and
+    // activating the alias from S4U can fail while its app runs in another session.
+    fs.accessSync(alias, fs.constants.X_OK);
+    const statSync = fs.statSync;
+    vi.spyOn(fs, "statSync").mockImplementation(((candidate, options) => {
+      if (String(candidate) === alias) {
+        throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      }
+      return statSync(candidate, options);
+    }) as typeof fs.statSync);
+  }
+
+  it.each([
+    { name: "native PATH executable after an inaccessible app-execution alias", native: true },
+    { name: "PowerShell 5.1 instead of an inaccessible app-execution alias", native: false },
+  ])("selects $name", ({ native }) => {
+    const programFiles = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-pfiles-"));
+    const aliasDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-alias-"));
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-bin-"));
+    const sysRoot = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-sysroot-"));
+    tempDirs.push(programFiles, aliasDir, binDir, sysRoot);
+    const aliasPath = path.join(aliasDir, "pwsh.exe");
+    const pwshPath = path.join(binDir, "pwsh.exe");
+    const ps51Dir = path.join(sysRoot, "System32", "WindowsPowerShell", "v1.0");
+    const ps51Path = path.join(ps51Dir, "powershell.exe");
+    fs.mkdirSync(ps51Dir, { recursive: true });
+    fs.writeFileSync(ps51Path, "");
+    fs.writeFileSync(aliasPath, "");
+    fs.chmodSync(aliasPath, 0o755);
+    if (native) {
+      fs.writeFileSync(pwshPath, "");
+      fs.chmodSync(pwshPath, 0o755);
+    }
+    mockInaccessibleAlias(aliasPath);
+
+    process.env.ProgramFiles = programFiles;
+    process.env.SystemRoot = sysRoot;
+    process.env.PATH = [aliasDir, binDir].join(path.delimiter);
+    delete process.env.ProgramW6432;
+    delete process.env.WINDIR;
+
+    expect(getShellConfig().shell).toBe(native ? pwshPath : ps51Path);
+  });
 });

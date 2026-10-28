@@ -5,11 +5,13 @@ import {
   truncateSanitizedExternalContent,
   wrapExternalContent,
 } from "../security/external-content.js";
-import {
-  consumeToolExecutionNotStarted,
-  markToolExecutionNotStarted,
-} from "./tool-effect-receipt.js";
+import { attachInternalToolResultContentSource } from "./runtime/internal-hooks.js";
 import { isTrustedToolInputError } from "./tool-input-error.js";
+
+export {
+  consumeToolExecutionNotStarted as consumeTrustedToolNoStartError,
+  markToolExecutionNotStarted as registerTrustedToolNoStartError,
+} from "./tool-effect-receipt.js";
 
 const TOOL_TIMEOUT_ERROR_CODES = new Set([
   "ERR_TIMEOUT",
@@ -149,16 +151,6 @@ export function isTrustedToolExecutionPreflightError(error: unknown): boolean {
   return isTrustedSecretSurfaceUnavailableError(error) || isTrustedToolInputError(error);
 }
 
-/** Record host-owned proof that the protected operation never started, even if hooks ran. */
-export function registerTrustedToolNoStartError<T>(error: T): T {
-  return markToolExecutionNotStarted(error);
-}
-
-/** Consume one private no-start fact at the next authoritative lifecycle boundary. */
-export function consumeTrustedToolNoStartError(error: unknown): boolean {
-  return consumeToolExecutionNotStarted(error);
-}
-
 /** Format a redacted tool error without allowing hostile getters to escape observability. */
 export function formatToolExecutionErrorMessage(error: unknown, fallback: string): string {
   try {
@@ -213,6 +205,8 @@ export function protectNetworkToolExecutionError(
     // Hostile reflection must never replace the already-protected network error.
   }
   protectedNetworkToolErrors.add(protectedError);
+  // Dispatchers rethrow this error under their own tool; keep its network origin for turn taint.
+  attachInternalToolResultContentSource(protectedError, "network");
   if (timedOut) {
     protectedNetworkToolTimeoutErrors.add(protectedError);
   }

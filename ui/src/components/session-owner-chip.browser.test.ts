@@ -84,13 +84,16 @@ async function applyTheme(theme: ThemeName, mode: "light" | "dark") {
   document.documentElement.dataset.themeMode = mode;
   const typefaces = resolveTypefaces(theme);
   syncTypefaceStylesheets(typefaces);
-  await expect
-    .poll(
-      () =>
-        document.querySelector<HTMLLinkElement>(`#openclaw-typeface-${typefaces.ui}`)?.sheet !=
-        null,
-    )
-    .toBe(true);
+  const stylesheet = document.querySelector<HTMLLinkElement>(`#openclaw-typeface-${typefaces.ui}`)!;
+  if (!stylesheet.sheet) {
+    await new Promise<void>((resolve, reject) => {
+      stylesheet.addEventListener("load", () => resolve(), { once: true });
+      stylesheet.addEventListener("error", () => reject(new Error("Typeface stylesheet failed")), {
+        once: true,
+      });
+    });
+  }
+  expect(stylesheet.sheet).not.toBeNull();
   await document.fonts.load(`700 9px ${TYPEFACES[typefaces.ui].stack}`, "AB+241");
 }
 
@@ -194,16 +197,6 @@ describe.skipIf(!hasBrowserLayout)("session owner stack layout", () => {
           ),
         ),
       ),
-    ).filter(
-      // Release-only omission: this case timed out in font fixture setup before testing layout.
-      ({ theme, mode, ownerCount, presence, pinned }) =>
-        !(
-          theme === "beacon" &&
-          mode === "light" &&
-          ownerCount === 12 &&
-          presence === "present" &&
-          !pinned
-        ),
     ),
   )(
     "keeps $ownerCount owners in an equal pair in $theme $mode while $presence (pinned=$pinned)",

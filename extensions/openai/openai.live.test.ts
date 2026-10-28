@@ -230,8 +230,7 @@ describeLive("openai plugin live", () => {
     expect(response.output_text.trim()).toMatch(/^OK[.!]?$/);
   }, 30_000);
 
-  // Release-only omission: live synthesis timed out while sibling synthesis paths passed.
-  it.skip("lists voices and synthesizes audio through the registered speech provider", async () => {
+  it("lists voices and synthesizes audio through the registered speech provider", async () => {
     const { speechProviders } = await registerOpenAIPlugin();
     const speechProvider = requireRegisteredProvider(speechProviders, "openai");
 

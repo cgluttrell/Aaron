@@ -124,7 +124,7 @@ async function createFixture() {
   const workspace = path.join(root, "workspace");
   await fs.mkdir(workspace, { recursive: true });
   const cfg = {
-    agents: { list: [{ id: "main", default: true, workspace }] },
+    agents: { entries: { main: { workspace } } },
   } as OpenClawConfig;
   return {
     root,
@@ -178,6 +178,32 @@ describe("TOOLS.md migration", () => {
       expect.stringContaining("will be archived and merged into AGENTS.md when customized"),
       "TOOLS.md migration preview",
     );
+  });
+
+  it("refuses to migrate a TOOLS.md whose bytes are not valid UTF-8", async () => {
+    const fixture = await createFixture();
+    const agents = "# Agent\n\n## Tools\n\nExisting notes.\n";
+    const toolsBytes = Buffer.concat([
+      Buffer.from("### Cameras\n\n- kitchen → wide "),
+      Buffer.from([0xff, 0xfe]),
+      Buffer.from(" angle\n"),
+    ]);
+    await fs.writeFile(fixture.agentsPath, agents);
+    await fs.writeFile(fixture.toolsPath, toolsBytes);
+
+    const result = await maybeMigrateToolsMd({
+      cfg: fixture.cfg,
+      shouldRepair: true,
+      env: fixture.env,
+    });
+
+    // Replacement decoding would have been merged into AGENTS.md and re-encoded into the
+    // archive before the source unlink, so the migration must refuse before any write.
+    expect(result.changes).toEqual([]);
+    expect(result.warnings).toEqual([expect.stringContaining("is not valid UTF-8")]);
+    expect(await fs.readFile(fixture.toolsPath)).toEqual(toolsBytes);
+    expect(await fs.readFile(fixture.agentsPath, "utf8")).toBe(agents);
+    await expectMissing(path.join(fixture.stateDir, "backups", "tools-md-migration"));
   });
 
   it("preserves customized content and ownership under restrictive umask and is idempotent", async () => {
@@ -323,7 +349,7 @@ describe("TOOLS.md migration", () => {
           gid: original.gid,
           mode: original.mode,
         });
-        await expect(fs.readdir(fixture.workspace)).resolves.toEqual(["AGENTS.md", "TOOLS.md"]);
+        expect((await fs.readdir(fixture.workspace)).toSorted()).toEqual(["AGENTS.md", "TOOLS.md"]);
       } finally {
         openSpy.mockRestore();
       }
@@ -393,7 +419,7 @@ describe("TOOLS.md migration", () => {
           gid: original.gid,
           mode: original.mode,
         });
-        await expect(fs.readdir(fixture.workspace)).resolves.toEqual(["AGENTS.md", "TOOLS.md"]);
+        expect((await fs.readdir(fixture.workspace)).toSorted()).toEqual(["AGENTS.md", "TOOLS.md"]);
       } finally {
         openSpy.mockRestore();
       }
@@ -405,10 +431,10 @@ describe("TOOLS.md migration", () => {
     const agents = `# Agent\n\n## Tools\n\n${"a".repeat(15_000)}\n`;
     const tools = `${"b".repeat(15_000)}\n`;
     const merged = `${agents}\n### Local notes (migrated from TOOLS.md)\n\n${tools}`;
-    fixture.cfg.agents!.list = [
-      { id: "main", default: true, workspace: fixture.workspace, bootstrapMaxChars: 40_000 },
-      { id: "limited", workspace: fixture.workspace, bootstrapMaxChars: 20_000 },
-    ];
+    fixture.cfg.agents!.entries = {
+      main: { workspace: fixture.workspace, bootstrapMaxChars: 40_000 },
+      limited: { workspace: fixture.workspace, bootstrapMaxChars: 20_000 },
+    };
     await fs.writeFile(fixture.agentsPath, agents);
     await fs.writeFile(fixture.toolsPath, tools);
 

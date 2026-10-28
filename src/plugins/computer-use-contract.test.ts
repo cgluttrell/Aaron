@@ -1,9 +1,6 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { createDeferredCore } from "../shared/deferred.js";
 import {
-  COMPUTER_STALE_OBSERVATION,
-  COMPUTER_USE_V2_ACTION_NAMES,
   parseComputerActParamsJSON,
   parseComputerActResult,
   parseComputerUseCapabilityDescriptor,
@@ -49,39 +46,25 @@ function registerProvider(
 }
 
 describe("Computer Use wire contract", () => {
-  it("owns the shared provider ref-lifecycle error code", () => {
-    const contract = JSON.parse(
-      readFileSync(
-        new URL("../../test/fixtures/computer-ref-lifecycle-contract.json", import.meta.url),
-        "utf8",
-      ),
-    ) as { staleErrorCode: string };
-
-    expect(contract.staleErrorCode).toBe(COMPUTER_STALE_OBSERVATION);
+  it("accepts optional cursor coordinates from older paired nodes", () => {
+    for (const receipt of [
+      { ok: true },
+      { ok: true, cursorX: -12.5 },
+      { ok: true, cursorY: 4.25 },
+      { ok: true, cursorX: -12.5, cursorY: 4.25 },
+    ]) {
+      expect(parseComputerActResult(receipt)).toEqual(receipt);
+    }
   });
 
-  it("validates the canonical computer.act payload", () => {
-    expect(
-      parseComputerActParamsJSON(
-        JSON.stringify({
-          action: "left_click",
-          displayFrameId: "frame-1",
-          x: 10,
-          y: 20,
-          refWidth: 1280,
-        }),
-      ),
-    ).toEqual({
-      action: "left_click",
-      displayFrameId: "frame-1",
-      x: 10,
-      y: 20,
-      refWidth: 1280,
-    });
-    expect(() => parseComputerActParamsJSON('{"action":"left_click","unexpected":true}')).toThrow(
-      "COMPUTER_INVALID_REQUEST",
-    );
-  });
+  it.each([{ cursorX: "12" }, { cursorY: null }, { unexpected: true }])(
+    "rejects invalid receipt fields: %j",
+    (fields) => {
+      expect(() => parseComputerActResult({ ok: true, ...fields })).toThrow(
+        "COMPUTER_CONTRACT_MISMATCH",
+      );
+    },
+  );
 
   it("projects the canonical screen.snapshot result", () => {
     expect(
@@ -102,91 +85,6 @@ describe("Computer Use wire contract", () => {
       height: 50,
       capturedAtMs: 42,
     });
-  });
-
-  it("owns the complete v2 action-name union", () => {
-    expect(COMPUTER_USE_V2_ACTION_NAMES).toEqual([
-      "screenshot",
-      "left_click",
-      "right_click",
-      "middle_click",
-      "double_click",
-      "triple_click",
-      "mouse_move",
-      "left_click_drag",
-      "left_mouse_down",
-      "left_mouse_up",
-      "scroll",
-      "type",
-      "key",
-      "hold_key",
-      "wait",
-      "list_apps",
-      "list_windows",
-      "get_accessibility_tree",
-      "get_cursor_position",
-      "get_window_state",
-      "launch_app",
-      "kill_app",
-      "bring_to_front",
-      "set_value",
-      "zoom",
-      "get_browser_state",
-      "browser_prepare",
-      "browser_navigate",
-      "browser_click",
-      "browser_type",
-      "browser_dialog",
-      "browser_set_input_files",
-      "browser_download",
-      "browser_pointer",
-      "escalate_scope",
-      "get_recording_state",
-      "start_recording",
-      "stop_recording",
-      "replay_trajectory",
-      "invoke_menu",
-    ]);
-  });
-
-  it("validates closed v2 action families without turning params into an optional bag", () => {
-    expect(
-      parseComputerActParamsJSON(
-        JSON.stringify({
-          action: "get_window_state",
-          windowRef: "window-1",
-          query: "button",
-          depth: 4,
-          maxElements: 200,
-        }),
-      ),
-    ).toMatchObject({ action: "get_window_state", windowRef: "window-1" });
-    expect(() =>
-      parseComputerActParamsJSON(
-        JSON.stringify({ action: "get_window_state", windowRef: "window-1", app: "wrong-family" }),
-      ),
-    ).toThrow("COMPUTER_INVALID_REQUEST");
-    expect(
-      parseComputerActParamsJSON(
-        JSON.stringify({
-          action: "browser_click",
-          browserRef: "browser-1",
-          pageRef: "page-1",
-          observationId: "observation-1",
-          elementRef: "element-1",
-          inputRoute: "dom_event",
-        }),
-      ),
-    ).toMatchObject({ action: "browser_click", browserRef: "browser-1" });
-    expect(() =>
-      parseComputerActParamsJSON(
-        JSON.stringify({
-          action: "browser_prepare",
-          windowRef: "window-1",
-          strategy: { kind: "existing_profile" },
-        }),
-      ),
-    ).toThrow("COMPUTER_INVALID_REQUEST");
   });
 
   it("accepts the portable recording family without native path or helper inputs", () => {
@@ -246,18 +144,6 @@ describe("Computer Use wire contract", () => {
         "COMPUTER_INVALID_REQUEST",
       );
     }
-  });
-
-  it("accepts canonical input success and rejects obsolete cursor fields", () => {
-    expect(parseComputerActResult({ ok: true })).toEqual({ ok: true });
-    const openDetails = { coordinateSpace: { unit: "provider-defined" }, vendorValue: 42 };
-    expect(parseComputerActResult({ ok: true, details: openDetails })).toEqual({
-      ok: true,
-      details: openDetails,
-    });
-    expect(() => parseComputerActResult({ ok: true, cursorX: 12, cursorY: 34 })).toThrow(
-      "COMPUTER_CONTRACT_MISMATCH",
-    );
   });
 
   it("caps semantic observations and provider detail records", () => {

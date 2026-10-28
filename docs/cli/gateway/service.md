@@ -20,9 +20,28 @@ openclaw gateway restart
 openclaw gateway uninstall
 ```
 
-`gateway stop` remains available when plugin configuration needs Doctor migration.
-It still validates core configuration and refuses configuration written by a newer
-OpenClaw binary. Start and restart continue to validate plugin configuration.
+`gateway stop`, `gateway uninstall`, and `gateway restart` remain available when
+configuration is invalid or needs Doctor migration, including configuration written
+by a newer OpenClaw version. They control the recorded service and report config
+problems as warnings with `openclaw doctor --fix` guidance. Stop and uninstall do
+not rewrite configuration. Restart preserves the installed service definition when
+config needs repair; its health check still reports whether the Gateway came back.
+`gateway start` continues to validate configuration before starting the Gateway.
+
+If a Gateway holds state ownership for more than five minutes without recording
+that its listener bound, `openclaw gateway stop` can recover the stalled startup,
+including one frozen before publishing its owner identity. Recovery verifies the
+recorded PID and process start time before termination, then confirms process exit
+and state ownership release. A fresh worker heartbeat does not extend this startup
+budget. Ownership contention names the stalled PID, startup age, and stop command;
+you do not need to delete lock files manually.
+
+`gateway status` reports service process state separately from Gateway readiness.
+When its connection check fails, inspect the service logs even if the process is
+running. Recent log errors are matching evidence from the bounded log tail, may
+belong to an earlier run, and do not establish the current process's startup phase.
+Routine startup and shutdown messages are not reported as errors. Doctor and
+onboarding use the same error selection.
 
 On Windows, Scheduled Task stop and restart first ask the verified Gateway to drain
 and exit. Older or unresponsive Gateways fall back to termination of the captured
@@ -30,16 +49,53 @@ process tree; a replacement instance is preserved. Transient SQLite sharing erro
 after confirmed process exit are retried; if inspection remains unavailable, the
 command warns and checks that the Gateway port is free before continuing with restart.
 
+Port confirmation shares the five-second settlement budget across the configured
+addresses, allowing slow Windows LAN connection refusals to confirm shutdown. If
+confirmation times out, the command reports an inconclusive result rather than a
+busy listener. Run `openclaw gateway status --deep` before retrying maintenance;
+a timeout does not prove that the port is free.
+
 If task settlement inspection remains unavailable
 within the stop budget, restart still attempts the captured task after confirming
 the Gateway exited, then reports that restart is unverified. An observed replacement
 is preserved and the restart is refused.
+
+`gateway start` checks readiness even when the service process is already running.
+It reports `already-running` only after the selected Gateway passes the health and
+readiness checks; it does not restart a process that is still warming up.
 
 If `gateway start` reaches its readiness deadline while the managed Gateway is
 still starting, it reports `still-starting` and exits with code `2`. The service
 keeps running; check `openclaw gateway status --deep` again before restarting it.
 A crashed service or a foreign listener still produces a failure. Port ownership
 alone does not prove readiness or rule out warm-up.
+
+### Linux maintenance holds
+
+On Linux, `openclaw gateway stop` asks systemd to stop the unit. An explicit stop
+suppresses its `Restart=always` policy until the unit is started again; it does
+not disable startup at the next login or boot. `gateway stop --disable` is
+macOS-only. For non-interactive maintenance, use `openclaw gateway stop --force`.
+
+A systemd mask also refuses explicit starts. Keep masks under operator control:
+OpenClaw does not remove them automatically. If you masked the default user
+service for maintenance, remove the hold before updating:
+
+```bash
+systemctl --user unmask openclaw-gateway.service
+openclaw update
+```
+
+Use the unit and scope shown by `openclaw gateway status --deep` for a custom profile or system
+service. Unmask **before** running `openclaw update`: preflight refuses a masked
+managed unit before replacing files or running migrations. Doctor and status
+report the mask with the unmask command; Doctor does not remove the hold or offer
+to reinstall the masked unit.
+
+If a unit becomes masked during an update, the updater keeps the activated
+candidate and reports a service-definition warning. Remove the mask, run
+`openclaw gateway start`, and check `openclaw gateway status --deep`; the refused
+start does not prove the candidate unhealthy or the Gateway ready.
 
 ### Recover an unreadable native service definition
 

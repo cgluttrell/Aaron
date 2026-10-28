@@ -6,8 +6,8 @@ import type {
   SkillsLibraryListResult,
 } from "../../../packages/gateway-protocol/src/schema/skill-library.js";
 import type { AdmittedRunContext } from "../../agents/admitted-run-context.js";
+import { SkillLibraryError } from "../skill-library-error.js";
 import { validateSkillLibraryPath } from "./bundle.js";
-import { SkillLibraryError } from "./errors.js";
 
 /** Model edits are named changes; unread binary resources retain their exact bytes and modes. */
 export function mergeSkillLibrarySupportFiles(
@@ -67,7 +67,8 @@ export type SkillLibraryAuthoringCapability = {
   target: "personal";
   defaultTarget: "workspace" | "personal";
   multipleProfiles: boolean;
-  assertWorkspaceCurrent?: () => void;
+  /** Gate for Workshop calls through the workspace-default wrapper, given the run's sandbox state. */
+  assertWorkspaceCurrent?: (run?: { sandboxed?: boolean }) => void;
   bind: (context: AdmittedRunContext) => void;
   invoke: (
     params: SkillLibraryAuthoringInput,
@@ -78,3 +79,22 @@ export type SkillLibraryAuthoringCapability = {
     | SkillsLibraryListResult
   >;
 };
+
+/** An update replaces SKILL.md, so patch instructions are not a valid replacement body. */
+export function assertUpdateContainsFullSkillBody(content: string): void {
+  const normalized = content.replace(/\r\n/g, "\n");
+  const firstHeading =
+    normalized
+      .match(/^#\s+(.+)$/m)?.[1]
+      ?.trim()
+      .toLowerCase() ?? "";
+  const hasPatchInstructionHeadings =
+    /^##\s+Proposed Changes\s*$/im.test(normalized) && /^##\s+Evidence Plan\s*$/im.test(normalized);
+  const hasScopeGuard = /^##\s+Scope Guard\s*$/im.test(normalized);
+  if (firstHeading.endsWith("update proposal") || (hasPatchInstructionHeadings && hasScopeGuard)) {
+    throw new SkillLibraryError(
+      "INVALID_BUNDLE",
+      "Update content appears to contain patch instructions instead of a full replacement SKILL.md body.",
+    );
+  }
+}

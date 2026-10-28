@@ -1,18 +1,12 @@
-import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
-import { type AddressInfo, createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import path from "node:path";
-import type { Readable } from "node:stream";
-import { setTimeout as delay } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
 import { asNullableRecord } from "@openclaw/normalization-core/record-coerce";
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runQaGatewayFixture } from "../../../test/helpers/qa-gateway-cleanup.ts";
-import { stopChildProcess } from "../../../test/helpers/stop-child-process.ts";
 import type { ApplicationRuntime } from "../app/bootstrap.ts";
-import type { SkillWorkshopDiffResponse } from "../lib/skill-workshop/diff.ts";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import {
   canRunPlaywrightChromium,
@@ -20,92 +14,18 @@ import {
   resolvePlaywrightChromiumExecutablePath,
   type ControlUiMockGateway,
 } from "../test-helpers/control-ui-e2e.ts";
+import {
+  startFixtureServer,
+  stopFixtureServer,
+  type FixtureServer,
+} from "./board-fixture-server.test-support.ts";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const chromiumExecutablePath = resolvePlaywrightChromiumExecutablePath(chromium.executablePath());
 const chromiumAvailable = canRunPlaywrightChromium(chromiumExecutablePath);
 const allowMissingChromium = process.env.OPENCLAW_UI_E2E_ALLOW_MISSING_CHROMIUM === "1";
+const captureUiProof = process.env.OPENCLAW_CAPTURE_UI_PROOF === "1";
 const describeStandaloneMockServer =
   chromiumAvailable || !allowMissingChromium ? describe : describe.skip;
-
-type FixtureProcess = ChildProcessByStdio<null, Readable, Readable>;
-
-type FixtureServer = {
-  child: FixtureProcess;
-  url: string;
-  output: () => string;
-};
-
-async function reservePort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", () => {
-      server.off("error", reject);
-      resolve();
-    });
-  });
-  const port = (server.address() as AddressInfo).port;
-  await new Promise<void>((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-  });
-  return port;
-}
-
-async function startFixtureServer(fixture?: "attachments" | "workboard"): Promise<FixtureServer> {
-  const port = await reservePort();
-  const url = `http://127.0.0.1:${port}/__fixtures/board/`;
-  const child = spawn(
-    process.execPath,
-    [
-      "--import",
-      "./scripts/tsx.mjs",
-      "scripts/control-ui-mock-dev.ts",
-      "--host",
-      "127.0.0.1",
-      "--port",
-      String(port),
-      ...(fixture ? ["--fixture", fixture] : []),
-    ],
-    {
-      cwd: repoRoot,
-      env: { ...process.env, CI: "1" },
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  let output = "";
-  child.stdout.setEncoding("utf8");
-  child.stderr.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    output += chunk;
-  });
-  child.stderr.on("data", (chunk: string) => {
-    output += chunk;
-  });
-  const mockServer = { child, url, output: () => output };
-
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      throw new Error(`Control UI mock server exited before startup\n${output}`);
-    }
-    try {
-      const response = await fetch(url);
-      if (response.ok) {
-        return mockServer;
-      }
-    } catch {}
-    await delay(100);
-  }
-
-  await stopFixtureServer(mockServer);
-  throw new Error(`timed out waiting for Control UI mock server\n${output}`);
-}
-
-async function stopFixtureServer(server: FixtureServer | undefined): Promise<void> {
-  if (server) {
-    await stopChildProcess(server.child, 5_000);
-  }
-}
 
 function colorChannelToLinear(channel: number): number {
   const value = channel / 255;
@@ -398,7 +318,7 @@ describeStandaloneMockServer("standalone Control UI mock server", () => {
     const context = await browser.newContext({
       serviceWorkers: "block",
       viewport: { width: 1440, height: 1000 },
-      recordVideo: { dir: artifacts },
+      recordVideo: captureUiProof ? { dir: artifacts } : undefined,
     });
     await runQaGatewayFixture(
       async () => {
@@ -484,31 +404,31 @@ describeStandaloneMockServer("standalone Control UI mock server", () => {
           });
         });
         await page.goto(fixtureServer.url, { waitUntil: "networkidle" });
-        const localDiff = await page.evaluate(async () => {
+        const localWorkerOutput = await page.evaluate(async () => {
+          const canvas = new OffscreenCanvas(1, 1);
+          canvas.getContext("2d")?.fillRect(0, 0, 1, 1);
+          const image = new File([await canvas.convertToBlob({ type: "image/png" })], "dot.png", {
+            type: "image/png",
+          });
           const worker = new Worker(
-            "/src/lib/skill-workshop/diff.worker.ts?worker_file&type=module",
-            {
-              type: "module",
-            },
+            "/src/pages/chat/components/chat-attachment-image.worker.ts?worker_file&type=module",
+            { type: "module" },
           );
           try {
-            return await new Promise<SkillWorkshopDiffResponse["diff"]["stat"]>(
-              (resolve, reject) => {
-                worker.addEventListener(
-                  "message",
-                  ({ data }: MessageEvent<SkillWorkshopDiffResponse>) => resolve(data.diff.stat),
-                );
-                worker.addEventListener("error", () =>
-                  reject(new Error("The local Workshop worker could not run.")),
-                );
-                worker.postMessage({ id: 1, previous: "Before\n", current: "After\n" }, []);
-              },
-            );
+            return await new Promise<string | null>((resolve, reject) => {
+              worker.addEventListener("message", ({ data }: MessageEvent<File | null>) =>
+                resolve(data?.type ?? null),
+              );
+              worker.addEventListener("error", () =>
+                reject(new Error("The local image worker could not run.")),
+              );
+              worker.postMessage({ file: image, maxBytes: 1024 * 1024 }, []);
+            });
           } finally {
             worker.terminate();
           }
         });
-        expect(localDiff).toEqual({ added: 1, removed: 1 });
+        expect(localWorkerOutput).toBe("image/png");
         await expect.poll(() => hmr.length).toBeGreaterThan(0);
         expect(hmr.every((url) => new URL(url).host === new URL(origin).host)).toBe(true);
         outcomes.hmr = hmr;
@@ -927,7 +847,7 @@ describeStandaloneMockServer("standalone Control UI mock server", () => {
       await page.goto(new URL("/chat", fixtureServer.url).toString(), { waitUntil: "networkidle" });
       expect(await page.locator(".community-invite-card").count()).toBe(0);
       expect(
-        await page.evaluate(() => localStorage.getItem("openclaw:control-ui:community-invite")),
+        await page.evaluate(() => localStorage.getItem("openclaw:control-ui:community-invite:v2")),
       ).not.toBeNull();
       await page.getByText("OpenClaw work checkout", { exact: true }).click();
 
@@ -1007,7 +927,9 @@ describeStandaloneMockServer("standalone native plugin preview", () => {
     const artifactDir = createControlUiE2eArtifactDir("standalone-native-plugin-preview");
     const context = await previewBrowser.newContext({
       viewport: { width: 1440, height: 1000 },
-      recordVideo: { dir: artifactDir, size: { width: 1440, height: 1000 } },
+      recordVideo: captureUiProof
+        ? { dir: artifactDir, size: { width: 1440, height: 1000 } }
+        : undefined,
     });
     const page = await context.newPage();
     try {

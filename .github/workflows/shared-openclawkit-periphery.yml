@@ -52,6 +52,7 @@ jobs:
 
             // pull_request checks out GitHub's synthetic merge commit. Its first
             // parent is the exact base tree used to produce the tested result.
+            const protocolInputs = JSON.parse(require("node:fs").readFileSync("scripts/native-protocol-inputs.json", "utf8"));
             const result = await exec.getExecOutput("git", [
               "diff",
               "--quiet",
@@ -61,6 +62,8 @@ jobs:
               "apps/ios/",
               "apps/macos/",
               "apps/shared/OpenClawKit/",
+              ...protocolInputs.directories.map((directory) => `${directory}/`),
+              ...protocolInputs.files,
               ".github/workflows/shared-openclawkit-periphery.yml",
               "scripts/install-periphery.sh",
               "scripts/lib/swift-toolchain.sh",
@@ -179,7 +182,7 @@ jobs:
             --index-store-path "$RUNNER_TEMP/shared-periphery-ios-derived/Index.noindex/DataStore" \
             --format json \
             --report-include '../shared/OpenClawKit/Sources/**' \
-            --retain-files '../shared/OpenClawKit/Sources/OpenClawProtocol/GatewayModels.swift' \
+            --retain-files '**/GenerateGatewayProtocol/GatewayModels.swift' \
             --write-results "$output_dir/periphery.json" \
             >"$output_dir/periphery.stdout.json" \
             2>"$output_dir/periphery.stderr.log"
@@ -189,7 +192,6 @@ jobs:
           if [ ! -s "$output_dir/periphery.json" ]; then
             cp "$output_dir/periphery.stdout.json" "$output_dir/periphery.json"
           fi
-          exit "$periphery_status"
 
       # Failed-job reruns retain successful producer artifacts from the original attempt.
       # Keep artifact slots run-scoped; rerun producers overwrite their slot.
@@ -231,12 +233,13 @@ jobs:
           install-bun: "false"
           install-deps: "false"
 
-      - name: Install Mermaid renderer dependencies
+      - name: Install native asset dependencies
         env:
           CI: "true"
         run: >-
           pnpm install --frozen-lockfile --prefer-offline --optional
           --filter '@openclaw/mermaid-renderer...'
+          --filter '@openclaw/gateway-protocol...'
           --config.ignore-scripts=false
           --config.engine-strict=false
           --config.enable-pre-post-scripts=true
@@ -251,19 +254,28 @@ jobs:
           ./scripts/install-periphery.sh "$periphery_dir"
           echo "$periphery_dir" >> "$GITHUB_PATH"
 
-      - name: Scan shared kit
+      - name: Build macOS consumer index
         run: |
           set -euo pipefail
           output_dir="$RUNNER_TEMP/shared-periphery-macos"
           mkdir -p "$output_dir"
           cd apps/macos
+          swift package --scratch-path ../../.cache/periphery-swift clean
+          /usr/bin/time -p swift build --build-system native --scratch-path ../../.cache/periphery-swift --build-tests --enable-index-store \
+            2>&1 | tee "$output_dir/build.log"
+
+      - name: Scan shared kit
+        run: |
+          set -euo pipefail
+          output_dir="$RUNNER_TEMP/shared-periphery-macos"
+          cd apps/macos
           set +e
           periphery scan \
             --config .periphery.yml \
-            --clean-build \
+            --skip-build \
             --format json \
             --report-include '../shared/OpenClawKit/Sources/**' \
-            --retain-files '../shared/OpenClawKit/Sources/OpenClawProtocol/GatewayModels.swift' \
+            --retain-files '**/GenerateGatewayProtocol/GatewayModels.swift' \
             --write-results "$output_dir/periphery.json" \
             >"$output_dir/periphery.stdout.json" \
             2>"$output_dir/periphery.stderr.log"
@@ -273,7 +285,6 @@ jobs:
           if [ ! -s "$output_dir/periphery.json" ]; then
             cp "$output_dir/periphery.stdout.json" "$output_dir/periphery.json"
           fi
-          exit "$periphery_status"
 
       - name: Upload macOS consumer report
         if: always()
@@ -314,7 +325,7 @@ jobs:
       - name: Setup supported Node runtime
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.21.0"
+          node-version: "24.22.1"
           package-manager-cache: false
 
       - name: Intersect exact Swift identities

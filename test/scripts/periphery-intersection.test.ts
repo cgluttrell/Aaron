@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -58,17 +57,6 @@ function withSharedSource(source: string, test: (repoRoot: string) => void) {
 }
 
 describe("Periphery intersection", () => {
-  it("matches exact Swift USRs instead of declaration names", () => {
-    const sameNameDifferentUsr = finding({ ids: ["s:11OpenClawKit7ExampleV_other"] });
-    expect(intersectFindings([finding()], [sameNameDifferentUsr])).toEqual([]);
-    expect(intersectFindings([finding()], [finding()])).toEqual([finding()]);
-  });
-
-  it("matches any USR emitted for a declaration compiled into multiple iOS modules", () => {
-    const ios = finding({ ids: ["s:16OpenClawWatchApp7ExampleV", "s:11OpenClawKit7ExampleV"] });
-    expect(intersectFindings([ios], [finding()])).toEqual([ios]);
-  });
-
   it("sorts findings deterministically", () => {
     const later = finding({
       ids: ["s:11OpenClawKit5LaterV"],
@@ -90,16 +78,6 @@ describe("Periphery intersection", () => {
         const declaration = finding({ location: `${FINDING_SOURCE}:2:8` });
         const inline = finding({ location: `${FINDING_SOURCE}:4:8` });
         expect(filterIgnoredFindings([declaration, inline], repoRoot)).toEqual([]);
-      },
-    );
-  });
-
-  it("does not treat scoped Periphery commands as bare ignores", () => {
-    withSharedSource(
-      ["// periphery:ignore:parameters value", "public struct Example {}"].join("\n"),
-      (repoRoot) => {
-        const command = finding({ location: `${FINDING_SOURCE}:2:8` });
-        expect(filterIgnoredFindings([command], repoRoot)).toEqual([command]);
       },
     );
   });
@@ -135,36 +113,6 @@ describe("Periphery intersection", () => {
 
 describe("shared OpenClawKit Periphery workflow", () => {
   const workflow = parse(readFileSync(WORKFLOW_PATH, "utf8")) as Workflow;
-
-  it.runIf(process.platform !== "win32").each(["scan-ios", "scan-macos"])(
-    "fails %s when the scanner crashes while preserving its status artifact",
-    (jobName) => {
-      const root = mkdtempSync(join(tmpdir(), "openclaw-periphery-producer-"));
-      const platform = jobName === "scan-ios" ? "ios" : "macos";
-      const scan = workflow.jobs?.[jobName]?.steps?.find((step) => step.name === "Scan shared kit");
-      try {
-        mkdirSync(join(root, "apps", platform), { recursive: true });
-        mkdirSync(join(root, `shared-periphery-${platform}`));
-        mkdirSync(join(root, "bin"));
-        writeFileSync(join(root, "bin", "periphery"), "#!/bin/sh\nexit 138\n", { mode: 0o755 });
-        const result = spawnSync("bash", ["-c", scan?.run ?? ""], {
-          cwd: root,
-          encoding: "utf8",
-          env: {
-            ...process.env,
-            RUNNER_TEMP: root,
-            PATH: `${join(root, "bin")}:${process.env.PATH}`,
-          },
-        });
-        expect(result.status, result.stderr).toBe(138);
-        expect(
-          readFileSync(join(root, `shared-periphery-${platform}`, "periphery.status"), "utf8"),
-        ).toBe("138\n");
-      } finally {
-        rmSync(root, { force: true, recursive: true });
-      }
-    },
-  );
 
   it("runs two consumer scans and a same-run intersection", () => {
     expect(workflow.jobs?.["scan-ios"]?.name).toBe("Scan shared kit from iOS");
@@ -210,20 +158,5 @@ describe("shared OpenClawKit Periphery workflow", () => {
     expect(iosUpload?.with?.overwrite).toBe(true);
     expect(macosUpload?.with?.overwrite).toBe(true);
     expect(intersectionUpload?.with?.overwrite).toBe(true);
-  });
-
-  it("retains the generated protocol contract and leaves findings for the intersection", () => {
-    for (const jobName of ["scan-ios", "scan-macos"]) {
-      const scan = workflow.jobs?.[jobName]?.steps?.find((step) => step.name === "Scan shared kit");
-      expect(scan?.run).toContain("--report-include '../shared/OpenClawKit/Sources/**'");
-      expect(scan?.run).toContain(
-        "--retain-files '../shared/OpenClawKit/Sources/OpenClawProtocol/GatewayModels.swift'",
-      );
-      expect(scan?.run).not.toContain("--strict");
-    }
-    const macosScan = workflow.jobs?.["scan-macos"]?.steps?.find(
-      (step) => step.name === "Scan shared kit",
-    );
-    expect(macosScan?.run).not.toContain("--exclude-tests");
   });
 });

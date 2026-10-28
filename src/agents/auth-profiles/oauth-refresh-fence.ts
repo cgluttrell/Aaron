@@ -1,8 +1,8 @@
 import { isDeepStrictEqual } from "node:util";
+import { retainCurrentWorkerNativeSection } from "@openclaw/worker-runtime/worker";
 import { racePromiseWithAbortSignal } from "../../infra/abort-signal.js";
 import { sleepWithAbort } from "../../infra/backoff.js";
 import { toErrorObject } from "../../infra/errors.js";
-import { retainCurrentWorkerNativeSection } from "../../infra/worker-task-native-sections.js";
 import { trackAsyncWork } from "../../shared/async-work-scope.js";
 import { hasUsableOAuthCredential } from "./credential-state.js";
 import {
@@ -12,11 +12,11 @@ import {
   isPendingOAuthRefreshFence,
 } from "./oauth-refresh-marker.js";
 import { isSafeOAuthOwnerRefreshResult, isSafeOAuthPostClaimSettlement } from "./oauth-shared.js";
-import type { OAuthCredential } from "./types.js";
+import type { AuthProfileCredential, OAuthCredential } from "./types.js";
 
 /** Full structural equality for compare-and-swap of persisted OAuth credentials. */
 export function isExactOAuthCredential(
-  current: OAuthCredential | undefined,
+  current: AuthProfileCredential | undefined,
   expected: OAuthCredential,
 ): boolean {
   return current?.type === "oauth" && isDeepStrictEqual(current, expected);
@@ -69,7 +69,7 @@ export async function observeOAuthRefreshFenceSettlement<TSnapshot, TResult>(par
   isPending: (snapshot: TSnapshot) => boolean;
   resolve: (snapshot: TSnapshot) => Promise<TResult | null>;
 }): Promise<TResult | null> {
-  const deadline = Date.now() + params.timeoutMs;
+  const deadline = performance.now() + params.timeoutMs;
   while (true) {
     params.signal?.throwIfAborted();
     const snapshot = await observeOAuthRefreshSettlementBeforeDeadline(
@@ -83,11 +83,12 @@ export async function observeOAuthRefreshFenceSettlement<TSnapshot, TResult>(par
     if (!params.isPending(snapshot)) {
       return await params.resolve(snapshot);
     }
-    const remainingMs = deadline - Date.now();
+    const remainingMs = deadline - performance.now();
     if (remainingMs <= 0) {
       throw createOAuthRefreshTimeoutError(params.label, params.timeoutMs);
     }
-    await sleepWithAbort(Math.min(25, remainingMs), params.signal);
+    // Preserve a positive fractional remainder so polling yields until the deadline.
+    await sleepWithAbort(Math.min(25, Math.ceil(remainingMs)), params.signal);
   }
 }
 
@@ -151,6 +152,22 @@ export function refreshSerializedOAuthCredential<TData>(
 async function runSerializedOAuthRefresh<TData>(
   params: SerializedOAuthRefreshParams<TData>,
 ): Promise<SerializedOAuthRefreshResult | null> {
+  const selectCandidate = (
+    data: TData,
+    credential: OAuthCredential | undefined,
+  ): SerializedOAuthRefreshCandidate<TData> => {
+    if (!credential || credential.provider !== params.provider) {
+      return { kind: "unavailable" };
+    }
+    if (isOAuthRefreshFence(credential)) {
+      return isPendingOAuthRefreshFence(credential)
+        ? { kind: "observe", generation: credential }
+        : { kind: "unavailable" };
+    }
+    return hasUnexpiredOAuthCredential(credential)
+      ? { kind: "use", credential, data }
+      : { kind: "claimable", credential };
+  };
   const observeFence = async (generation: OAuthCredential) =>
     await observeOAuthRefreshFenceSettlement({
       label: params.label,
@@ -174,20 +191,7 @@ async function runSerializedOAuthRefresh<TData>(
   const candidate = await params.backend.withLock<SerializedOAuthRefreshCandidate<TData>>(
     (current) => {
       const data = params.parse(current);
-      const credential = params.readCredential(data);
-      if (!credential || credential.provider !== params.provider) {
-        return { result: { kind: "unavailable" } };
-      }
-      if (isPendingOAuthRefreshFence(credential)) {
-        return { result: { kind: "observe", generation: credential } };
-      }
-      if (isOAuthRefreshFence(credential)) {
-        return { result: { kind: "unavailable" } };
-      }
-      if (hasUnexpiredOAuthCredential(credential)) {
-        return { result: { kind: "use", credential, data } };
-      }
-      return { result: { kind: "claimable", credential } };
+      return { result: selectCandidate(data, params.readCredential(data)) };
     },
   );
   if (candidate.kind === "unavailable") {
@@ -214,15 +218,11 @@ async function runSerializedOAuthRefresh<TData>(
         return { result: { kind: "unavailable" } };
       }
       if (!isExactOAuthCredential(credential, candidate.credential)) {
-        if (isPendingOAuthRefreshFence(credential)) {
-          return { result: { kind: "observe", generation: credential } };
-        }
-        if (isOAuthRefreshFence(credential)) {
-          return { result: { kind: "unavailable" } };
-        }
-        return hasUnexpiredOAuthCredential(credential)
-          ? { result: { kind: "use", credential, data } }
-          : { result: { kind: "unavailable" } };
+        const currentCandidate = selectCandidate(data, credential);
+        return {
+          result:
+            currentCandidate.kind === "claimable" ? { kind: "unavailable" } : currentCandidate,
+        };
       }
       const fence = createOAuthRefreshFence({ profileId: params.profileId, credential });
       // Acquire before returning a write: cancellation closes native admission atomically.
@@ -358,7 +358,7 @@ export async function observeOAuthRefreshSettlement<T>(
   return await observeOAuthRefreshSettlementBeforeDeadline(
     label,
     timeoutMs,
-    Date.now() + timeoutMs,
+    performance.now() + timeoutMs,
     settlement,
     signal,
   );
@@ -379,11 +379,12 @@ async function observeOAuthRefreshSettlementBeforeDeadline<T>(
           () => {
             reject(createOAuthRefreshTimeoutError(label, timeoutMs));
           },
-          Math.max(0, deadline - Date.now()),
+          // performance.now() is fractional; rounding down can expire before the deadline.
+          Math.max(0, Math.ceil(deadline - performance.now())),
         );
         settlement
           .finally(() => {
-            if (Date.now() >= deadline) {
+            if (performance.now() >= deadline) {
               throw createOAuthRefreshTimeoutError(label, timeoutMs);
             }
           })

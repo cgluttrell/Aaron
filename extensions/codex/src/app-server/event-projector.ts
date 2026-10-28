@@ -12,11 +12,11 @@ import {
   matchesCodexSnapshotTurn,
   shouldClearTerminalPresentationForNativeItem,
 } from "./event-projector-items.js";
-import { CodexTurnProjection } from "./event-projector-result.js";
+import { CodexTurnProjection, type CodexAppServerToolTelemetry } from "./event-projector-result.js";
 import { buildCodexSteeringMessagesSnapshot } from "./event-projector-snapshot.js";
 import type { CodexToolProgressProjection } from "./event-projector-tool-progress.js";
 import {
-  extractRawAssistantText,
+  extractRawResponseItemText,
   readCodexErrorNotificationMessage,
   readItem,
 } from "./event-projector-values.js";
@@ -51,24 +51,31 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
       !this.aborted &&
       !this.options.runAbortSignal?.aborted &&
       this.completedTurn?.status === "completed" &&
-      !this.terminalFailure.promptError
+      !this.promptError
       ? this.nativeToolLifecycleProjector.pendingCommands()
       : new Map();
   }
 
   /** Native completion owns the answer independently of unfinished host projection. */
-  recoverCompletedAnswer(): boolean {
+  recoverCompletedAnswer(
+    toolTelemetry: CodexAppServerToolTelemetry,
+    options?: { readRetainedNativeCommands?: () => ReadonlyMap<string, string> },
+  ): boolean {
     const completed = this.settlement.completedAnswer;
-    if (!completed || this.aborted || this.terminalFailure.promptError) {
+    if (!completed || this.aborted || this.promptError) {
       return false;
     }
+    this.completedTurn = completed.turn;
+    this.assistantProjection.recordItemCompleted(completed.answer);
+    this.assistantProjection.finalizeAnswerCandidate(completed.turn);
+    // Settlement expiry abandons blocked checkpoint writes. Materialize any
+    // missing native result first so the final transcript mirror retains the
+    // unknown outcome instead of presenting the recovered answer as clean.
+    this.prepareTerminalToolResultCheckpoint(toolTelemetry, options);
     // Retire accepted writes before the enriched final enters the same mirror owner.
     this.closeCompactionProgress();
     this.projectionController.abort();
     this.transcriptCheckpoint.abandon();
-    this.completedTurn = completed.turn;
-    this.assistantProjection.recordSnapshotItem(completed.answer);
-    this.assistantProjection.finalizeAnswerCandidate(completed.turn);
     return true;
   }
 
@@ -86,7 +93,7 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
   }
 
   buildSteeringTranscriptPrefix(): AgentMessage[] {
-    const snapshot = buildCodexSteeringMessagesSnapshot({
+    return buildCodexSteeringMessagesSnapshot({
       runParams: this.params,
       turnId: this.turnId,
       upstreamUserText: this.options.upstreamUserText,
@@ -94,15 +101,12 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
       assistantProjection: this.assistantProjection,
       toolMessages: this.toolTranscriptProjection.transcriptMessages,
     });
-    this.pendingSteeringAssistantBoundaryItemId = snapshot.assistantBoundaryItemId;
-    return snapshot.messages;
   }
 
-  markSteeringTranscriptPersisted(): void {
-    const itemId = this.pendingSteeringAssistantBoundaryItemId;
-    if (itemId) {
-      this.assistantProjection.markAssistantBoundaryPersisted(itemId);
-      this.pendingSteeringAssistantBoundaryItemId = undefined;
+  markSteeringTranscriptMessagePersisted(mirrorIdentity: string): void {
+    const prefix = `${this.turnId}:assistant:`;
+    if (mirrorIdentity.startsWith(prefix)) {
+      this.assistantProjection.markSteeringMessagePersisted(mirrorIdentity.slice(prefix.length));
     }
   }
 
@@ -257,7 +261,7 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
         const compactionFailure = codexErrorInfo === "other" && this.isCompacting();
         this.settledTurnFailureFinalizationAllowed =
           codexErrorInfo === "serverOverloaded" || compactionFailure;
-        this.terminalFailure.record({
+        this.recordTerminalFailure({
           message: readCodexErrorNotificationMessage(params),
           codexErrorInfo,
           misalignment: isJsonObject(params.error) ? params.error.misalignment : undefined,
@@ -316,7 +320,13 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
     });
   }
 
-  recordDynamicToolCall(params: { callId: string; tool: string; arguments?: JsonValue }): void {
+  recordDynamicToolCall(params: {
+    callId: string;
+    namespace?: string | null;
+    tool: string;
+    arguments?: JsonValue;
+  }): void {
+    this.toolSearchEvidenceProjection?.recordDynamicToolCall(params);
     this.toolTranscriptProjection.recordDynamicToolCall(params);
   }
 
@@ -338,6 +348,7 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
       details?: unknown;
     },
   ): void {
+    this.toolSearchEvidenceProjection?.recordDynamicToolResult(params);
     this.toolProgressProjection.recordDynamicToolResult(params);
     const source = this.options.resolveDynamicToolResultContentSource?.(params.tool);
     this.toolTranscriptProjection.recordDynamicToolResult(params, source);
@@ -345,8 +356,8 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
 
   markTimedOut(): void {
     this.aborted = true;
-    this.terminalFailure.promptError = "codex app-server attempt timed out";
-    this.terminalFailure.promptErrorSource = "prompt";
+    this.promptError = "codex app-server attempt timed out";
+    this.promptErrorSource = "prompt";
   }
 
   markAborted(): void {
@@ -483,21 +494,7 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
     if (!this.asyncDeliveryProjection.allows(item, true)) {
       return;
     }
-    const asyncMessage = this.assistantProjection.recordItemCompleted(
-      item,
-      itemId,
-      this.activeItemIds,
-    );
-    if (asyncMessage) {
-      await this.asyncDeliveryProjection.deliver(asyncMessage);
-    }
-    if (this.projectionClosed) {
-      return;
-    }
-    await this.reasoningProjection.recordItem(item);
-    await this.settlement.project("media_projection", () =>
-      this.generatedMediaProjection.recordNative(item),
-    );
+    await this.recordCompletedItemContent(item, { itemId });
     if (this.projectionClosed) {
       return;
     }
@@ -569,7 +566,7 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
     this.eventProjection.endSafetyBuffering();
     const compactionFailure =
       turn.status === "failed" &&
-      (this.terminalFailure.promptErrorSource === "compaction" ||
+      (this.promptErrorSource === "compaction" ||
         (turn.error?.codexErrorInfo === "other" && this.isCompacting()));
     this.settledTurnFailureFinalizationAllowed =
       turn.status === "failed" &&
@@ -580,7 +577,7 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
     if (turn.status === "failed") {
       const codexErrorInfo = turn.error?.codexErrorInfo as JsonValue | null | undefined;
       this.eventProjection.handleCyberPolicyError(codexErrorInfo, this.params.modelId);
-      this.terminalFailure.record({
+      this.recordTerminalFailure({
         message: turn.error?.message,
         codexErrorInfo,
         misalignment: turn.error?.misalignment,
@@ -611,17 +608,7 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
         continue;
       }
       this.diagnostics.warnUnknownItemStatus(item);
-      const asyncMessage = this.assistantProjection.recordSnapshotItem(item);
-      if (asyncMessage) {
-        await this.asyncDeliveryProjection.deliver(asyncMessage);
-      }
-      if (this.projectionClosed) {
-        return;
-      }
-      await this.reasoningProjection.recordItem(item);
-      await this.settlement.project("media_projection", () =>
-        this.generatedMediaProjection.recordNative(item),
-      );
+      await this.recordCompletedItemContent(item);
       if (this.projectionClosed) {
         return;
       }
@@ -660,14 +647,48 @@ export class CodexAppServerEventProjector extends CodexTurnProjection {
     await this.reasoningProjection.maybeEndReasoning();
   }
 
+  private async recordCompletedItemContent(
+    item: CodexThreadItem | undefined,
+    notification?: { itemId: string | undefined },
+  ): Promise<void> {
+    // Codex deltas are best-effort and completed item text is authoritative (the
+    // codex-rs TUI consolidates from it); without this a dropped final delta
+    // leaves live and terminal chat text silently short.
+    const streamed =
+      item?.type === "agentMessage"
+        ? this.assistantProjection.assistantTextByItem.get(item.id)
+        : undefined;
+    if (streamed && typeof item?.text === "string" && item.text.startsWith(streamed)) {
+      await this.assistantProjection.handleAssistantDelta({
+        itemId: item.id,
+        delta: item.text.slice(streamed.length),
+      });
+    }
+    const asyncMessage = this.assistantProjection.recordItemCompleted(
+      item,
+      notification && { ...notification, activeItemIds: this.activeItemIds },
+    );
+    if (asyncMessage) {
+      await this.asyncDeliveryProjection.deliver(asyncMessage);
+    }
+    if (this.projectionClosed) {
+      return;
+    }
+    await this.reasoningProjection.recordItem(item);
+    await this.settlement.project("media_projection", () =>
+      this.generatedMediaProjection.recordNative(item),
+    );
+  }
+
   private async handleRawResponseItemCompleted(params: JsonObject): Promise<void> {
     const item = isJsonObject(params.item) ? params.item : undefined;
     if (!item) {
       return;
     }
-    if (item.role === "assistant" && extractRawAssistantText(item)) {
+    if (item.role === "assistant" && extractRawResponseItemText(item)) {
       this.eventProjection.markSafetyBufferingAssistantStarted();
     }
+    this.toolSearchEvidenceProjection?.recordRawResponseItem(item);
     this.toolTranscriptProjection.recordRawNativeToolItem(item);
     // Project protocol state before media persistence yields. Notifications may overlap,
     // so delayed image I/O must not consume assistant-echo state from a newer item.

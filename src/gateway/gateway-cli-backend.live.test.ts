@@ -633,7 +633,6 @@ describeLive("gateway live (cli backend)", () => {
           cacheProbeOwner = {
             backendId: providerId,
             agentId: "dev",
-            authProfileId: CLI_CACHE_AUTH_PROFILE_ID,
             sessionId: history.sessionId,
             sessionKey,
           };
@@ -981,6 +980,7 @@ describeLive("gateway live (cli backend)", () => {
           announceBarrier,
           requestTimeoutMs: CLI_BACKEND_REQUEST_TIMEOUT_MS,
           logStep: logCliBackendLiveStep,
+          ...(CLI_CACHE_PROBE ? { minCacheHitRate: CLI_BACKEND_MIN_CACHE_HIT_RATE } : {}),
         });
       } finally {
         try {

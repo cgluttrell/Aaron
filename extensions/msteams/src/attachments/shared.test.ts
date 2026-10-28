@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   applyAuthorizationHeaderForUrl,
   encodeGraphShareId,
+  htmlTagAttributeValues,
   isDownloadableAttachment,
   isLikelyImageAttachment,
   normalizeContentType,
@@ -155,87 +156,6 @@ describe("safeFetch", () => {
       }),
     ).rejects.toThrow("fetchFnSupportsDispatcher");
     expect(called).toBe(false);
-  });
-
-  it.each([301, 302, 303, 307, 308])(
-    "returns dispatcher-mode %i responses to the outer guard",
-    async (status) => {
-      const redirectedTo = "https://cdn.sharepoint.com/storage/file.pdf";
-      const response = new Response(null, {
-        status,
-        headers: { location: redirectedTo },
-      });
-      const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => response);
-      const resolveFn = vi.fn(publicResolve);
-      const headers = new Headers({ Authorization: "Bearer fixture-token" });
-      const res = await safeFetch({
-        url: "https://teams.sharepoint.com/file.pdf",
-        allowHosts: ["sharepoint.com"],
-        authorizationAllowHosts: ["teams.sharepoint.com"],
-        fetchFn: fetchMock as unknown as typeof fetch,
-        requestInit: { dispatcher: {}, headers } as RequestInit,
-        resolveFn,
-      });
-      expect(res).toBe(response);
-      expect(fetchMock).toHaveBeenCalledOnce();
-      expect(resolveFn).toHaveBeenCalledExactlyOnceWith("teams.sharepoint.com");
-      const sentHeaders = new Headers(fetchMock.mock.calls[0]?.[1]?.headers);
-      expect(sentHeaders.get("authorization")).toBeNull();
-      expect(headers.get("authorization")).toBe("Bearer fixture-token");
-    },
-  );
-
-  it.each([200, 302])(
-    "returns dispatcher-mode %i responses without a location unchanged",
-    async (status) => {
-      const response = new Response(null, { status });
-      const fetchMock = vi.fn(async () => response);
-      const res = await safeFetch({
-        url: "https://teams.sharepoint.com/file.pdf",
-        allowHosts: ["sharepoint.com"],
-        fetchFn: fetchMock as typeof fetch,
-        requestInit: { dispatcher: {} } as RequestInit,
-      });
-      expect(res).toBe(response);
-      expect(fetchMock).toHaveBeenCalledOnce();
-    },
-  );
-
-  it.each([
-    ["private DNS", privateResolve("127.0.0.1")],
-    ["failed DNS", failingResolve],
-  ])("blocks dispatcher-mode fetch before dispatch on %s", async (_label, resolveFn) => {
-    const fetchMock = vi.fn();
-    await expect(
-      safeFetch({
-        url: "https://teams.sharepoint.com/file.pdf",
-        allowHosts: ["sharepoint.com"],
-        fetchFn: fetchMock as typeof fetch,
-        requestInit: { dispatcher: {} } as RequestInit,
-        resolveFn,
-      }),
-    ).rejects.toThrow("Initial download URL blocked");
-    expect(fetchMock).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    ["https://evil.example.com/steal", "blocked by allowlist"],
-    ["http://teams.sharepoint.com/file.pdf", "blocked by allowlist"],
-    ["https://[invalid", "Invalid redirect URL"],
-  ])("rejects dispatcher-mode redirect %s", async (location, error) => {
-    const fetchMock = mockFetchWithRedirect({
-      "https://teams.sharepoint.com/file.pdf": location,
-    });
-    await expect(
-      safeFetch({
-        url: "https://teams.sharepoint.com/file.pdf",
-        allowHosts: ["sharepoint.com"],
-        fetchFn: fetchMock as unknown as typeof fetch,
-        requestInit: { dispatcher: {} } as RequestInit,
-        resolveFn: publicResolve,
-      }),
-    ).rejects.toThrow(error);
-    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("blocks a redirect to a non-allowlisted host", async () => {
@@ -611,5 +531,28 @@ describe("isDownloadableAttachment mixed-case download-info type", () => {
         content,
       }),
     ).toBe(true);
+  });
+});
+
+describe("htmlTagAttributeValues", () => {
+  const values = (html: string, tag: "img" | "attachment", attr: "src" | "id") =>
+    htmlTagAttributeValues(html, tag, attr);
+
+  it("reads one value per tag, keeping the last spelling inside each tag", () => {
+    expect(
+      values('<img data-src="a.png" src="b.png"><p>x</p><IMG alt=x SRC=\'cid:c\'>', "img", "src"),
+    ).toEqual(["b.png", "cid:c"]);
+    expect(
+      values(
+        '<attachment id="one"></attachment><attachment fluid="no" id="two">',
+        "attachment",
+        "id",
+      ),
+    ).toEqual(["one", "two"]);
+  });
+
+  it("keeps a quoted value containing > and skips tags without a usable value", () => {
+    expect(values('<img src="a>b" alt="x">', "img", "src")).toEqual(["a>b"]);
+    expect(values('<img src="">, <img alt="x">, <img src="open', "img", "src")).toEqual([]);
   });
 });

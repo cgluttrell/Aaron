@@ -34,6 +34,7 @@ import {
 } from "../../lib/sessions/session-key.ts";
 import { showToast } from "../../lib/toast.ts";
 import { uploadsEnabled, uploadsDisabledMessage } from "../../lib/uploads.ts";
+import { livePresentation, type PresentationValue } from "../../lit/presentation-binding.ts";
 import { renderPluginSurface } from "../../plugins/control-ui-view.ts";
 import { releaseChatAttachmentPayloads } from "./attachment-payload-store.ts";
 import { getChatHistoryLoadState } from "./chat-history-state.ts";
@@ -61,8 +62,9 @@ import {
   renderComposerQuestionDock,
   resolveComposerQuestionPanel,
 } from "./components/chat-composer-question.ts";
-import { getChatComposerState } from "./components/chat-composer-state.ts";
+import { getChatComposerState, hasTerminalRunStatus } from "./components/chat-composer-state.ts";
 import type { ChatComposerProps } from "./components/chat-composer-types.ts";
+import { renderChatComposerQueue } from "./components/chat-composer-view.ts";
 import { isChatRunWorking, renderChatComposer } from "./components/chat-composer.ts";
 import { isImageLightboxEvent, openInlineChatImage } from "./components/chat-image-lightbox.ts";
 import { renderChatPullRequests } from "./components/chat-pull-requests.ts";
@@ -119,7 +121,7 @@ export type ChatProps = Omit<
       itemId?: string,
       sourceMessageId?: string,
     ) => Promise<boolean>;
-    presented?: boolean;
+    presented?: PresentationValue;
     historyState?: ChatState;
     startupStatus?: ChatRunStartupStatus | null;
     providerPolicyNotice?: ProviderPolicyNotice | null;
@@ -138,12 +140,10 @@ export type ChatProps = Omit<
     workspaceConflict?: WorkspaceResultConflict;
     onDismissWorkspaceConflict?: () => void;
     swarm?: Parameters<typeof renderChatSwarmProgress>[0];
-    focusMode?: boolean;
     chatMessageMaxWidth?: string | null;
     showNewMessages?: boolean;
     onScrollToBottom?: (options?: { smooth?: boolean }) => void;
     onRefresh: () => void;
-    onToggleFocusMode?: () => void;
     onDismissError?: () => void;
     agentsList: {
       agents: Array<{
@@ -154,8 +154,6 @@ export type ChatProps = Omit<
       defaultId?: string;
     } | null;
     onSessionSelect?: (sessionKey: string) => void;
-    onRevealWorkspaceFile?: (path: string) => void;
-    header?: TemplateResult | typeof nothing;
     sessionSuggestions?: readonly SessionSuggestion[];
     sessionSuggestionRole?: SessionSharingRole;
     sessionSuggestionBusyIds?: ReadonlySet<string>;
@@ -167,10 +165,13 @@ export type ChatProps = Omit<
     ) => void;
     pullRequests?: ControlUiSessionPullRequest[];
     pullRequestsGateway?: ApplicationGateway;
+    pullRequestsSessionId?: string;
     pullRequestsBranch?: ControlUiSessionBranch;
+    pullRequestsBranchDismissed?: boolean;
     pullRequestsStatus?: ControlUiSessionPullRequestSnapshot["status"];
     onOpenSessionDiff?: () => void;
     onDismissPullRequest?: (pullRequest: ControlUiSessionPullRequest) => void;
+    onDismissPullRequestsBranch?: (branch: ControlUiSessionBranch) => void;
     githubPublication?: import("../../lib/sessions/github-publication-controller.ts").GitHubPublicationView;
   };
 
@@ -194,10 +195,10 @@ export function renderChat(props: ChatProps) {
     ? [...pendingInputs.page.items.filter((input) => !input.queued), ...pendingInputs.queuedInputs]
     : undefined;
   const requestUpdate = props.onRequestUpdate ?? (() => {});
-  const focusComposer = () =>
+  const focusComposer = (selector = ".agent-chat__composer-combobox > textarea") =>
     props.transcript.scrollElement
       ?.closest(".chat")
-      ?.querySelector<HTMLElement>(".agent-chat__composer-combobox > textarea")
+      ?.querySelector<HTMLElement>(selector)
       ?.focus({ preventScroll: true });
   const openSelectionComment = (
     selection: ChatSelectionSource,
@@ -348,95 +349,88 @@ export function renderChat(props: ChatProps) {
         onOpenSession: props.onSessionSelect,
         // Portaled menus can outlive a render; resolve focus from the current session owner.
         onFocusComposer: () =>
-          props.transcript.scrollElement
-            ?.closest(".chat")
-            ?.querySelector<HTMLElement>(
-              "openclaw-plugin-view[data-plugin-composer], .agent-chat__composer-combobox > textarea",
-            )
-            ?.focus({ preventScroll: true }),
+          focusComposer(
+            "openclaw-plugin-view[data-plugin-composer], .agent-chat__composer-combobox > textarea",
+          ),
       },
       props.transcript,
     ),
     props.presented ?? true,
   );
+  const renderPendingInputsButton = (page: "earlier" | "latest") => html`<button
+    class="btn btn--sm"
+    type="button"
+    ?disabled=${pendingInputs?.loading}
+    @click=${() =>
+      props.historyState &&
+      loadChatPendingInputs(
+        props.historyState,
+        page === "earlier" ? pendingInputs?.page.nextBefore : undefined,
+      )}
+  >
+    ${t(`chat.pendingInputs.${page}`)}
+  </button>`;
+  const renderContributions = (kind: "composer" | "header") => html`<openclaw-plugin-contributions
+    .kind=${kind}
+    .sessionKey=${props.sessionKey}
+    .agentId=${props.currentAgentId}
+    .presented=${livePresentation(props.presented ?? true)}
+  ></openclaw-plugin-contributions>`;
   const footerContent = html`${
-      pendingInputs &&
-      (pendingInputs.error ||
-        pendingInputs.page.nextBefore !== undefined ||
-        pendingInputs.before !== undefined)
-        ? html`<div class="chat-pending-inputs" role="status">
-            ${pendingInputs.error ? html`<span>${pendingInputs.error}</span>` : nothing}
-            ${
-              pendingInputs.page.nextBefore !== undefined
-                ? html`<button
-                    class="btn btn--sm"
-                    type="button"
-                    ?disabled=${pendingInputs.loading}
-                    @click=${() =>
-                      props.historyState &&
-                      loadChatPendingInputs(props.historyState, pendingInputs.page.nextBefore)}
-                  >
-                    ${t("chat.pendingInputs.earlier")}
-                  </button>`
-                : nothing
-            }
-            ${
-              pendingInputs.before !== undefined
-                ? html`<button
-                    class="btn btn--sm"
-                    type="button"
-                    ?disabled=${pendingInputs.loading}
-                    @click=${() => props.historyState && loadChatPendingInputs(props.historyState)}
-                  >
-                    ${t("chat.pendingInputs.latest")}
-                  </button>`
-                : nothing
-            }
-          </div>`
-        : nothing
-    }
-    ${
-      props.inlineApproval && props.onApprovalDecision
-        ? html`<div class="chat-inline-approval">
-            ${renderExecApprovalCard({
-              approval: props.inlineApproval,
-              sourceSession: approvalSourceSession,
-              busy: props.approvalBusy === true,
-              canGrant: props.approvalCanGrant,
-              error: props.approvalErrors?.get(props.inlineApproval.id) ?? null,
-              variant: "inline",
-              onDecision: props.onApprovalDecision,
-            })}
-          </div>`
-        : nothing
-    }
-    ${renderChatPullRequests({
-      pullRequests: props.pullRequests ?? [],
-      gateway: props.pullRequestsGateway,
-      sessionKey: scopedSessionArtifactKey(props.sessionKey, props.currentAgentId ?? undefined),
-      presented: props.presented ?? true,
-      branch: props.pullRequestsBranch,
-      status: props.pullRequestsStatus ?? "ready",
-      onDismiss: (pullRequest) => props.onDismissPullRequest?.(pullRequest),
-      onOpenSessionDiff: props.onOpenSessionDiff,
-      publication: props.githubPublication,
-    })}
-    ${renderChatSessionSuggestions({
-      suggestions: props.sessionSuggestions ?? [],
-      role: props.sessionSuggestionRole,
-      busyIds: props.sessionSuggestionBusyIds ?? new Set(),
-      archived: props.sessionSuggestionsArchived === true,
-      canResolve: props.canResolveSessionSuggestions === true,
-      onResolve: (suggestion, resolution) =>
-        props.onResolveSessionSuggestion?.(suggestion, resolution),
-    })}
-    ${props.swarm ? renderChatSwarmProgress(props.swarm) : nothing}
-    <openclaw-plugin-contributions
-      .kind=${"composer"}
-      .sessionKey=${props.sessionKey}
-      .agentId=${props.currentAgentId}
-      .presented=${props.presented ?? true}
-    ></openclaw-plugin-contributions>`;
+    pendingInputs &&
+    (pendingInputs.error ||
+      pendingInputs.page.nextBefore !== undefined ||
+      pendingInputs.before !== undefined)
+      ? html`<div class="chat-pending-inputs" role="status">
+          ${pendingInputs.error ? html`<span>${pendingInputs.error}</span>` : nothing}
+          ${
+            pendingInputs.page.nextBefore !== undefined
+              ? renderPendingInputsButton("earlier")
+              : nothing
+          }
+          ${pendingInputs.before !== undefined ? renderPendingInputsButton("latest") : nothing}
+        </div>`
+      : nothing
+  }
+  ${
+    props.inlineApproval && props.onApprovalDecision
+      ? html`<div class="chat-inline-approval">
+          ${renderExecApprovalCard({
+            approval: props.inlineApproval,
+            sourceSession: approvalSourceSession,
+            busy: props.approvalBusy === true,
+            canGrant: props.approvalCanGrant,
+            error: props.approvalErrors?.get(props.inlineApproval.id) ?? null,
+            variant: "inline",
+            onDecision: props.onApprovalDecision,
+          })}
+        </div>`
+      : nothing
+  }
+  ${renderChatPullRequests({
+    pullRequests: props.pullRequests ?? [],
+    gateway: props.pullRequestsGateway,
+    sessionId: props.pullRequestsSessionId,
+    sessionKey: scopedSessionArtifactKey(props.sessionKey, props.currentAgentId ?? undefined),
+    presented: props.presented ?? true,
+    branch: props.pullRequestsBranch,
+    branchDismissed: props.pullRequestsBranchDismissed,
+    status: props.pullRequestsStatus ?? "ready",
+    onDismiss: (pullRequest) => props.onDismissPullRequest?.(pullRequest),
+    onDismissBranch: props.onDismissPullRequestsBranch,
+    onOpenSessionDiff: props.onOpenSessionDiff,
+    publication: props.githubPublication,
+  })}
+  ${renderChatSessionSuggestions({
+    suggestions: props.sessionSuggestions ?? [],
+    role: props.sessionSuggestionRole,
+    busyIds: props.sessionSuggestionBusyIds ?? new Set(),
+    archived: props.sessionSuggestionsArchived === true,
+    canResolve: props.canResolveSessionSuggestions === true,
+    onResolve: (suggestion, resolution) =>
+      props.onResolveSessionSuggestion?.(suggestion, resolution),
+  })}
+  ${props.swarm ? renderChatSwarmProgress(props.swarm) : nothing} ${renderContributions("composer")}`;
   // The composer keeps the outbox queue; only the transcript includes the
   // placement initial turn, whose retry action belongs to startup.
   const notices = renderChatComposerNotices(props);
@@ -448,13 +442,15 @@ export function renderChat(props: ChatProps) {
     props.queue,
     displayedPendingInputs ?? [],
   );
+  const displayQueue = [
+    ...buildPendingInputQueueItems(inputDisplay.queuedInputs),
+    ...inputDisplay.queue,
+  ];
+  const composerProps = { ...props, displayQueue };
   const defaultComposer = renderChatComposer({
     ...props,
     asyncQuestions,
-    displayQueue: [
-      ...buildPendingInputQueueItems(inputDisplay.queuedInputs),
-      ...inputDisplay.queue,
-    ],
+    displayQueue,
     footerContent,
     notices,
     onRequestUpdate: requestUpdate,
@@ -486,11 +482,16 @@ export function renderChat(props: ChatProps) {
           requestUpdate,
         ),
       )}
+      ${renderChatComposerQueue(
+        composerProps,
+        Boolean(props.canAbort && props.onAbort) && !hasTerminalRunStatus(props.runStatus),
+      )}
       ${
         props.suggestionComposer
           ? nothing
           : renderChatSelectionAnnotations({ ...props, disabled: !canCompose })
       }
+      ${props.composerRecovery ?? nothing}
     </div>`,
   );
   const taskSuggestionTray = renderChatTaskSuggestionTray(props);
@@ -605,9 +606,10 @@ export function renderChat(props: ChatProps) {
           ? nothing
           : html`<openclaw-chat-comment-controller
               .paneId=${props.paneId}
-              .props=${{ ...props, disabled: !canCompose }}
+              .props=${props}
+              .disabled=${!canCompose}
               .sessionKey=${props.sessionKey}
-              .presented=${props.presented ?? true}
+              .presented=${livePresentation(props.presented ?? true)}
             ></openclaw-chat-comment-controller>`
       }
       <div class="chat-workbench" ${shellLayoutTraits({ workbench: true })}>
@@ -615,13 +617,7 @@ export function renderChat(props: ChatProps) {
           <div class="chat-split-container">
             <div class="chat-main">
               <div class="chat-main__conversation-column">
-                ${props.header ?? nothing} ${renderChatTopbarNotices(props)}
-                <openclaw-plugin-contributions
-                  .kind=${"header"}
-                  .sessionKey=${props.sessionKey}
-                  .agentId=${props.currentAgentId}
-                  .presented=${props.presented ?? true}
-                ></openclaw-plugin-contributions>
+                ${renderChatTopbarNotices(props)} ${renderContributions("header")}
                 ${renderTranscriptSearch(props.paneId, requestUpdate)}
                 <div class="chat-main__conversation-frame">
                   <!-- Chromium can crash when DevTools inspects a blocking Lit object listener. -->

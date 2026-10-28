@@ -84,7 +84,7 @@ vi.mock("./provider-model-normalization.runtime.js", () => ({
 }));
 
 const authSourceCheckMock = vi.hoisted(() => ({
-  hasAnyAuthProfileStoreSource: vi.fn(() => false),
+  hasAnyAuthProfileStoreSourceAsync: vi.fn(() => false),
 }));
 
 vi.mock("./auth-profiles/source-check.js", () => authSourceCheckMock);
@@ -191,7 +191,7 @@ function resetModelFallbackTestState(): void {
   authRuntimeMock.runtime.loadAuthProfileStoreForRuntime.mockClear();
   authRuntimeMock.runtime.resolveAuthProfileOrder.mockClear();
   authRuntimeMock.runtime.maybeReprobeWhamBlockedProfiles.mockReset();
-  authSourceCheckMock.hasAnyAuthProfileStoreSource.mockReset().mockReturnValue(false);
+  authSourceCheckMock.hasAnyAuthProfileStoreSourceAsync.mockReset().mockReturnValue(false);
   resetDiagnosticEventsForTest();
 }
 
@@ -272,7 +272,7 @@ async function runWithStoredAuth(params: {
 }
 
 function setAuthRuntimeStore(agentDir: string | undefined, store: AuthProfileStore): void {
-  authSourceCheckMock.hasAnyAuthProfileStoreSource.mockReturnValue(true);
+  authSourceCheckMock.hasAnyAuthProfileStoreSourceAsync.mockReturnValue(true);
   authRuntimeMock.setStore(agentDir, store);
 }
 
@@ -745,7 +745,7 @@ describe("runWithModelFallback", () => {
         "openai:default": {
           cooldownUntil: Date.now() + 60_000,
           cooldownReason: "rate_limit",
-          failureCounts: { rate_limit: 1 },
+          lastRateLimitAt: Date.now(),
         },
       }),
     );
@@ -760,15 +760,14 @@ describe("runWithModelFallback", () => {
   it("uses agent runtime context before auth cooldown skips", async () => {
     const cfg = makeCfg({
       agents: {
-        list: [
-          { id: "main", default: true },
-          {
-            id: "worker",
+        entries: {
+          main: {},
+          worker: {
             models: {
               "openai/gpt-5.5": { agentRuntime: { id: "codex" } },
             },
           },
-        ],
+        },
         defaults: {
           model: {
             primary: "openai/gpt-5.5",
@@ -784,7 +783,7 @@ describe("runWithModelFallback", () => {
         "openai:default": {
           cooldownUntil: Date.now() + 60_000,
           cooldownReason: "rate_limit",
-          failureCounts: { rate_limit: 1 },
+          lastRateLimitAt: Date.now(),
         },
       }),
     );
@@ -847,7 +846,7 @@ describe("runWithModelFallback", () => {
           [`${provider}:default`]: {
             disabledUntil: Date.now() + 60_000,
             disabledReason: "billing",
-            failureCounts: { rate_limit: 4 },
+            failureCounts: { billing: 4 },
           },
         }),
       );
@@ -1234,15 +1233,14 @@ describe("runWithModelFallback", () => {
   it("executes fallback aliases in the selected agent scope", async () => {
     const cfg = makeCfg({
       agents: {
-        list: [
-          { id: "main", default: true },
-          {
-            id: "worker",
+        entries: {
+          main: {},
+          worker: {
             models: {
               "anthropic/worker-fallback": { alias: "fast" },
             },
           },
-        ],
+        },
         defaults: {
           model: {
             primary: "openai/primary",
@@ -1448,7 +1446,7 @@ describe("runWithModelFallback", () => {
       usageStat: {
         disabledUntil: now + 5 * 60_000,
         disabledReason: "billing",
-        failureCounts: { rate_limit: 4 },
+        failureCounts: { billing: 4 },
       },
       expectedReason: "billing",
       credentialType: "token",
@@ -1478,7 +1476,7 @@ describe("runWithModelFallback", () => {
               cooldownUntil: expiry,
               cooldownReason: "rate_limit",
               cooldownModel: "claude-opus-4-5",
-              failureCounts: { rate_limit: 1 },
+              lastRateLimitAt: Date.now(),
             },
           },
         });
@@ -1516,13 +1514,13 @@ describe("runWithModelFallback", () => {
           cooldownUntil: unrelatedExpiry,
           cooldownReason: "rate_limit",
           cooldownModel: "claude-haiku-3-5",
-          failureCounts: { rate_limit: 1 },
+          lastRateLimitAt: Date.now(),
         },
         "openai:default": {
           cooldownUntil: relevantExpiry,
           cooldownReason: "rate_limit",
           cooldownModel: "gpt-5.2",
-          failureCounts: { rate_limit: 1 },
+          lastRateLimitAt: Date.now(),
         },
       },
     };
@@ -1650,8 +1648,8 @@ describe("runWithModelFallback", () => {
         dir,
         apiKeyStore([provider], {
           [`${provider}:default`]: {
-            cooldownUntil: Date.now() + 300_000,
-            failureCounts: { rate_limit: 1 },
+            cooldownUntil: Date.now() + 60_000,
+            cooldownReason: "rate_limit",
           },
         }),
       );

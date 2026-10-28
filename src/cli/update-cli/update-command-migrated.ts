@@ -41,8 +41,6 @@ import {
 import { createWindowsTaskAutoStartGuard } from "./update-command-service-maintenance.js";
 import { recordUpdatePackageCompletion } from "./update-command-terminal.js";
 
-export type { MigratedUpdateFinalizationResult } from "./update-command-migrated-types.js";
-
 /** Inspect private state copies without reopening migrated state through the previous runtime. */
 export async function inspectActivatedUpdateState(
   params: Pick<
@@ -158,16 +156,23 @@ export async function continueMigratedUpdateInFreshProcess(
       params.packageUpdateNodeRunner ?? resolveNodeRunner(),
       path.join(root, "dist", runtimeProcessEntrypoints.updateMigratedFinalize.distWorkerPath),
     ];
-    const workerEnv = {
-      ...stripGatewayServiceMarkerEnv(
-        resolveUpdatedInstallCommandEnv({
-          processEnv: params.ownedManagedUpdateEnv ?? run.env,
-        }),
-      ),
-      OPENCLAW_UPDATE_IN_PROGRESS: "1",
-      TMPDIR: scratchDir,
-      TMP: scratchDir,
-      TEMP: scratchDir,
+    const workerOptions = {
+      cwd: root,
+      baseEnv: {},
+      env: {
+        ...stripGatewayServiceMarkerEnv(
+          resolveUpdatedInstallCommandEnv({
+            processEnv: params.ownedManagedUpdateEnv ?? run.env,
+          }),
+        ),
+        OPENCLAW_UPDATE_IN_PROGRESS: "1",
+        TMPDIR: scratchDir,
+        TMP: scratchDir,
+        TEMP: scratchDir,
+      },
+      killProcessTree: true,
+      requireProcessTreeExtinction: true,
+      killGraceMs: 500,
     };
     if (run.executorFence || run.completionOwner) {
       assertCurrent();
@@ -177,13 +182,8 @@ export async function continueMigratedUpdateInFreshProcess(
       // Compatibility only, never authority. An older installed worker ignores
       // new JSON fields, so refuse before exposing any continuation input.
       const check = await runUtf8CommandWithTimeout([...workerCommand, "--check"], {
-        cwd: root,
-        baseEnv: {},
-        env: workerEnv,
+        ...workerOptions,
         timeoutMs: params.updateStepTimeoutMs,
-        killProcessTree: true,
-        requireProcessTreeExtinction: true,
-        killGraceMs: 500,
         maxOutputBytes: 64 * 1024,
       });
       assertCurrent();
@@ -282,17 +282,12 @@ export async function continueMigratedUpdateInFreshProcess(
       bindChild?: (pid: number, argv?: readonly string[]) => void,
     ) =>
       runUtf8CommandWithTimeout(workerCommand, {
-        cwd: root,
-        baseEnv: {},
-        env: workerEnv,
+        ...workerOptions,
         input: JSON.stringify({ ...input, ...(grant ? { executor: grant } : {}) }),
         beforeInput: bindChild,
         // Only an operator deadline bounds forward finalization. Probes and
         // cancellation settlement keep their separate finite allowances.
         timeoutMs: run.activationTimeoutMs,
-        killProcessTree: true,
-        requireProcessTreeExtinction: true,
-        killGraceMs: 500,
         maxOutputBytes: 1024 * 1024,
       });
     await releaseLegacySourceLock(root, run.sourceArtifactLock);
@@ -322,6 +317,12 @@ export async function continueMigratedUpdateInFreshProcess(
     ) {
       throw new Error("Update finalization did not confirm the admitted run's terminal outcome.");
     }
+    const finalization = {
+      result: response.result,
+      exitCode: response.exitCode,
+      automaticTriage: response.automaticTriage,
+      candidateStartAttempted: response.candidateStartAttempted,
+    };
     const restoreDatabases =
       params.databaseBackup !== undefined &&
       params.packageTransaction !== undefined &&
@@ -332,13 +333,7 @@ export async function continueMigratedUpdateInFreshProcess(
     if (restoreDatabases) {
       // The waiting driver still owns the package transaction and stopped
       // lifecycle. Its database restoration and rollback publish the final result.
-      return {
-        result: response.result,
-        exitCode: response.exitCode,
-        automaticTriage: response.automaticTriage,
-        candidateStartAttempted: false,
-        databaseRollbackAvailable: true,
-      };
+      return { ...finalization, databaseRollbackAvailable: true };
     }
     if (child.stdout) {
       process.stdout.write(child.stdout);
@@ -366,12 +361,7 @@ export async function continueMigratedUpdateInFreshProcess(
     if (cleanupFailure) {
       throw cleanupFailure;
     }
-    return {
-      result: response.result,
-      exitCode: response.exitCode,
-      automaticTriage: response.automaticTriage,
-      candidateStartAttempted: response.candidateStartAttempted,
-    };
+    return finalization;
   } catch (error) {
     if (error instanceof UpdateCommandRecoveryPendingError) {
       // A refused compatibility/admission check is not delegated completion and

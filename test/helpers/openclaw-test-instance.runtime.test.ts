@@ -29,9 +29,7 @@ if (process.argv.includes("runtime-identity")) {
   const port = Number(process.argv[process.argv.indexOf("--port") + 1]);
   createServer((request, response) => {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(
-      JSON.stringify(request.url === "/startupz" ? { ok: true, status: "started" } : { ready: true, ...identity }),
-    );
+    response.end(JSON.stringify(request.url === "/startupz" ? { ok: true, status: "started" } : { ready: true, ...identity }));
   }).listen(port, "127.0.0.1");
 }
 `,

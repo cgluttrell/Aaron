@@ -1,11 +1,12 @@
+import os from "node:os";
 import path from "node:path";
 import { inspectPathPermissions } from "@openclaw/fs-safe/permissions";
 import {
   managedGitHubIdentityEnvironment,
   removeManagedGitHubProfile,
   writeManagedGitHubProfileFiles,
-  type PreparedGitHubToolEnvironment,
 } from "../agents/github-tool-identity.js";
+import type { PreparedGitHubToolEnvironment } from "../agents/github-tool-identity.types.js";
 import { sha256HexPrefixCore } from "../infra/crypto-digest.js";
 import { executeGitCommand } from "../infra/git-exec.js";
 import { registerSecretValueForRedaction } from "../logging/secret-redaction-registry.js";
@@ -132,7 +133,7 @@ export async function prepareWorkerGitHubEnvironment(params: {
       ["credential.helper", "!gh auth git-credential"],
     ],
   });
-  if (process.platform === "win32") {
+  if (os.platform() === "win32") {
     const permissions = await inspectPathPermissions(profileDir);
     if (
       !permissions.ok ||

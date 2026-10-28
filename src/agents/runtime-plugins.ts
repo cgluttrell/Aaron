@@ -13,6 +13,7 @@ import {
   captureRuntimeChannelSource,
 } from "../plugins/channel-registry-adoption.js";
 import { withPluginMetadataSnapshotScope } from "../plugins/current-plugin-metadata-snapshot.js";
+import { ensureGlobalHookRunner } from "../plugins/hook-runner-global.js";
 import { extractPluginInstallRecordsFromInstalledPluginIndex } from "../plugins/installed-plugin-index-install-records.js";
 import {
   acquirePluginRegistryForInspection,
@@ -103,13 +104,15 @@ function resolveAgentRuntimePluginRegistryLoad(
   // startup runtime plugin ids plus selected run owners bound the registry scope.
   const activePluginIds = listLoadedRuntimePluginIds();
   const startupPluginIds =
-    params.purpose === "model-catalog"
-      ? (params.basePluginIds ?? [])
-      : (params.basePluginIds ??
-        (requestPluginRegistry
-          ? listRuntimePluginIdsFromRegistry(requestPluginRegistry)
-          : (metadataSnapshot.pluginIds ??
-            (activePluginIds.length > 0 ? activePluginIds : undefined))));
+    params.purpose === "isolated-completion"
+      ? []
+      : params.purpose === "model-catalog"
+        ? (params.basePluginIds ?? [])
+        : (params.basePluginIds ??
+          (requestPluginRegistry
+            ? listRuntimePluginIdsFromRegistry(requestPluginRegistry)
+            : (metadataSnapshot.pluginIds ??
+              (activePluginIds.length > 0 ? activePluginIds : undefined))));
   const plan = resolveAgentRuntimePluginLoadPlan({
     config: params.config,
     workspaceDir: workspaceDir ?? process.cwd(),
@@ -117,7 +120,9 @@ function resolveAgentRuntimePluginRegistryLoad(
     selections: resolveAgentRuntimePluginSelections(
       params.config,
       params.selections ?? [],
-      params.purpose === "model-catalog" ? [] : params.configuredHarnessRuntimes,
+      params.purpose === "model-catalog" || params.purpose === "isolated-completion"
+        ? []
+        : params.configuredHarnessRuntimes,
     ),
     metadataSnapshot,
     ...(params.purpose ? { purpose: params.purpose } : {}),
@@ -145,6 +150,7 @@ function resolveAgentRuntimePluginRegistryLoad(
     onlyPluginIds: startupPluginIds === undefined ? undefined : plan.pluginIds,
     channelPluginLoadIntent: startupPluginIds === undefined ? undefined : "full",
     borrowRegistry: params.borrowRegistry,
+    previousRegistry: params.purpose === "model-catalog" ? params.reusableRegistry : undefined,
   };
 }
 
@@ -155,7 +161,7 @@ function reusableAgentRuntimeRegistry(
   const pluginIds = loadOptions.onlyPluginIds;
   return params.reusableRegistry &&
     pluginIds !== undefined &&
-    (params.purpose !== "model-catalog" ||
+    ((params.purpose !== "model-catalog" && params.purpose !== "isolated-completion") ||
       listRuntimePluginIdsFromRegistry(params.reusableRegistry).every((pluginId) =>
         pluginIds.includes(pluginId),
       )) &&
@@ -175,7 +181,7 @@ function adoptAgentRuntimeRegistrations(
   toolDonor?: PluginRegistry;
 } {
   const activeRegistry = getActivePluginRegistry();
-  if (params.purpose === "model-catalog") {
+  if (params.purpose === "model-catalog" || params.purpose === "isolated-completion") {
     return { registry: pluginRegistry };
   }
   const channelRegistry =
@@ -368,6 +374,9 @@ export async function withAgentPluginRegistry<T>(params: {
     workspaceDir: params.workspaceDir,
   });
   setPluginRuntimeLoadContext(pluginRegistry, context);
+  // Tool policy dispatches through the global runner; without a process root it
+  // would not exist, and this run's before_tool_call hooks would never fire.
+  ensureGlobalHookRunner();
   const invocations = new PluginInvocationScope(
     pluginRegistry,
     collectRegistryInvocationInstances(pluginRegistry),

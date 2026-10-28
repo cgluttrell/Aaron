@@ -42,7 +42,7 @@ export function extractAssistantStreamSnapshot(
     observedMessage = { ...message, content: [{ type: "text", text: options.observedText }] };
   }
   const state: EmbeddedAgentSubscribeState["partialBlockState"] = {
-    thinking: false,
+    reasoningDepth: 0,
     final: false,
     inlineCode: createInlineCodeState(),
   };

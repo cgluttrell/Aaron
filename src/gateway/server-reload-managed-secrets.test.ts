@@ -1,6 +1,7 @@
 import { afterEach, assert, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../test/helpers/promise.js";
-import { lookupContextTokens, resetContextWindowCacheForTest } from "../agents/context.js";
+import { resolveContextTokensForModel } from "../agents/context.js";
+import { resetContextWindowCacheForTest } from "../agents/context.test-support.js";
 import { closePreparedModelRuntimeSnapshots } from "../agents/prepared-model-runtime.lifecycle.js";
 import { createModelProviderRouteOverrideResolver } from "../config/model-provider-config.js";
 import {
@@ -8,6 +9,10 @@ import {
   getRuntimeConfigSourceSnapshot,
 } from "../config/runtime-snapshot.js";
 import { projectConfigOntoRuntimeSourceSnapshot } from "../config/runtime-source-projection.js";
+import {
+  attachRuntimeConfigWriteApplication,
+  createRuntimeConfigWriteApplication,
+} from "../config/runtime-write-application.js";
 import type { ModelProviderConfig } from "../config/types.models.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { PluginRuntimeApplicationError } from "../plugins/lifecycle.js";
@@ -29,6 +34,8 @@ import type { GatewayConfigReloadTransactionOwnership } from "./config-reload.js
 import {
   closeTestConfigReloaders,
   createReloaderHarness,
+  createConfigReloadTestClock,
+  makeWrite,
   makeSnapshot,
   makeZeroDebounceHookWrite,
 } from "./config-reload.test-support.js";
@@ -199,6 +206,97 @@ async function createReload(
 }
 
 describe("managed reload authored source", () => {
+  it("acknowledges a delayed managed write already applied by the watcher with resolved secrets", async () => {
+    const initial: OpenClawConfig = { gateway: { reload: {} } };
+    const source: OpenClawConfig = {
+      ...initial,
+      models: {
+        providers: {
+          fixture: {
+            baseUrl: "https://fixture.example.invalid/v1",
+            apiKey: { source: "env", provider: "default", id: "RELOAD_KEY" },
+            models: [],
+          },
+        },
+      },
+    };
+    const prepareSnapshot = (config: OpenClawConfig) =>
+      prepareSecretsRuntimeSnapshot({
+        config,
+        includeAuthStoreRefs: false,
+        env: { RELOAD_KEY: "resolved-fixture-key" },
+      });
+    activateSecretsRuntimeSnapshotWithSource(await prepareSnapshot(initial), initial);
+    const activateRuntimeSecrets = createRuntimeSecretsActivator({
+      ...activatorOptions(),
+      prepareRuntimeSecretsSnapshot: ({ config }) => prepareSnapshot(config),
+    });
+    const handlers = createManagedReloadSecretHandlers({
+      params: {
+        activateRuntimeSecrets,
+        resolveSharedGatewaySessionGenerationForConfig: () => undefined,
+        sharedGatewaySessionGenerationState: new SharedGatewaySessionGenerationState({
+          current: undefined,
+          required: null,
+        }),
+        clients: [],
+        commitRuntimePolicy: vi.fn(),
+        reconcileRuntimePolicy: vi.fn(),
+      },
+      prepareRuntimeCandidate: (config) => config,
+      tryPrepareRuntimeSecrets: async (config) => ({
+        snapshot: await prepareSnapshot(config),
+        expectedRevision: getActiveSecretsRuntimeSnapshotRevision(),
+      }),
+      applyHotReload: async (_plan, _config, publication) => {
+        let committed = false;
+        await publication!.publish(
+          async () => {
+            committed = true;
+          },
+          () => committed,
+        );
+        return "applied";
+      },
+    });
+    const { clock, scheduler } = createConfigReloadTestClock();
+    const snapshot = makeSnapshot({ config: source, hash: "saved-secret-source" });
+    const readSnapshot = vi.fn(async () => makeSnapshot({ config: initial, hash: "initial" }));
+    const harness = createReloaderHarness(readSnapshot, {
+      scheduler,
+      initialConfig: initial,
+      onHotReload: handlers.onHotReload,
+      onNoopConfigCommit: handlers.onHotReload,
+      onEffectiveConfigUnchanged: handlers.onEffectiveConfigUnchanged,
+    });
+    await harness.reloader.ready;
+    readSnapshot.mockResolvedValue(snapshot);
+    harness.watcher.emit("change");
+    await clock.advanceBy(0);
+    expect(getRuntimeConfigSnapshot()?.models?.providers?.fixture?.apiKey).toBe(
+      "resolved-fixture-key",
+    );
+
+    const application = createRuntimeConfigWriteApplication();
+    const settled: string[] = [];
+    void application.result.then((status) => settled.push(status));
+    harness.emitWrite(
+      attachRuntimeConfigWriteApplication(
+        makeWrite(source, "saved-secret-source", { snapshot }),
+        application,
+      ),
+    );
+    await clock.advanceBy(0);
+
+    expect(settled).toEqual(["applied"]);
+    expect(getRuntimeConfigSnapshot()?.models?.providers?.fixture?.apiKey).toBe(
+      "resolved-fixture-key",
+    );
+    expect(getRuntimeConfigSourceSnapshot()).toEqual(source);
+    expect(harness.onHotReload).toHaveBeenCalledOnce();
+    await harness.reloader.stop();
+  });
+
   it.each(["same-source", "newer-write"] as const)(
     "rechecks config ownership after durable secrets publication preparation (%s)",
     async (observation) => {
@@ -275,43 +373,56 @@ describe("managed reload authored source", () => {
     },
   );
 
-  it.each([false, true])(
-    "commits the exact target before publication (hook fails: %s)",
-    async (fails) => {
+  it.each(["success", "hook fails", "publisher fails", "publisher replaces then fails"] as const)(
+    "commits the exact target and reconciles publication outcome: %s",
+    async (outcome) => {
       const initial = await prepare({ gateway: { port: 18789 } });
       const candidate = await prepare({ gateway: { port: 18790 } });
       activateSecretsRuntimeSnapshot(initial);
-      const failure = new Error("durable publication failed");
+      const publisherFails = outcome.startsWith("publisher");
+      const replaced = outcome === "publisher replaces then fails";
+      const failure = new Error(
+        publisherFails ? "snapshot publication failed" : "durable publication failed",
+      );
       const beforeSnapshotPublication = vi.fn(async (config: OpenClawConfig | null) => {
-        expect(getActiveSecretsRuntimeSnapshotState()?.config).toEqual(initial.config);
-        if (fails && config === candidate.config) {
-          throw failure;
+        if (!publisherFails) {
+          expect(getActiveSecretsRuntimeSnapshotState()?.config).toEqual(initial.config);
+          if (outcome === "hook fails" && config === candidate.config) {
+            throw failure;
+          }
         }
       });
-      const options = {
+      const activate = createRuntimeSecretsActivator({
         ...activatorOptions(),
-        activateRuntimeSecretsSnapshot: activateSecretsRuntimeSnapshot,
         beforeSnapshotPublication,
-      };
-      const activate = createRuntimeSecretsActivator(options);
-      const publication = activate.activatePreparedSnapshotIfCurrent(
-        candidate,
-        getActiveSecretsRuntimeSnapshotRevisionState(),
-        { reason: "reload", activate: true },
-      );
-      if (fails) {
+        activateRuntimeSecretsSnapshot: publisherFails
+          ? (snapshot) => {
+              if (replaced) {
+                activateSecretsRuntimeSnapshot(snapshot);
+              }
+              throw failure;
+            }
+          : activateSecretsRuntimeSnapshot,
+      });
+      const publication = publisherFails
+        ? activate.activatePreparedSnapshot(candidate, { reason: "reload", activate: true })
+        : activate.activatePreparedSnapshotIfCurrent(
+            candidate,
+            getActiveSecretsRuntimeSnapshotRevisionState(),
+            { reason: "reload", activate: true },
+          );
+      const survivor = outcome === "success" || replaced ? candidate : initial;
+      if (outcome !== "success") {
         await expect(publication).rejects.toBe(failure);
         expect(beforeSnapshotPublication.mock.calls.map(([config]) => config)).toEqual([
           candidate.config,
-          initial.config,
+          survivor.config,
         ]);
       } else {
         await expect(publication).resolves.toBe(candidate);
         expect(beforeSnapshotPublication).toHaveBeenCalledExactlyOnceWith(candidate.config);
       }
-      expect(getActiveSecretsRuntimeSnapshotState()?.config).toEqual(
-        fails ? initial.config : candidate.config,
-      );
+      expect(getActiveSecretsRuntimeSnapshotState()?.config).toEqual(survivor.config);
     },
   );
 
@@ -355,39 +466,6 @@ describe("managed reload authored source", () => {
       await expect(pending).resolves.toBeNull();
       expect(published).not.toHaveBeenCalled();
       const survivor = supersession === "snapshot" ? successor : initial;
-      expect(beforeSnapshotPublication.mock.calls.map(([config]) => config)).toEqual([
-        candidate.config,
-        survivor.config,
-      ]);
-      expect(getActiveSecretsRuntimeSnapshotState()?.config).toEqual(survivor.config);
-    },
-  );
-
-  it.each([false, true])(
-    "reconciles a throwing publisher (snapshot replaced: %s)",
-    async (replaced) => {
-      const initial = await prepare({ gateway: { port: 18789 } });
-      const candidate = await prepare({ gateway: { port: 18790 } });
-      activateSecretsRuntimeSnapshot(initial);
-      const beforeSnapshotPublication = vi.fn(async (_config: OpenClawConfig | null) => {});
-      const failure = new Error("snapshot publication failed");
-      const activator = createRuntimeSecretsActivator({
-        ...activatorOptions(),
-        beforeSnapshotPublication,
-        activateRuntimeSecretsSnapshot: (snapshot) => {
-          if (replaced) {
-            activateSecretsRuntimeSnapshot(snapshot);
-          }
-          throw failure;
-        },
-      });
-      await expect(
-        activator.activatePreparedSnapshot(candidate, {
-          reason: "reload",
-          activate: true,
-        }),
-      ).rejects.toBe(failure);
-      const survivor = replaced ? candidate : initial;
       expect(beforeSnapshotPublication.mock.calls.map(([config]) => config)).toEqual([
         candidate.config,
         survivor.config,
@@ -514,6 +592,10 @@ describe("managed reload authored source", () => {
         }
       } else {
         expect(result).toBe("applied");
+        expect(
+          getRuntimeConfigSnapshot()?.agents?.defaults?.models?.["openai/gpt-5.6-luna"]
+            ?.agentRuntime?.id,
+        ).toBe("codex");
       }
       expect(applyHotReload).toHaveBeenCalledTimes(cleanupFailed || committed ? 1 : 2);
       expect(commit).toHaveBeenCalledTimes(cleanupFailed ? 0 : 1);
@@ -521,16 +603,6 @@ describe("managed reload authored source", () => {
       expectAuthoredSource(cleanupFailed ? refreshed.source : next.source);
     },
   );
-
-  it("preserves generated model metadata across a successful hot reload", async () => {
-    const { next, run } = await createReload(async () => {});
-    await expect(run()).resolves.toBe("applied");
-    expect(
-      getRuntimeConfigSnapshot()?.agents?.defaults?.models?.["openai/gpt-5.6-luna"]?.agentRuntime
-        ?.id,
-    ).toBe("codex");
-    expectAuthoredSource(next.source);
-  });
 
   it("restores source and cold context limits before model replacement settles after commit failure", async () => {
     const initial = configPair("openclaw", 32_768);
@@ -549,8 +621,12 @@ describe("managed reload authored source", () => {
     const { ownership, run } = await createReload(
       async () => {
         // The candidate is visible before commit; a cold synchronous reader can cache its limits.
-        expect(lookupContextTokens("gpt-5.6-luna", { allowAsyncLoad: false })).toBe(65_536);
-        expect(lookupContextTokens(candidateOnlyModel, { allowAsyncLoad: false })).toBe(16_384);
+        expect(resolveContextTokensForModel({ model: "gpt-5.6-luna", allowAsyncLoad: false })).toBe(
+          65_536,
+        );
+        expect(
+          resolveContextTokensForModel({ model: candidateOnlyModel, allowAsyncLoad: false }),
+        ).toBe(16_384);
         throw failure;
       },
       undefined,
@@ -574,8 +650,12 @@ describe("managed reload authored source", () => {
       expect(ownership.markRuntimeCommitted).not.toHaveBeenCalled();
       expectAuthoredSource(initial.source);
       expect(getActiveSecretsRuntimeSnapshotState()?.config).toEqual(initial.config);
-      expect(lookupContextTokens("gpt-5.6-luna", { allowAsyncLoad: false })).toBe(32_768);
-      expect(lookupContextTokens(candidateOnlyModel, { allowAsyncLoad: false })).toBeUndefined();
+      expect(resolveContextTokensForModel({ model: "gpt-5.6-luna", allowAsyncLoad: false })).toBe(
+        32_768,
+      );
+      expect(
+        resolveContextTokensForModel({ model: candidateOnlyModel, allowAsyncLoad: false }),
+      ).toBeUndefined();
     })();
     await verification;
   });

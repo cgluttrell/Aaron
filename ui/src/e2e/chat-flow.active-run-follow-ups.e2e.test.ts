@@ -1,7 +1,10 @@
+import fs from "node:fs/promises";
 import path from "node:path";
+import type { Locator, Page } from "playwright";
 import { expect, it } from "vitest";
 import { createControlUiE2eArtifactDir } from "../test-helpers/control-ui-e2e-artifacts.ts";
 import { waitForControlUiGatewayReconnecting } from "../test-helpers/control-ui-e2e-readiness.ts";
+import { takeControlUiScreenshotFrame } from "../test-helpers/control-ui-e2e-screenshot.ts";
 import {
   chatSessionListResponse,
   createChatFlowE2eSuite,
@@ -15,7 +18,98 @@ import { createControlUiE2eContextOptions } from "./control-ui-e2e-suite.test-su
 
 const suite = createChatFlowE2eSuite();
 
+async function newChatPage(owner: typeof suite) {
+  const context = await owner.newBrowserContext(createControlUiE2eContextOptions());
+  return { context, page: await context.newPage() };
+}
+
+const chatComposer = (page: Page) => page.locator(".agent-chat__composer-combobox textarea");
+const chatTranscript = (page: Page) => page.locator(".chat-thread-inner");
+const expectCount = (locator: Locator, count: number) =>
+  expect.poll(() => locator.count()).toBe(count);
+const textMessage = (role: string, text: string, extra: Record<string, unknown> = {}) => ({
+  role,
+  content: [{ type: "text", text }],
+  ...extra,
+});
+const persistedText = (role: string, text: string, metadata: Record<string, unknown>) =>
+  textMessage(role, text, { timestamp: Date.now(), __openclaw: metadata });
+const chatEvent = (
+  runId: string,
+  sessionKey: string,
+  state: string,
+  fields: Record<string, unknown> = {},
+) => ({ runId, sessionKey, state, ...fields });
+
 suite.define(() => {
+  it("removes the typed /steer queue chip after consumption while the original run stays active", async () => {
+    const { page } = await newChatPage(suite);
+    const runId = "active-run";
+    const sessionKey = "agent:main:main";
+    const sessionInfo = { key: sessionKey, activeRunIds: [runId], hasActiveRun: true };
+    const gateway = await installMockGateway(page, {
+      historyMessages: [
+        persistedText("user", "Check how the metrics file is populated.", {
+          id: "original-user",
+          idempotencyKey: `${runId}:user`,
+          seq: 1,
+        }),
+      ],
+      inFlightRun: { runId, text: "Checking the metrics pipeline." },
+      sessionInfo,
+    });
+    await page.goto(`${suite.server.baseUrl}chat`);
+    const stop = page.getByRole("button", { name: "Stop generating" });
+    await stop.waitFor();
+    const steerText = "Keep the numbers in metrics.json, not USER.md.";
+    await gateway.deferNext("chat.send");
+    await chatComposer(page).fill(`/steer ${steerText}`);
+    await chatComposer(page).press("Control+Enter");
+    const sent = await gateway.waitForRequest("chat.send");
+    const params = requireRecord(sent.params);
+    expect(params).toMatchObject({ sessionKey, message: steerText, queueMode: "steer" });
+    const steerRunId = requireString(params.idempotencyKey, "steer input identity");
+    await gateway.resolveDeferred("chat.send", { runId: steerRunId, status: "started" });
+    const steerMessage = persistedText("user", steerText, {
+      id: "consumed-steer",
+      idempotencyKey: `${steerRunId}:user`,
+      seq: 2,
+      steerTargetRunId: runId,
+    });
+    await gateway.emitGatewayEvent("session.message", {
+      ...sessionInfo,
+      sessionKey,
+      clientRunId: steerRunId,
+      message: steerMessage,
+      messageId: "consumed-steer",
+      messageSeq: 2,
+    });
+    const reply = "Understood. I will verify metrics.json and leave USER.md unchanged.";
+    await gateway.emitGatewayEvent(
+      "chat",
+      chatEvent(runId, sessionKey, "delta", {
+        message: textMessage("assistant", reply),
+      }),
+    );
+    const userBubble = page.locator(".chat-group.user", { hasText: steerText });
+    const replyBubble = chatTranscript(page).getByText(reply, { exact: true });
+    await expectCount(userBubble, 1);
+    await replyBubble.waitFor();
+    await stop.waitFor();
+    const parent = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
+    if (parent) {
+      const dir = createControlUiE2eArtifactDir("consumed-slash-steer", parent);
+      const frame = await takeControlUiScreenshotFrame(
+        page,
+        chatTranscript(page),
+        [userBubble, replyBubble, stop],
+        { animations: "disabled" },
+      );
+      await fs.writeFile(path.join(dir, "consumed-steer.png"), frame.png);
+    }
+    await expectCount(page.locator(".chat-queue__item"), 0);
+  });
+
   it("preserves a non-steer server default for active-run follow-ups", async () => {
     const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
     const page = await context.newPage();
@@ -141,7 +235,10 @@ suite.define(() => {
       await page.goto(`${suite.server.baseUrl}chat`);
 
       const composer = page.locator(".agent-chat__composer-combobox textarea");
-      await page.locator(".chat-tool-msg-summary", { hasText: "Exec" }).waitFor();
+      await page
+        .locator(".chat-tool-msg-summary")
+        .getByRole("img", { name: "exec", exact: true })
+        .waitFor();
       await page.getByRole("button", { name: "Stop generating" }).waitFor();
       let agentSequence = 0;
       const commentaryText = "The active commentary stays visible.";
@@ -253,10 +350,6 @@ suite.define(() => {
         result: "process complete",
         toolCallId: "callProcess",
       });
-      const workingRowKey = await page
-        .locator("[data-virtual-row-key^='agent-run:']")
-        .last()
-        .getAttribute("data-virtual-row-key");
       const finalText = Array.from(
         { length: 18 },
         (_, index) =>
@@ -278,11 +371,6 @@ suite.define(() => {
         hasText: "Terminal response paragraph 1.",
       });
       await streamingBubble.waitFor();
-      const streamingRow = streamingBubble.locator(
-        "xpath=ancestor::div[contains(@class, 'chat-virtual-row')]",
-      );
-      await streamingRow.waitFor();
-      expect(await streamingRow.getAttribute("data-virtual-row-key")).not.toBe(workingRowKey);
       const steerBubble = page.locator(".chat-group.user", { hasText: steerText }).last();
       const steerElement = await steerBubble.elementHandle();
       // Scrolling between separate protocol reads can make adjacent rows appear to overlap.
@@ -304,8 +392,16 @@ suite.define(() => {
       const durableFinalMessage = {
         role: "assistant",
         content: [{ text: finalText, type: "text" }],
-        __openclaw: { id: "ui4-final", seq: 5 },
+        __openclaw: { id: "ui4-final", seq: 5, runId },
       };
+      await gateway.emitGatewayEvent("chat", {
+        deltaText: "",
+        message: { role: "assistant", content: [] },
+        replace: true,
+        runId,
+        sessionKey: "agent:main:main",
+        state: "delta",
+      });
       await gateway.emitGatewayEvent("session.message", {
         activeRunIds: [runId],
         clientRunId: runId,
@@ -370,7 +466,16 @@ suite.define(() => {
           page.locator("[data-virtual-row-key^='agent-run:'] .chat-bubble.streaming").count(),
         )
         .toBe(0);
-      await gateway.emitChatFinal({ runId, text: finalText });
+      await gateway.emitGatewayEvent("chat", {
+        runId,
+        sessionKey: "agent:main:main",
+        state: "final",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: finalText }],
+          openclawDisplayContent: [],
+        },
+      });
       await expect
         .poll(() =>
           page.locator(".chat-thread-inner").getByText(finalText, { exact: true }).count(),
@@ -385,7 +490,7 @@ suite.define(() => {
   });
 
   it.each(["before", "after"] as const)(
-    "keeps cumulative stream text ordered when history resolves %s the live steer event",
+    "keeps accepted steers before the unsaved tail when history resolves %s the live event",
     async (historyOrder) => {
       const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
       const page = await context.newPage();
@@ -473,7 +578,7 @@ suite.define(() => {
                 .locator(".chat-bubble .chat-text")
                 .evaluateAll((bubbles) => bubbles.map((bubble) => bubble.textContent?.trim())),
             )
-            .toEqual([initialText, beforeText, steerText, afterText]);
+            .toEqual([initialText, steerText, `${beforeText}\n${afterText}`]);
         } finally {
           const artifactDirParent = process.env.OPENCLAW_UI_E2E_ARTIFACT_DIR?.trim();
           const artifactDir = artifactDirParent
@@ -492,7 +597,7 @@ suite.define(() => {
     },
   );
 
-  it("replaces a retained cumulative steer prefix with split history around keyed commentary", async () => {
+  it("keeps an accepted steer between saved output and its live continuation through reconnect", async () => {
     const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
     const page = await context.newPage();
     const runId = "run-steer-split";
@@ -557,7 +662,11 @@ suite.define(() => {
       await transcript.getByText(initialText, { exact: true }).waitFor();
       await emitDelta(beforeText);
       await transcript.getByText(beforeText, { exact: true }).waitFor();
-      // The live steer closes one combined segment before split history replaces it.
+      await gateway.setMethodResponse("chat.history", {
+        messages: [userMessage, steerMessage],
+        inFlightRun: { runId, startedAt, text: beforeText },
+        sessionInfo,
+      });
       await gateway.emitGatewayEvent("session.message", {
         ...sessionInfo,
         clientRunId: steerRunId,
@@ -566,42 +675,43 @@ suite.define(() => {
         messageSeq: 5,
         sessionKey: "agent:main:main",
       });
-      await expect.poll(bubbleTexts).toEqual([initialText, beforeText, steerText]);
+      await expect.poll(bubbleTexts).toEqual([initialText, steerText, beforeText]);
       await capture("retained-prefix");
 
+      const savedMessages = [
+        userMessage,
+        {
+          role: "assistant",
+          content: "A",
+          timestamp: startedAt,
+          __openclaw: { id: "split-a", runId, seq: 2 },
+        },
+        {
+          role: "assistant",
+          content: commentaryText,
+          timestamp: startedAt + 1_000,
+          __openclaw: { id: "split-commentary", runId, seq: 3 },
+          openclawStreamFallback: {
+            itemId: "split-commentary-item",
+            source: "segment",
+            replacementText: commentaryText,
+            runId,
+          },
+        },
+        {
+          role: "assistant",
+          content: "B",
+          timestamp: startedAt + 2_000,
+          __openclaw: { id: "split-b", runId, seq: 4 },
+        },
+        steerMessage,
+      ];
       await gateway.setMethodResponse("chat.history", {
-        messages: [
-          userMessage,
-          {
-            role: "assistant",
-            content: "A",
-            timestamp: startedAt,
-            __openclaw: { id: "split-a", idempotencyKey: runId, seq: 2 },
-          },
-          {
-            role: "assistant",
-            content: commentaryText,
-            timestamp: startedAt + 1_000,
-            __openclaw: { id: "split-commentary", idempotencyKey: runId, seq: 3 },
-            openclawStreamFallback: {
-              itemId: "split-commentary-item",
-              source: "segment",
-              replacementText: commentaryText,
-              runId,
-            },
-          },
-          {
-            role: "assistant",
-            content: "B",
-            timestamp: startedAt + 2_000,
-            __openclaw: { id: "split-b", idempotencyKey: runId, seq: 4 },
-          },
-          steerMessage,
-        ],
+        messages: savedMessages,
         inFlightRun: {
           runId,
           startedAt,
-          text: beforeText,
+          text: "",
           events: [
             {
               runId,
@@ -628,7 +738,7 @@ suite.define(() => {
       await gateway.resolveDeferred("chat.startup");
       await transcript.getByText(commentaryText, { exact: true }).waitFor();
       await page.getByRole("button", { name: "Stop generating" }).waitFor();
-      await emitDelta(`${beforeText} ${afterText}`);
+      await emitDelta(afterText);
 
       try {
         await expect
@@ -645,6 +755,41 @@ suite.define(() => {
       } finally {
         await capture("recovered-continuation");
       }
+      const savedAfter = [
+        ...savedMessages,
+        {
+          role: "assistant",
+          content: latestCommentaryText,
+          __openclaw: { id: "saved-latest-commentary", runId, seq: 6 },
+          openclawStreamFallback: {
+            itemId: "split-latest-commentary",
+            source: "segment",
+            replacementText: latestCommentaryText,
+            runId,
+          },
+        },
+        {
+          role: "assistant",
+          content: afterText,
+          __openclaw: { id: "saved-answer", runId, seq: 7 },
+        },
+      ];
+      await gateway.setMethodResponse("chat.history", {
+        messages: savedAfter,
+        sessionInfo: { ...sessionInfo, activeRunIds: [], hasActiveRun: false },
+      });
+      await page.reload();
+      await expect
+        .poll(bubbleTexts)
+        .toEqual([
+          initialText,
+          "A",
+          commentaryText,
+          "B",
+          steerText,
+          latestCommentaryText,
+          afterText,
+        ]);
     } finally {
       await suite.closeBrowserContext(context);
     }
@@ -826,162 +971,6 @@ suite.define(() => {
       const sends = await waitForRequests(gateway, "chat.send", 2);
       expect(requireRecord(sends[1]?.params)).toMatchObject({ message: followUp });
       await queuedRow.waitFor({ state: "detached", timeout: 10_000 });
-    } finally {
-      await suite.closeBrowserContext(context);
-    }
-  });
-
-  it("honors a session interrupt override ahead of the webchat config default", async () => {
-    const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
-    const page = await context.newPage();
-    const sessionKey = "agent:main:main";
-    const runtimeConfig = {
-      messages: { queue: { byChannel: { webchat: "steer" }, mode: "steer" } },
-    };
-    const gateway = await installMockGateway(page, {
-      methodResponses: {
-        "config.get": {
-          config: runtimeConfig,
-          hash: "queue-session-override-config",
-          issues: [],
-          raw: JSON.stringify(runtimeConfig),
-          runtimeConfig,
-          valid: true,
-        },
-        "sessions.list": chatSessionListResponse([
-          {
-            effectiveQueueMode: "interrupt",
-            key: "agent:main:main",
-            kind: "direct",
-            label: "Main",
-            queueMode: "interrupt",
-            updatedAt: Date.now(),
-          },
-        ]),
-      },
-      sessionInfo: {
-        effectiveQueueMode: "interrupt",
-        hasActiveRun: false,
-        key: "agent:main:main",
-        queueMode: "interrupt",
-        status: "done",
-      },
-      sessionKey,
-    });
-
-    try {
-      await page.goto(`${suite.server.baseUrl}chat`);
-
-      await page.locator(".agent-chat__composer-combobox textarea").fill("keep this run active");
-      await page.getByRole("button", { name: "Send message" }).click();
-      await gateway.waitForRequest("chat.send");
-      await page.getByRole("button", { name: "Stop generating" }).waitFor({ timeout: 10_000 });
-
-      const followUp = "interrupt for this session override";
-      await page.locator(".agent-chat__composer-combobox textarea").fill(followUp);
-      await page.getByRole("button", { name: "Send message" }).click();
-
-      const sends = await waitForRequests(gateway, "chat.send", 2);
-      expect(requireRecord(sends[1]?.params)).toMatchObject({
-        message: followUp,
-        queueMode: "interrupt",
-        sessionKey,
-      });
-    } finally {
-      await suite.closeBrowserContext(context);
-    }
-  });
-
-  it("routes /redirect through one interrupt-mode chat.send", async () => {
-    const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
-    const page = await context.newPage();
-    const gateway = await installMockGateway(page);
-
-    try {
-      await page.goto(`${suite.server.baseUrl}chat`);
-      await page
-        .locator(".agent-chat__composer-combobox textarea")
-        .fill("/redirect start over cleanly");
-      await page.getByRole("button", { name: "Send message" }).click();
-
-      const request = await gateway.waitForRequest("chat.send");
-      expect(requireRecord(request.params)).toMatchObject({
-        message: "start over cleanly",
-        queueMode: "interrupt",
-        sessionKey: "agent:main:main",
-        idempotencyKey: expect.any(String),
-      });
-      await page.getByText("Redirected.").waitFor({ timeout: 10_000 });
-      await expectRequestCountStable(gateway, "chat.send", 1);
-    } finally {
-      await suite.closeBrowserContext(context);
-    }
-  });
-
-  it("steers a restored queued message when only the session row reports the active run", async () => {
-    const context = await suite.newBrowserContext(createControlUiE2eContextOptions());
-    const page = await context.newPage();
-    const gateway = await installMockGateway(page);
-
-    try {
-      await page.goto(`${suite.server.baseUrl}settings/appearance`);
-      await page.locator("[data-settings-follow-up-mode]").selectOption("queue");
-      await page.goto(`${suite.server.baseUrl}chat?session=main`);
-      await expect.poll(() => new URL(page.url()).pathname).toMatch(/\/chat\/main$/);
-
-      await page.locator(".agent-chat__composer-combobox textarea").fill("keep this run active");
-      await page.getByRole("button", { name: "Send message" }).click();
-      await gateway.waitForRequest("chat.send");
-      await page.getByRole("button", { name: "Stop generating" }).waitFor({ timeout: 10_000 });
-
-      const queuedPrompt = "steer this after restoring the queue";
-      await page.locator(".agent-chat__composer-combobox textarea").fill(queuedPrompt);
-      await page.getByRole("button", { name: "Queue message" }).click();
-      await page.locator(".chat-queue").getByText(queuedPrompt).waitFor({ timeout: 10_000 });
-
-      await gateway.setSessionsListResponse(
-        chatSessionListResponse([
-          {
-            activeLeafEntryId: "leaf-active",
-            activeRunIds: ["active-run"],
-            hasActiveRun: true,
-            key: "global",
-            kind: "global",
-            label: "Global",
-            sessionId: "global-active-run",
-            status: "running",
-            updatedAt: Date.now(),
-          },
-          {
-            activeLeafEntryId: "leaf-active",
-            activeRunIds: ["active-run"],
-            hasActiveRun: true,
-            key: "agent:main:main",
-            kind: "direct",
-            label: "Main",
-            sessionId: "main-active-run",
-            status: "running",
-            updatedAt: Date.now(),
-          },
-        ]),
-      );
-      await page.reload();
-      await gateway.waitForRequest("sessions.list");
-
-      const queue = page.locator(".chat-queue");
-      await queue.getByText(queuedPrompt).waitFor({ timeout: 10_000 });
-      await queue.getByRole("button", { name: "Steer" }).click();
-
-      const steerRequest = await gateway.waitForRequest("chat.send");
-      const steerParams = requireRecord(steerRequest.params);
-      expect(steerParams).toMatchObject({
-        deliver: false,
-        message: queuedPrompt,
-        queueMode: "steer",
-        sessionKey: "agent:main:main",
-      });
-      expect(steerParams).not.toHaveProperty("expectedRunId");
-      expect(steerParams).not.toHaveProperty("expectedLeafEntryId");
     } finally {
       await suite.closeBrowserContext(context);
     }

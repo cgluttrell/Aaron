@@ -1,11 +1,8 @@
 import type { EmbeddedRunAttemptParamsV2 as EmbeddedRunAttemptParams } from "openclaw/plugin-sdk/agent-harness-runtime";
 import type { CodexAppServerClient } from "./client.js";
 import type { CodexAppServerRuntimeOptions } from "./config.js";
-import {
-  releaseLeasedSharedCodexAppServerClient,
-  type CodexAppServerClientOptions,
-  type CodexAppServerClientFactory,
-} from "./shared-client.js";
+import { releaseCodexProbeClient } from "./probe-client.js";
+import type { CodexAppServerClientOptions, CodexAppServerClientFactory } from "./shared-client.js";
 import type { CodexNativeWebSearchSupport } from "./web-search.js";
 
 function resolveOverriddenProviderWebSearchSupport(
@@ -20,34 +17,6 @@ function resolveOverriddenProviderWebSearchSupport(
   return provider === "openai" ? "supported" : "unsupported";
 }
 
-async function readConfiguredProviderWebSearchSupport(params: {
-  client: CodexAppServerClient;
-  timeoutMs: number;
-  signal: AbortSignal;
-  expectedNativeModelProvider?: string;
-}): Promise<CodexNativeWebSearchSupport> {
-  if (params.expectedNativeModelProvider) {
-    // The capability RPC describes the configured provider, not a persisted thread.
-    const configured = await params.client.request(
-      "config/read",
-      { includeLayers: false },
-      { timeoutMs: params.timeoutMs, signal: params.signal },
-    );
-    if ((configured.config.model_provider ?? "openai") !== params.expectedNativeModelProvider) {
-      return "unknown";
-    }
-  }
-  const response = await params.client.request(
-    "modelProvider/capabilities/read",
-    {},
-    {
-      timeoutMs: params.timeoutMs,
-      signal: params.signal,
-    },
-  );
-  return response.webSearch ? "supported" : "unsupported";
-}
-
 export async function resolveCodexProviderWebSearchSupportForClient(params: {
   client: CodexAppServerClient;
   timeoutMs: number;
@@ -60,7 +29,20 @@ export async function resolveCodexProviderWebSearchSupportForClient(params: {
     return overrideSupport;
   }
   try {
-    return await readConfiguredProviderWebSearchSupport(params);
+    const options = { timeoutMs: params.timeoutMs, signal: params.signal };
+    if (params.expectedNativeModelProvider) {
+      // The capability RPC describes the configured provider, not a persisted thread.
+      const configured = await params.client.request(
+        "config/read",
+        { includeLayers: false },
+        options,
+      );
+      if ((configured.config.model_provider ?? "openai") !== params.expectedNativeModelProvider) {
+        return "unknown";
+      }
+    }
+    const response = await params.client.request("modelProvider/capabilities/read", {}, options);
+    return response.webSearch ? "supported" : "unsupported";
   } catch {
     return "unknown";
   }
@@ -105,7 +87,7 @@ export async function resolveCodexProviderWebSearchSupport(params: {
     return "unknown";
   } finally {
     if (client) {
-      releaseLeasedSharedCodexAppServerClient(client);
+      await releaseCodexProbeClient(client, params.clientFactory);
     }
   }
 }

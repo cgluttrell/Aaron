@@ -160,13 +160,13 @@ function defaultRunGh(args: string[]) {
 }
 
 function defaultDownloadArchive(args: string[]) {
-  const options: ExecFileSyncOptionsWithBufferEncoding = {
+  const options = {
     encoding: null,
     timeout: 60_000,
     killSignal: "SIGKILL",
     maxBuffer: 512 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
-  };
+  } satisfies ExecFileSyncOptionsWithBufferEncoding;
   try {
     return execFileSync("gh", [...args, "--allow-escape-sequences"], options);
   } catch (error) {

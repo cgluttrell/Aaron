@@ -194,6 +194,11 @@ function requireEmbeddedAgentArgs(runEmbeddedAgent: ReturnType<typeof vi.fn>) {
   return args as EmbeddedAgentArgs;
 }
 
+/** The harness core config mirrors the fake runtime's model defaults through the configured path. */
+const coreConfigWithDefaultModel = {
+  agents: { defaults: { model: { primary: "together/Qwen/Qwen2.5-7B-Instruct-Turbo" } } },
+} as OpenClawConfig;
+
 async function runGenerateVoiceResponse(
   payloads: Array<Record<string, unknown>>,
   overrides?: {
@@ -202,20 +207,21 @@ async function runGenerateVoiceResponse(
     userMessage?: string;
     onEarlyText?: (text: string) => Promise<boolean>;
     senderIsOwner?: boolean;
+    coreConfig?: OpenClawConfig;
   },
 ) {
   const voiceConfig = VoiceCallConfigSchema.parse({
     responseTimeoutMs: 5000,
   });
-  const coreConfig = {} as OpenClawConfig;
   const runtime = overrides?.runtime ?? createAgentRuntime(payloads).runtime;
   const userMessage = overrides?.userMessage ?? "hello there";
 
   const result = await generateVoiceResponse({
     voiceConfig,
-    coreConfig,
+    coreConfig: overrides?.coreConfig ?? coreConfigWithDefaultModel,
     agentRuntime: runtime,
     callId: "call-123",
+    agentId: "main",
     from: "+15550001111",
     senderIsOwner: overrides?.senderIsOwner,
     transcript: overrides?.transcript ?? [{ speaker: "user", text: userMessage }],
@@ -618,6 +624,31 @@ describe("generateVoiceResponse", () => {
     expect(result.text).toBe("Absolutely. Tell me what you want to do next.");
   });
 
+  it.each([
+    { agents: { defaults: { model: { primary: "anthropic/claude-opus-5-5" } } } },
+    {
+      agents: {
+        entries: { main: { model: "anthropic/claude-opus-5-5" } },
+        defaults: { model: { primary: "openai/gpt-5.4" } },
+      },
+    },
+  ] as OpenClawConfig[])(
+    "runs the call agent's configured model when responseModel is unset",
+    async (coreConfig) => {
+      const { runtime, runEmbeddedAgent } = createAgentRuntime([
+        { text: '{"spoken":"Configured model answers."}' },
+      ]);
+
+      const { result } = await runGenerateVoiceResponse([], { runtime, coreConfig });
+
+      expect(result.text).toBe("Configured model answers.");
+      expect(requireEmbeddedAgentArgs(runEmbeddedAgent)).toMatchObject({
+        provider: "anthropic",
+        model: "claude-opus-5-5",
+      });
+    },
+  );
+
   it("pins the voice session to responseModel before running the embedded agent", async () => {
     const { runtime, runEmbeddedAgent, patchSessionEntry, sessionStore } = createAgentRuntime([
       { text: '{"spoken":"Pinned model works."}' },
@@ -640,6 +671,7 @@ describe("generateVoiceResponse", () => {
       coreConfig: {} as OpenClawConfig,
       agentRuntime: runtime,
       callId: "call-123",
+      agentId: "main",
       from: "+15550001111",
       senderIsOwner: undefined,
       transcript: [{ speaker: "user", text: "hello there" }],
@@ -690,6 +722,7 @@ describe("generateVoiceResponse", () => {
       coreConfig: {} as OpenClawConfig,
       agentRuntime: runtime,
       callId: "call-123",
+      agentId: "main",
       from: "+15550001111",
       senderIsOwner: undefined,
       transcript: [{ speaker: "user", text: "hello there" }],
@@ -735,9 +768,10 @@ describe("generateVoiceResponse", () => {
 
     const result = await generateVoiceResponse({
       voiceConfig,
-      coreConfig: {} as OpenClawConfig,
+      coreConfig: coreConfigWithDefaultModel,
       agentRuntime: runtime,
       callId: "call-123",
+      agentId: "main",
       sessionKey,
       from: "+15550001111",
       senderIsOwner: undefined,
@@ -811,6 +845,7 @@ describe("generateVoiceResponse", () => {
       coreConfig: {} as OpenClawConfig,
       agentRuntime: runtime,
       callId: "call-123",
+      agentId: "main",
       sessionKey: "voice:call:call-123",
       from: "+15550001111",
       senderIsOwner: undefined,
@@ -842,6 +877,7 @@ describe("generateVoiceResponse", () => {
       coreConfig: {} as OpenClawConfig,
       agentRuntime: runtime,
       callId: "call-123",
+      agentId: "voice",
       sessionKey: "meet-room-1",
       from: "+15550001111",
       senderIsOwner: undefined,
@@ -869,6 +905,7 @@ describe("generateVoiceResponse", () => {
         coreConfig: {} as OpenClawConfig,
         agentRuntime: runtime,
         callId: "call-123",
+        agentId: "voice",
         sessionKey,
         from: "+15550001111",
         senderIsOwner: undefined,
@@ -907,6 +944,7 @@ describe("generateVoiceResponse", () => {
       coreConfig: { session: { mainKey: "work" } },
       agentRuntime: runtime,
       callId: "call-123",
+      agentId: "voice",
       sessionKey: "agent:voice:main",
       from: "+15550001111",
       senderIsOwner: undefined,
@@ -919,10 +957,10 @@ describe("generateVoiceResponse", () => {
   });
 
   it.each([
-    { configuredAgentId: undefined, agentId: "main" },
-    { configuredAgentId: "voice", agentId: "voice" },
+    { configuredAgentId: "voice", agentId: "main" },
+    { configuredAgentId: undefined, agentId: "voice" },
   ])(
-    "uses the $agentId agent workspace with config agentId=$configuredAgentId",
+    "uses recorded owner $agentId with config agentId=$configuredAgentId",
     async ({ configuredAgentId, agentId }) => {
       const {
         runtime,
@@ -943,6 +981,7 @@ describe("generateVoiceResponse", () => {
         coreConfig,
         agentRuntime: runtime,
         callId: "call-123",
+        agentId,
         from: "+15550001111",
         senderIsOwner: undefined,
         transcript: [],
@@ -971,6 +1010,31 @@ describe("generateVoiceResponse", () => {
       expect(args.sessionFile).toBeUndefined();
     },
   );
+
+  it("rejects an empty recorded owner before session work", async () => {
+    const { runtime, runEmbeddedAgent, runWithWorkAdmission, sessionStore } = createAgentRuntime(
+      [],
+    );
+
+    await expect(
+      generateVoiceResponse({
+        voiceConfig: VoiceCallConfigSchema.parse({ agentId: "voice" }),
+        coreConfig: {},
+        agentRuntime: runtime,
+        callId: "call-unowned",
+        agentId: " ",
+        sessionKey: "agent:support:voice:15550001111",
+        from: "+15550001111",
+        senderIsOwner: undefined,
+        transcript: [],
+        userMessage: "hello there",
+      }),
+    ).rejects.toThrow("Voice Call has no recorded agent owner");
+
+    expect(runWithWorkAdmission).not.toHaveBeenCalled();
+    expect(runEmbeddedAgent).not.toHaveBeenCalled();
+    expect(sessionStore).toEqual({});
+  });
 
   it("prefers the agent frozen on the call", async () => {
     const { runtime, runEmbeddedAgent, resolveStorePath } = createAgentRuntime([
@@ -1020,6 +1084,7 @@ describe("generateVoiceResponse", () => {
       coreConfig,
       agentRuntime: runtime,
       callId: "call-123",
+      agentId: "voice",
       from: "+15550001111",
       senderIsOwner: undefined,
       transcript: [],

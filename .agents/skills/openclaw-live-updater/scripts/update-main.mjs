@@ -24,6 +24,7 @@ import path from "node:path";
 import process from "node:process";
 import { setTimeout as defaultSleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS } from "../../../../gateway-shutdown-budget.mjs";
 import { detectChangedScope } from "../../../../scripts/ci-changed-scope.mjs";
 import { isDirectRunUrl } from "../../../../scripts/lib/direct-run.mjs";
 import {
@@ -46,7 +47,6 @@ const GATEWAY_READINESS_ATTEMPTS = 7;
 const GATEWAY_READINESS_RETRY_DELAY_MS = 5_000;
 const GATEWAY_CLI_TIMEOUT_MS = 30_000;
 const DEFAULT_LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS = 20;
-const MAX_LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS = 300;
 const LAUNCHD_TEARDOWN_MARGIN_MS = 15_000;
 const GATEWAY_STOP_PROOF_RETRY_DELAY_MS = 250;
 const GATEWAY_PROCESS_START_TIMEOUT_MS = 20_000;
@@ -519,7 +519,7 @@ function applicableUrlRewrite(checkout, remoteUrl) {
   );
 }
 
-export function originMatches(remoteUrl) {
+function originMatches(remoteUrl) {
   return githubSlug(remoteUrl) === DEFAULT_EXPECTED_ORIGIN;
 }
 
@@ -550,7 +550,7 @@ function isAncestorCommit(checkout, ancestor, descendant = "HEAD") {
   }
 }
 
-export function classifyActions(
+function classifyActions(
   changedPaths,
   { buildProvenanceKnown, buildRequired, nodeModulesPresent },
 ) {
@@ -1296,7 +1296,7 @@ function isTrustedOwnedRegularFile(fileStat) {
 }
 
 export function resolveLaunchAgentExitTimeoutSeconds(value) {
-  if (value === 0 || (Number.isInteger(value) && value > MAX_LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS)) {
+  if (value === 0 || (Number.isInteger(value) && value > LAUNCH_AGENT_EXIT_TIMEOUT_SECONDS)) {
     throw new UpdateInvariantError(
       "gateway_launchagent_failed",
       `managed Gateway LaunchAgent ExitTimeOut=${value} prevents bounded stopped proof`,
@@ -1787,7 +1787,7 @@ function verifyManagedGatewayRuntime(checkout, expectedSha) {
   return { commit: expectedSha, entrypoint: sourceEntrypoint, pid, port: deployment.port };
 }
 
-export function parseLaunchctlArguments(output) {
+function parseLaunchctlArguments(output) {
   const block = output.match(/\n\s*arguments = \{\n(?<body>[\s\S]*?)\n\s*\}/u)?.groups?.body;
   return block
     ? block
@@ -2638,7 +2638,7 @@ async function waitForManagedGatewayReadiness(
   );
 }
 
-export function isGatewayProbeResponse(route, payload) {
+function isGatewayProbeResponse(route, payload) {
   return route === "/readyz"
     ? payload?.ready === true
     : payload?.ok === true && payload.status === "live";
@@ -3069,7 +3069,7 @@ function readManagedPluginSourceRoots(checkout, deployment) {
   }
 }
 
-export function resolveManagedPluginSourceRoots(report) {
+function resolveManagedPluginSourceRoots(report) {
   if (!Array.isArray(report?.plugins)) {
     return null;
   }
@@ -3087,7 +3087,7 @@ export function resolveManagedPluginSourceRoots(report) {
  * @param {string} checkout
  * @param {GatewayDeploymentRef | null | undefined} deployment
  */
-export function resolveManagedGatewaySourceRoot(checkout, deployment) {
+function resolveManagedGatewaySourceRoot(checkout, deployment) {
   return typeof deployment?.entrypoint === "string" && deployment.entrypoint.length > 0
     ? path.dirname(path.resolve(deployment.entrypoint))
     : path.join(realpathSync(checkout), "dist");
@@ -3199,7 +3199,7 @@ function finalizeGatewayTiming(timing) {
   };
 }
 
-export function findExactMacTarget(processes, executable) {
+function findExactMacTarget(processes, executable) {
   const target = processes
     .split("\n")
     .map((line) => line.trim().match(/^(\d+)\s+(.+)$/u))

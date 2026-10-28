@@ -37,5 +37,9 @@
     "type": "object",
     "additionalProperties": false,
     "properties": {}
+  },
+  "modelCatalog": {
+    "discovery": { "clawrouter": "runtime" },
+    "runtimeAugment": true
   }
 }

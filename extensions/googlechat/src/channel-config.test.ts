@@ -207,7 +207,7 @@ describe("googlechatPlugin config adapter", () => {
         cfg: {} as OpenClawConfig,
         payload: unrelatedPayload,
       }),
-    ).toBe(unrelatedPayload);
+    ).toStrictEqual({ text: "/approve deadbeef allow-once" });
     expect(
       googlechatPlugin.outbound?.normalizePayload?.({
         cfg: {} as OpenClawConfig,
@@ -219,6 +219,9 @@ describe("googlechatPlugin config adapter", () => {
         cfg: {} as OpenClawConfig,
         payload: structuredPayload,
       }),
-    ).toBe(structuredPayload);
+    ).toStrictEqual({
+      text: `/approve ${approvalId.slice(0, 8)} allow-once`,
+      presentation: { blocks: [] },
+    });
   });
 });

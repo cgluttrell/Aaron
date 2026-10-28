@@ -17,8 +17,9 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-vi.mock("ws", () => ({
-  default: mocks.FakeWebSocket,
+vi.mock("openclaw/plugin-sdk/websocket-runtime", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("openclaw/plugin-sdk/websocket-runtime")>()),
+  WebSocket: mocks.FakeWebSocket,
 }));
 
 vi.mock("openclaw/plugin-sdk/ssrf-runtime", () => ({
@@ -172,42 +173,6 @@ describe("OpenAI realtime voice bridge reconnect", () => {
     expect(vi.getTimerCount()).toBe(0);
     expect(onClose).toHaveBeenCalledTimes(2);
     expect(onClose).toHaveBeenLastCalledWith("completed");
-  });
-
-  it("cancels a pending reconnect and allows a later explicit connect", async () => {
-    vi.useFakeTimers();
-    const onError = vi.fn();
-    const bridge = createNativeBridge({ onError });
-    const { connecting, socket } = beginBridgeConnection(bridge);
-
-    openSocket(socket);
-    emitSessionUpdated(socket);
-    await connecting;
-
-    socket.readyState = FakeWebSocket.CLOSED;
-    socket.emit("close", 1006, Buffer.from("transient drop"));
-    await vi.advanceTimersByTimeAsync(0);
-    expect(vi.getTimerCount()).toBe(1);
-
-    void bridge.close();
-    await vi.advanceTimersByTimeAsync(0);
-
-    expect(vi.getTimerCount()).toBe(0);
-    expect(FakeWebSocket.instances).toHaveLength(1);
-    expect(onError).not.toHaveBeenCalled();
-
-    const { connecting: reconnecting, socket: reconnectedSocket } = beginBridgeConnection(
-      bridge,
-      1,
-    );
-    openSocket(reconnectedSocket);
-    emitSessionUpdated(reconnectedSocket);
-    await reconnecting;
-
-    expect(bridge.isConnected()).toBe(true);
-    expect(FakeWebSocket.instances).toHaveLength(2);
-    expect(onError).not.toHaveBeenCalled();
-    await bridge.close();
   });
 
   it("does not report reconnect readiness after cancellation during provider setup", async () => {

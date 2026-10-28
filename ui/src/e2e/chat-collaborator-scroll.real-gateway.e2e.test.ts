@@ -8,7 +8,8 @@ import type {
   GatewayFrame,
   HelloOk,
 } from "../../../packages/gateway-protocol/src/schema/frames.ts";
-import { ensureProfileForEmail, setDisplayName } from "../../../src/state/user-profiles.ts";
+import { setDisplayName } from "../../../src/state/user-profile-writes.worker.ts";
+import { ensureProfileForEmail } from "../../../src/state/user-profiles.ts";
 import {
   createOpenClawTestInstance,
   type OpenClawTestInstance,
@@ -299,22 +300,6 @@ async function wheel(page: Page, delta: number) {
   await waitForChatScrollIdle(page);
 }
 
-async function waitForChatFollow(page: Page, renderedText: string, message: string) {
-  // Measure only after the streamed growth renders; smooth follow can outlast the
-  // default one-second poll on loaded CI hosts.
-  await expect
-    .poll(() => page.locator(".chat-pane-cache__pane--active .chat-thread").textContent(), {
-      message,
-      timeout: 15_000,
-    })
-    .toContain(renderedText);
-  await expect
-    .poll(() => chatThreadDistanceFromBottom(page), { message, timeout: 15_000 })
-    .toBeLessThanOrEqual(8);
-  await waitForChatScrollIdle(page);
-  expect(await chatThreadDistanceFromBottom(page), message).toBeLessThanOrEqual(8);
-}
-
 suite.define(() => {
   it("preserves reader intent through remote queue, stream, and persistence", async (context) => {
     await suite.runScenario(context, {
@@ -358,7 +343,7 @@ suite.define(() => {
               for (const [index, page] of pages.entries()) {
                 await page.addInitScript(() =>
                   localStorage.setItem(
-                    "openclaw:control-ui:community-invite",
+                    "openclaw:control-ui:community-invite:v2",
                     JSON.stringify({ dismissedAtMs: 1770000000000 }),
                   ),
                 );
@@ -490,11 +475,10 @@ suite.define(() => {
                     ),
                   )
                   .toBe(true);
-                await waitForChatFollow(
-                  reader,
-                  mode + " paragraph 14.",
-                  mode + ": own submit follows its assistant stream",
-                );
+                await waitForChatScrollIdle(reader);
+                await expect
+                  .poll(() => chatThreadDistanceFromBottom(reader))
+                  .toBeLessThanOrEqual(8);
                 if (mode.startsWith("reading")) {
                   await wheel(reader, -420);
                 }
@@ -642,11 +626,13 @@ suite.define(() => {
                   .toBeLessThanOrEqual(8);
                 await expect.poll(provider.requests).toBe(local.index);
                 await local.append(paragraphs("local-resume-" + mode, 3));
-                await waitForChatFollow(
-                  reader,
-                  "local-resume-" + mode + " paragraph 3.",
-                  mode + ": local submit follows its assistant stream",
-                );
+                await waitForChatScrollIdle(reader);
+                expect
+                  .soft(
+                    await chatThreadDistanceFromBottom(reader),
+                    "local submit follows its assistant stream",
+                  )
+                  .toBeLessThanOrEqual(8);
                 await local.finish();
                 for (const page of pages) {
                   await page

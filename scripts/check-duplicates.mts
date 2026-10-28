@@ -30,12 +30,14 @@ const targets = [
   "node-host-launcher.mjs",
   "node-runtime-update.mjs",
   "node-runtime-recovery.mjs",
+  "node-runtime-env.mjs",
   "node-sqlite.mjs",
   "node-version.mjs",
   "openclaw.mjs",
   "tsdown.ai.config.ts",
   "tsdown.config.ts",
   "vitest.config.ts",
+  "worker-heap-flag.mjs",
 ];
 
 const sourceExtensions = new Set([".ts", ".tsx", ".js", ".mjs", ".cjs"]);

@@ -17,6 +17,7 @@ import {
 import { withUpdateCommandExecutor } from "../cli/update-cli/update-command-executor.js";
 import * as processGroups from "../process/child-process-tree.js";
 import * as processIdentity from "../shared/pid-alive.js";
+import { resolveTestNodeExecPath } from "../test-utils/node-process.js";
 import { executeSqliteQuerySync } from "./kysely-sync.js";
 import {
   createManagedHandoffLeaseDatabase,
@@ -85,13 +86,17 @@ await withUpdateCommandExecutor(runId, async (executor) => {
 });
 `,
     );
-    const result = spawnSync(process.execPath, ["--import", "tsx", binding.nodeOption, child], {
-      cwd: fileURLToPath(new URL("../../", import.meta.url)),
-      env,
-      encoding: "utf8",
-      timeout: 10_000,
-      killSignal: "SIGKILL",
-    });
+    const result = spawnSync(
+      resolveTestNodeExecPath(),
+      ["--import", "tsx", binding.nodeOption, child],
+      {
+        cwd: fileURLToPath(new URL("../../", import.meta.url)),
+        env,
+        encoding: "utf8",
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+      },
+    );
     expect(result.error, result.stderr).toBeUndefined();
     expect(result.signal, result.stderr).toBe("SIGKILL");
     assertManagedHandoffTestConsumer(binding, result.pid, path.resolve("src"));
@@ -127,14 +132,6 @@ await withUpdateCommandExecutor(runId, async (executor) => {
     });
   return { root, install, slot, handoff, store, env, crash, retry };
 }
-
-it("reclaims a crashed original and its occupied slot together, then releases the new pair", async () => {
-  const f = fixture();
-  f.crash();
-  await f.retry();
-  expect(f.store.read(f.install).kind).toBe("absent");
-  expect(f.store.read(f.slot).kind).toBe("absent");
-});
 
 it("preserves both old generations while the occupied slot still has a live executor", async () => {
   const f = fixture();
@@ -237,7 +234,7 @@ function retainedCommandFixture(
   const database = createManagedHandoffLeaseDatabase(f.handoff);
   const rootIdentity = { pid: 777101, startIdentity: "1" };
   const helper = { pid: 777102, startIdentity: "2" };
-  const executor = options.custody === "reserved" ? helper : { pid: 777103, startIdentity: "3" };
+  const executor = { pid: 777103, startIdentity: "3" };
   const rootLease = {
     version: 2,
     helper: rootIdentity,
@@ -271,8 +268,7 @@ function retainedCommandFixture(
     });
   }
   const commandKeys = [f.install, ...(options.mirror ? [f.slot] : [])].map(
-    (root) =>
-      `${root}/.openclaw-update-child-previous-doctor/.openclaw-update-child-00000000-0000-4000-8000-000000000001-command`,
+    (root) => `${root}/.openclaw-update-child-previous-doctor/.openclaw-update-child-command`,
   );
   database(true, (db) => {
     executeSqliteQuerySync(
@@ -288,7 +284,7 @@ function retainedCommandFixture(
               version: 2,
               helper,
               executor,
-              action: { kind: "update" },
+              action: { kind: "update", custody: options.custody ?? "bound" },
             }),
             updated_at: 2,
           })),

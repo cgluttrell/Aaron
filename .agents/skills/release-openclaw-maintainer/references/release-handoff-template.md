@@ -17,6 +17,7 @@ operator steering. Do not preserve superseded scope.
 - cut SHA: `<full sha>`
 - cut time: `<UTC timestamp>`
 - Code SHA: `<regular release full sha | not applicable>`
+- integrated prepush: `<passing Code SHA + pinned comparison base | pending>`
 - Candidate C: `<exact qualification target sha>`
 - Qualification Q: `<C for candidate-owned | original workflow SHA for historical route>`
 - Admission/verifier/publisher P: `<independent trusted full sha and ref>`
@@ -24,6 +25,8 @@ operator steering. Do not preserve superseded scope.
 - Retained request: `<private request path; original semantics preserved>`
 - Release SHA: `<same as Code SHA | notes-only descendant | exact extended-stable branch tip>`
 - tag: `v<version>`
+- main closeout SHA: `<exact merged closeout commit | pending>`
+- main closeout version: `<package.json version at that exact commit | pending>`
 - validation workflow ref: `<release-ci ref | canonical branch>`
 - publication tooling ref: `<release-publish/tooling-sha12-epoch | track-specific ref>`
 - tooling tag: `<tag verified via gh api git/ref/tags | created by hand after ruleset warning>`

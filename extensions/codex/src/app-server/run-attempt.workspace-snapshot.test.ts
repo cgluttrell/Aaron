@@ -35,6 +35,7 @@ const updated = "Updated instructions must wait for a new session.";
 
 async function workspace(guidance?: string) {
   const params = createParams(path.join(tempDir, "session.jsonl"), path.join(tempDir, "workspace"));
+  params.timeoutMs = 60_000;
   params.bootstrapWorkspaceDir = path.join(tempDir, "agent-workspace");
   setAgentWorkspaceForTest(params, params.bootstrapWorkspaceDir);
   await fs.mkdir(params.bootstrapWorkspaceDir, { recursive: true });
@@ -105,31 +106,20 @@ describe("Codex workspace instruction snapshots", () => {
     }
   });
 
-  it.each(["initial", "resume"] as const)(
-    "retains the first successful capture after %s bootstrap loading fails",
-    async (failureAt) => {
-      const { params, agentsPath } = await workspace(initial);
-      const bootstrap = vi.spyOn(agentHarnessRuntime, "prepareAgentWorkspaceContext");
-      const failure = new Error("workspace bootstrap unavailable");
-      if (failureAt === "initial") {
-        bootstrap.mockRejectedValueOnce(failure);
-      }
-      const started = await attempt(params);
-      const captured = await readCodexAppServerBinding(params.sessionFile);
-      expect(captured?.agentWorkspaceDeveloperInstructions).toEqual(
-        failureAt === "initial" ? undefined : expect.stringContaining(initial),
-      );
-      await fs.writeFile(agentsPath, updated);
-      if (failureAt === "resume") {
-        bootstrap.mockRejectedValueOnce(failure);
-      }
-      const resumed = await attempt(params, true);
-      const degraded = failureAt === "initial" ? started : resumed;
-      expect(degraded.result.systemPromptReport?.injectedWorkspaceFiles).toEqual([]);
-      expect(resumed.instructions).toContain(failureAt === "initial" ? updated : initial);
-      expect(resumed.instructions).not.toContain(failureAt === "initial" ? initial : updated);
-    },
-  );
+  it("retains the first successful capture after resume bootstrap loading fails", async () => {
+    const { params, agentsPath } = await workspace(initial);
+    await attempt(params);
+    const captured = await readCodexAppServerBinding(params.sessionFile);
+    expect(captured?.agentWorkspaceDeveloperInstructions).toEqual(expect.stringContaining(initial));
+    await fs.writeFile(agentsPath, updated);
+    vi.spyOn(agentHarnessRuntime, "prepareAgentWorkspaceContext").mockRejectedValueOnce(
+      new Error("workspace bootstrap unavailable"),
+    );
+    const resumed = await attempt(params, true);
+    expect(resumed.result.systemPromptReport?.injectedWorkspaceFiles).toEqual([]);
+    expect(resumed.instructions).toContain(initial);
+    expect(resumed.instructions).not.toContain(updated);
+  });
 
   it("captures an empty legacy snapshot once and preserves it when AGENTS.md appears", async () => {
     const { params, agentsPath } = await workspace();

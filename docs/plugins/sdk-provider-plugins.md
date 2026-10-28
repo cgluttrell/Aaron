@@ -515,6 +515,60 @@ providers:
 | `paired`  | After profile | Synthesize multiple related entries             |
 | `late`    | Last pass     | Override existing providers (wins on collision) |
 
+Within each phase, OpenClaw runs up to four catalog hooks concurrently. It waits
+for the phase to settle, then merges model rows and provider outcomes in provider
+label order. Hooks retain their individual discovery deadlines; completion order
+does not change catalog precedence.
+
+## Provider stream decorators
+
+`wrapStreamFn` receives optional request context for provider-owned behavior:
+
+- `modelParams` contains only per-model params, with the current agent's model
+  params taking precedence over default model params. Global and agent-wide
+  params are excluded; `extraParams` still contains the merged request params.
+- `modelCallUrgency` is the host's `foreground`, `normal`, or `background`
+  classification. Translate it into provider-native scheduling hints only when
+  the selected endpoint supports them and the operator has enabled the behavior.
+
+A wrapper that only decorates requests can return its callable with
+`preservesGenericCompatibility: true`, for example
+`Object.assign(decoratedStream, { preservesGenericCompatibility: true })`.
+This keeps shared request shaping and output normalization active, including
+MiMo reasoning replay and final-answer handling. Without the flag, a replacement
+stream keeps the existing behavior of taking ownership of those compatibility
+policies. Returning the original stream or no wrapper also preserves them.
+
+Bundled adapters share `wrapProviderPayloadHook` and `mapAssistantMessageStream`
+through the existing private `provider-stream-shared` seam. Payload composition
+runs defaults before the caller hook and wire constraints after its result settles;
+each adapter keeps its own replacement/null policy. The stream mapper preserves
+synchronous returns without importing the embedded runner. These are bundled
+implementation helpers, not new third-party SDK contracts.
+
+`applyOpenAICompletionsToolReasoning` shares the native tools/reasoning wire
+policy with pass-through adapters through that private seam. Callers qualify
+the endpoint and normalize vendor-prefixed model IDs before applying it.
+
+Injected-client adapters also reuse the Anthropic thinking and output-cap owners
+through the private `provider-transport-runtime` seam. Client creation and
+provider-specific defaults stay with the adapter; the shared request builder
+owns sampling restrictions and cache-marker budgeting.
+
+Local provider transports can report a transient wait through the optional
+`StreamOptions.onProviderWait` callback. Pass `"response"` while waiting for a
+response, or `"slot"` only when backend evidence correlates the current request
+with a slot wait. Pass `null` to clear it. This is status metadata, never assistant
+text or evidence that cancellation released a backend slot.
+
+`createProviderWaitObserver` from `openclaw/plugin-sdk/provider-transport-runtime`
+provides the shared delayed status lifecycle. Call `start()` when dispatching the
+prepared request and `stop()` at the first response event and in cleanup. It emits
+the generic response wait after one second and clears it on cancellation or
+`stop()`. It creates no timer when the caller does not observe waits. A provider
+with request-correlated evidence can call `report("slot")`. Any backend probes
+must be bounded by that request's lifetime; do not add an always-on polling loop.
+
 ## Next steps
 
 - [Channel Plugins](/plugins/sdk-channel-plugins) - if your plugin also provides a channel

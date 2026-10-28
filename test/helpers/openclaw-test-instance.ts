@@ -19,6 +19,7 @@ import {
   loadManagedChildSpawner,
   terminateManagedChild,
 } from "../../scripts/lib/managed-child-process.mts";
+import { formatCliCommand } from "../../src/cli/command-format.js";
 import { hasErrnoCode } from "../../src/infra/errno.js";
 import {
   appendCapturedOutput,
@@ -124,19 +125,8 @@ type ReadinessProbe = {
   omittedFailing?: number;
   /** Responder's reported server uptime; binds the answer to a process started after spawn. */
   uptimeMs?: number;
-  error?:
-    | "timeout"
-    | "child-exit"
-    | "fetch-failed"
-    | "invalid-json"
-    | "body-failed"
-    | "foreign-responder"
-    | "aborted";
+  error?: "timeout" | "child-exit" | "fetch-failed" | "invalid-json" | "body-failed" | "aborted";
 };
-
-// Parent and child clocks share the host. Allow spawn/measurement skew while
-// rejecting a ready listener that was already alive before this child existed.
-const GATEWAY_READINESS_UPTIME_SKEW_MS = 1_000;
 
 export type GatewayReadinessDiagnostic = {
   probe: "GET /readyz";
@@ -350,6 +340,8 @@ export function formatGatewayReadinessDiagnostic(
   })}`;
 }
 
+class GatewayReadinessError extends Error {}
+
 async function waitForGatewayReady(
   proc: OpenClawTestProcessReadiness,
   chunksOut: string[],
@@ -367,14 +359,14 @@ async function waitForGatewayReady(
   let lastProbe: ReadinessProbe | undefined;
   let lastFailedResponse: GatewayReadinessDiagnostic["lastFailedResponse"] = null;
   const startupError = (message: string, probe = lastProbe) =>
-    new Error(
+    new GatewayReadinessError(
       `${message}\n${formatGatewayReadinessDiagnostic({
         attempts,
         elapsedMs: Date.now() - startedAt,
         lastProbe: probe ?? null,
         lastFailedResponse,
         child: { pid: proc.pid ?? null, exitCode: proc.exitCode, signalCode: proc.signalCode },
-      })}\n${formatLogs(chunksOut, chunksErr)}`,
+      })}`,
     );
   const exitedBeforeReadinessError = (probe = lastProbe) =>
     startupError(
@@ -462,13 +454,6 @@ async function waitForGatewayReady(
             if (!response.ok || !isRecord(readiness) || readiness.ready !== true) {
               return false;
             }
-            if (
-              probe.uptimeMs !== undefined &&
-              probe.uptimeMs > Date.now() - startedAt + GATEWAY_READINESS_UPTIME_SKEW_MS
-            ) {
-              probe.error = "foreign-responder";
-              return false;
-            }
             // Readiness serves healthy agents while startup still owns deferred admission.
             probeAbort.signal.throwIfAborted();
             probe.endpoint = "/startupz";
@@ -533,8 +518,18 @@ async function waitForGatewayReady(
             lastProbe.error === "invalid-json" ||
             lastProbe.error === "body-failed")
         ) {
-          const { attempt, phase, elapsedMs, status, ready, error } = lastProbe;
-          lastFailedResponse = { attempt, phase, elapsedMs, status, ready, error };
+          const { attempt, phase, elapsedMs, status, ready, endpoint, startupStatus, error } =
+            lastProbe;
+          lastFailedResponse = {
+            attempt,
+            phase,
+            elapsedMs,
+            status,
+            ready,
+            endpoint,
+            startupStatus,
+            error,
+          };
         }
         // The 60-second desktop wait cannot exceed this bound at its existing 10ms cadence.
         if (probes.length < 8192) {
@@ -1184,9 +1179,15 @@ export async function createOpenClawTestInstance(
             } catch (cleanupError) {
               cleanupErrors.push(cleanupError);
             }
+            // Exit precedes pipe closure. Capture output after the owner's drain,
+            // including when reclaiming its port failed after successful cleanup.
+            const startupError =
+              err instanceof GatewayReadinessError
+                ? new Error(`${err.message}\n${formatLogs(stdout, stderr)}`, { cause: err })
+                : err;
             if (cleanupErrors.length > 0) {
               throw new AggregateError(
-                [err, ...cleanupErrors],
+                [startupError, ...cleanupErrors],
                 "gateway startup and cleanup failed",
                 {
                   cause: err,
@@ -1199,15 +1200,21 @@ export async function createOpenClawTestInstance(
             if (closed && !signal?.aborted && exitCode === 78 && signalCode === null) {
               // Admission after a checkpoint and a refused migration step have
               // different reports; both must name the source and its repair.
+              const admissionRefusal = completedStderr.match(
+                /^(?:Gateway failed to start: )?Legacy session store requires migration: (.+)\. Run "([^"\r\n]+)" against the same state\/config before starting OpenClaw\.\r?$/mu,
+              );
               const legacyStorePath =
-                completedStderr.match(
-                  /^(?:Gateway failed to start: )?Legacy session store requires migration: (.+)\. Run "openclaw doctor --fix" against the same state\/config before starting OpenClaw\.\r?$/mu,
-                )?.[1] ??
-                completedStderr.match(
-                  /^OpenClaw startup migrations did not complete cleanly; refusing to report the gateway ready\.\r?\n- Legacy sessions store unreadable; left in place at ([^\r\n]+)\r?\n(?:- [^\r\n]+\r?\n)*Run "openclaw doctor --fix" against the same state\/config, then restart the gateway\.\r?$/mu,
-                )?.[1];
+                admissionRefusal?.[2] === formatCliCommand("openclaw doctor --fix", env)
+                  ? admissionRefusal[1]
+                  : completedStderr.match(
+                      /^OpenClaw startup migrations did not complete cleanly; refusing to report the gateway ready\.\r?\n- Legacy sessions store unreadable; left in place at ([^\r\n]+)\r?\n(?:- [^\r\n]+\r?\n)*Run "openclaw doctor --fix" against the same state\/config, then restart the gateway\.\r?$/mu,
+                    )?.[1];
               if (legacyStorePath) {
-                throw new GatewayStartupRefusedError(legacyStorePath, completedStderr, err);
+                throw new GatewayStartupRefusedError(
+                  legacyStorePath,
+                  completedStderr,
+                  startupError,
+                );
               }
             }
             const shouldRestart =
@@ -1219,7 +1226,7 @@ export async function createOpenClawTestInstance(
               appendLogChunk(stderr, GATEWAY_MIGRATION_CONVERGENCE_RESTART_MARKER);
               continue;
             }
-            throw err;
+            throw startupError;
           }
         }
       });

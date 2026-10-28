@@ -4,6 +4,7 @@ import type {
   CliBackendPlugin,
   CliBackendPreparedExecution,
 } from "openclaw/plugin-sdk/cli-backend";
+import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
   CLAUDE_CLI_BACKEND_ID,
   CLAUDE_CLI_DEFAULT_MODEL_REF,
@@ -18,6 +19,7 @@ import {
   resolveClaudeCliExecutionArgs,
   resolveClaudeCliThinkingEnv,
 } from "./cli-shared.js";
+import { appendClaudeCliToolNamingGuidance } from "./cli-tool-naming.js";
 
 type ClaudeCliAuthCredential =
   | { type: "oauth"; access: string; expires: number }
@@ -71,6 +73,28 @@ function projectClaudeNativeToolAuthority(nativeTools: readonly string[]): reado
         .map(([, capability]) => capability),
     ),
   ];
+}
+
+// Orchestration tools whose descendants inherit the parent's tool list, so they confer
+// no capability of their own. Order is canonical: equivalent selections launch one argv.
+const CLAUDE_MANAGED_NATIVE_TOOLS = ["Agent", "Workflow"] as const;
+
+/** Operator selection under `plugins.entries.anthropic.config.managedNativeTools`. */
+function resolveClaudeManagedNativeTools(
+  ctx: Parameters<NonNullable<CliBackendPlugin["resolveManagedNativeTools"]>>[0],
+): readonly string[] {
+  const pluginConfig = ctx.config?.plugins?.entries?.anthropic?.config;
+  const selection = isRecord(pluginConfig) ? pluginConfig.managedNativeTools : undefined;
+  if (!isRecord(selection)) {
+    return [];
+  }
+  const agents = isRecord(selection.agents) ? selection.agents : undefined;
+  const selected = Object.hasOwn(agents ?? {}, ctx.agentId)
+    ? agents?.[ctx.agentId]
+    : selection.default;
+  return Array.isArray(selected)
+    ? CLAUDE_MANAGED_NATIVE_TOOLS.filter((name) => selected.includes(name))
+    : [];
 }
 
 function createClaudeCliAuthInput(params: {
@@ -175,9 +199,12 @@ export function buildAnthropicCliBackend(
     bundleMcp: true,
     bundleMcpMode: "claude-config-file",
     nativeToolMode: "selectable",
+    hostOwnedTools: ["exec", "process"],
     toolAvailabilityEnforcement: "execution-args",
-    isolatesInstructionsWithExactTools: true,
+    transformSystemPrompt: ({ systemPrompt, openClawMcpToolNames }) =>
+      appendClaudeCliToolNamingGuidance(systemPrompt, openClawMcpToolNames),
     projectNativeToolAuthority: projectClaudeNativeToolAuthority,
+    resolveManagedNativeTools: resolveClaudeManagedNativeTools,
     sideQuestionToolMode: "disabled",
     ownsNativeCompaction: true,
     manualCompaction: {

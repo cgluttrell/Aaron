@@ -5,9 +5,7 @@ import { expect, it } from "vitest";
 import { resolvePackagedCodexNativeCommand } from "./managed-binary.js";
 import { CODEX_APP_SERVER_VERSION } from "./version.js";
 
-type BundledModel = { shell_type?: unknown; slug?: unknown };
-
-async function readBundledModels(binary: string): Promise<BundledModel[]> {
+async function readBundledModelShellTypes(binary: string): Promise<unknown[]> {
   const marker = Buffer.from('{\n  "models": [');
   let buffer = Buffer.alloc(0);
   let found = false;
@@ -27,7 +25,7 @@ async function readBundledModels(binary: string): Promise<BundledModel[]> {
     const end = buffer.indexOf("\n}");
     if (end >= 0) {
       let catalog: {
-        models?: BundledModel[];
+        models?: Array<{ shell_type?: unknown }>;
       };
       try {
         catalog = JSON.parse(buffer.subarray(0, end + 2).toString("utf8"));
@@ -39,7 +37,7 @@ async function readBundledModels(binary: string): Promise<BundledModel[]> {
       if (!Array.isArray(catalog.models) || catalog.models.length === 0) {
         throw new Error("Pinned Codex model catalog is empty; recheck native cron authority.");
       }
-      return catalog.models;
+      return catalog.models.map((model) => model.shell_type);
     }
     if (buffer.length > 2 * 1024 * 1024) {
       break;
@@ -50,7 +48,7 @@ async function readBundledModels(binary: string): Promise<BundledModel[]> {
   );
 }
 
-it("ships GPT-6.1 Sol in the pinned shell-enabled Codex registry", async () => {
+it("only infers native cron shell authority for a pinned registry with shell-enabled models", async () => {
   const require = createRequire(new URL("../../package.json", import.meta.url));
   const manifest = JSON.parse(
     await readFile(require.resolve("@openai/codex/package.json"), "utf8"),
@@ -60,12 +58,9 @@ it("ships GPT-6.1 Sol in the pinned shell-enabled Codex registry", async () => {
   if (!binary) {
     throw new Error("Pinned Codex native artifact is missing; install the plugin dependencies.");
   }
-  const models = await readBundledModels(binary);
-  expect(models.some((model) => model.slug === "gpt-6.1-sol")).toBe(true);
+  const shellTypes = await readBundledModelShellTypes(binary);
   expect(
-    models.every(
-      (model) => model.shell_type === "unified_exec" || model.shell_type === "shell_command",
-    ),
+    shellTypes.every((shellType) => shellType === "unified_exec" || shellType === "shell_command"),
     "Codex registry changed shell availability; recheck native cron authority before upgrading.",
   ).toBe(true);
 });

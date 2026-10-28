@@ -2,12 +2,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import { createSubagentRunRecord } from "../agents/subagent-test-fixtures.test-helpers.js";
 import { subagentRuns } from "../agents/subagents/registry/subagent-registry-memory.js";
 import { replaceSessionEntrySync } from "../config/sessions/session-accessor.js";
-import { ensureProfileForEmail, setUserProfileRole } from "../state/user-profiles.js";
+import { setUserProfileRole } from "../state/user-profile-writes.worker.js";
+import { ensureProfileForEmail } from "../state/user-profiles.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { withOpenClawTestState } from "../test-utils/openclaw-test-state.js";
 import { prepareGatewayRecipientProfile } from "./expected-profile.js";
 import { createGatewayConnectionState } from "./server-connection-state.js";
 import type { GatewayWsClient } from "./server/ws-types.js";
+import { prepareSessionEventProjection } from "./session-event-projection.js";
 import { withReadySessionRows } from "./session-row-prepared-read.js";
 import { publishTranscriptFields } from "./session-row-projection-record.js";
 import { createSessionRowProjection } from "./session-row-projection.js";
@@ -135,11 +137,15 @@ it.each(["child and swarm links", "sharing role", "incognito"] as const)(
               read.state.rowContext,
             );
             const presentations = vi.spyOn(projection, "present");
-            connection.broadcast("sessions.changed", {
-              sessionKey: query.key,
-              agentId: query.agentId,
-              session: { key: query.key, sessionId: "publication-session" },
-            });
+            connection.broadcast(
+              "sessions.changed",
+              {
+                sessionKey: query.key,
+                agentId: query.agentId,
+                session: { key: query.key, sessionId: "publication-session" },
+              },
+              { prepareSessionProjection: prepareSessionEventProjection(projection, read) },
+            );
             for (const [index, { send }] of peers.entries()) {
               const visible = index % 2 === 0 || restriction === "child and swarm links";
               expect(send).toHaveBeenCalledTimes(visible ? 1 : 0);
@@ -150,14 +156,9 @@ it.each(["child and swarm links", "sharing role", "incognito"] as const)(
               expect(row).toMatchObject({
                 key: query.key,
                 sessionId: "publication-session",
+                lastMessagePreview: "Private preview 🦞",
                 sharingRole: restriction === "incognito" ? "admin" : "viewer",
-                ...(restriction === "incognito"
-                  ? {}
-                  : { lastMessagePreview: "Private preview 🦞" }),
               });
-              if (restriction === "incognito") {
-                expect(row.lastMessagePreview).toBeUndefined();
-              }
               expect(row.childSessions).toEqual(
                 restriction === "child and swarm links" && index % 2 === 0 ? [childKey] : undefined,
               );
@@ -181,13 +182,15 @@ it.each(["child and swarm links", "sharing role", "incognito"] as const)(
                   : undefined,
               );
             }
-            expect(presentations).toHaveBeenCalledTimes(restriction === "sharing role" ? 1 : 2);
+            expect(presentations).toHaveBeenCalledTimes(
+              restriction === "child and swarm links" ? 2 : 1,
+            );
             presentations.mockRestore();
           },
         );
       } finally {
         detach();
-        connection.mentionInbox.dispose();
+        await connection.mentionInbox.dispose();
         projection.dispose();
         subagentRuns.delete("publication-child");
       }

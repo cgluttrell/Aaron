@@ -73,6 +73,8 @@ Sessions are owned by the gateway, not by clients.
 
 Multiple devices/channels can map to the same session, but history is not fully synced back to every client. Use one primary device for long conversations to avoid divergent context. The Control UI and TUI always show the gateway-backed session transcript, so they are the source of truth.
 
+If a run fails or times out before an assistant reply is saved, its transcript receives one visible failure notice. Nested runs retain their own failure notices even after the requesting turn has ended.
+
 Details: [Session management](/concepts/session).
 
 ## Prompt bodies and history context
@@ -104,6 +106,7 @@ Tool result `content` is the model-visible result; `details` is runtime metadata
 
 - `toolResult.details` is stripped before provider replay and before compaction input.
 - Persisted session transcripts keep only bounded `details`; oversized metadata is replaced with a compact summary marked `persistedDetailsTruncated: true`.
+- Display history retains tool status flags and session keys, plus command exit codes, durations, and bounded working directories when the tool provides them.
 - Plugins and tools should put text the model must read in `content`, not only in `details`.
 
 When a tool-error warning is the agent's only reply, WebChat displays and retains it. The warning does not by itself change a completed agent run into a runtime failure; the failed tool result remains recorded separately.
@@ -118,6 +121,8 @@ When a run is already active, inbound messages steer into it by default. `messag
 | `followup`        | Run the message after the active run finishes.      |
 | `collect`         | Batch compatible messages into one later turn.      |
 | `interrupt`       | Abort the active run, then start the newest prompt. |
+
+Messages with separate durable ingress admission, including Discord and Telegram messages, stay in separate followup turns even in `collect` mode. Compatible Gateway `chat.send` inputs can still combine.
 
 The queue uses a built-in 500ms debounce for steer, followup, and collect batching. `messages.queue.cap` defaults to 20 queued messages, and `messages.queue.drop` defaults to `summarize` (`old` and `new` are also available). Configure per-channel overrides via `messages.queue.byChannel` and `messages.queue.debounceMsByChannel`.
 
@@ -161,6 +166,8 @@ Details: [Thinking + reasoning directives](/tools/thinking) and [Token use](/ref
 Details: [Configuration](/gateway/config-agents/messages-and-talk#messages) and channel docs.
 
 ## Silent replies
+
+Silent maintenance turns suppress streamed text, attachments, locations, and interactive controls. Errors, actual voice messages, and system notices explicitly marked for delivery keep their normal delivery rules.
 
 The silent token `NO_REPLY` (case-insensitive, so `no_reply` also matches) is reserved for sessions connected to external message channels and is never delivered as user-visible text. Subagents, the Control UI, and other internal sessions must return a result or continue unfinished work; a silent token cannot complete their task. When a turn also has pending tool media, such as generated TTS audio, OpenClaw strips the silent text but still delivers the media attachment.
 

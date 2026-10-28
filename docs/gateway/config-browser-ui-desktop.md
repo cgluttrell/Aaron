@@ -190,7 +190,10 @@ Desktop without restarting the Gateway; the desktop becomes available on the
 same connection. Gateway administrator access is required. Detection does not
 expose the desktop or change system permissions. Existing managed Linux desktops
 can be enabled from the same view. **Settings → Labs → Host Desktop** remains
-available to turn access off or manage it separately.
+available to turn access off or manage it separately. When a chat session's
+Desktop panel targets the Gateway host and Host Desktop is off, the panel shows
+the same check, setup steps, and enable action, then re-checks and connects once
+Host Desktop is available.
 
 Enabling macOS Screen Sharing, a paired node's Desktop sharing, or screenshot
 capture alone does not enable the Gateway's desktop. On macOS, Remote Management
@@ -260,11 +263,13 @@ checks. Existing configuration and node pairing remain unchanged on update;
 enabling the Desktop panel does not automatically enable CUA.
 
 If desktop teardown fails, the Gateway retains the session's cleanup owner and
-reports the failure in its logs. A new observation retries cleanup before
-starting a replacement. For SSH-backed worker desktops, temporary connection
-files remain until the transport has closed; a late process exit triggers
-another cleanup attempt. Check the reported process or filesystem error before
-retrying an observation that cannot finish cleanup.
+reports the failure in its logs. New observations return that failure without
+retrying cleanup or accumulating replacement owners. Lifecycle cleanup, such as
+turning Host Desktop off in Labs, retries the retained owner; a replacement can
+start only after cleanup succeeds. For SSH-backed worker desktops, temporary
+connection files remain until the transport has closed; a late process exit
+triggers another cleanup attempt. Check the reported process or filesystem error
+before retrying cleanup.
 
 Without managed mode, configure third-party servers to listen on loopback when
 they support it. On Linux, use loopback-only TigerVNC or `x11vnc`; GNOME Remote

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { createServer } from "node:http";
 import path from "node:path";
 import { expect, it, vi, type Mock } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
@@ -18,11 +19,12 @@ import {
 } from "../../daemon/service-rebind.js";
 import type { GatewayServiceState } from "../../daemon/service.js";
 import * as integrity from "../../infra/package-update-integrity.js";
-import { createUpdateRun, getUpdateRun } from "../../infra/update-run-ledger.js";
+import { getUpdateRun } from "../../infra/update-run-ledger.js";
 import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import type { OpenClawTestState } from "../../test-utils/openclaw-test-state.js";
+import { reserveTestPortListener } from "../../test-utils/port-claims.js";
 import type { UpdateCommandOptions } from "./shared.js";
-import { withUpdateCommandExecutor } from "./update-command-executor.js";
+import { withCurrentF3Admission } from "./update-command-original-service-current.admission.test-support.js";
 import {
   observeOriginalManagedServiceRuntime,
   revalidateOriginalManagedServiceRuntime,
@@ -40,6 +42,7 @@ type Fixture = {
   state: OpenClawTestState;
   rootA: string;
   rootB: string;
+  serviceNodeRunner: string;
   before: PreManagedServiceStop;
   serviceState: GatewayServiceState;
   mocks: {
@@ -55,20 +58,10 @@ type Fixture = {
 // Current composition only: real observations, admission and candidate-native helper;
 // receiver probe, native service and HTTP leaves are inert. No native command executes.
 export function registerCurrentF3Controls(fixture: () => Fixture) {
-  const admitted = async (
+  const admitted = (
     operation: (run: NonNullable<UpdateCommandOptions["run"]>) => Promise<void>,
     retained = true,
-  ) => {
-    const { state, rootA, rootB } = fixture();
-    const run: NonNullable<UpdateCommandOptions["run"]> = {
-      runId: createUpdateRun({ trigger: "cli" }, { env: state.env }).runId,
-      env: state.env,
-    };
-    await withUpdateCommandExecutor(run.runId, async (executor) => {
-      run.executorFence = await executor.enter(rootB, retained ? { serviceRoot: rootA } : {});
-      await operation(run);
-    });
-  };
+  ) => withCurrentF3Admission(fixture, operation, retained);
 
   it.each(["unchanged", "replaced"] as const)(
     "capable original recovery binds definition after native lock: %s",
@@ -160,7 +153,7 @@ export function registerCurrentF3Controls(fixture: () => Fixture) {
     "revoked",
     "schema-newer",
   ] as const)("retained own-rebind compensation: %s", async (scenario) => {
-    const { state, rootA, rootB, before, serviceState, mocks } = fixture();
+    const { state, rootA, rootB, serviceNodeRunner, before, serviceState, mocks } = fixture();
     const managedDefinition = structuredClone(serviceState.command!);
     serviceState.command = {
       ...managedDefinition,
@@ -179,7 +172,7 @@ export function registerCurrentF3Controls(fixture: () => Fixture) {
         pinScope,
         {
           expected: readDaemonRuntimePinForInstall(pinScope, serviceState.command, true),
-          pin: { runtime: "node", path: process.execPath },
+          pin: { runtime: "node", path: serviceNodeRunner },
         },
         serviceState.command,
       );
@@ -207,7 +200,7 @@ export function registerCurrentF3Controls(fixture: () => Fixture) {
                   serviceState.command = {
                     ...originalCommand,
                     programArguments: [
-                      process.execPath,
+                      serviceNodeRunner,
                       path.join(rootB, "dist/index.js"),
                       "gateway",
                     ],
@@ -388,7 +381,7 @@ export function registerCurrentF3Controls(fixture: () => Fixture) {
     });
   });
 
-  it.each(["slow", "revoked", "generation-change"] as const)(
+  it.each(["slow", "revoked", "not-ready", "generation-change"] as const)(
     "retained readiness uses current bounded owner: %s",
     async (scenario) => {
       const { rootB, before, mocks } = fixture();
@@ -405,23 +398,31 @@ export function registerCurrentF3Controls(fixture: () => Fixture) {
             gatewayBootId: scenario === "generation-change" ? "prior-boot" : undefined,
           };
         });
+        if (scenario === "not-ready") {
+          mocks.readiness.mockResolvedValue({ readyz: 503 });
+        }
         const observation = observeOriginalManagedServiceRuntime(
           { root: rootB, opts: { run }, updateStepTimeoutMs: 40_000 },
           before,
         );
         if (scenario === "slow") {
           expect(await observation).toMatchObject({ verified: true });
-          expect(mocks.readiness).toHaveBeenCalledWith(
+        } else {
+          await expect(observation).rejects.toThrow();
+        }
+        if (scenario !== "revoked") {
+          expect(mocks.readiness).toHaveBeenCalledExactlyOnceWith(
             expect.objectContaining({
               attempts: expect.any(Number),
               probeTimeoutMs: expect.any(Number),
             }),
           );
+          expect(mocks.readiness.mock.calls[0]?.[0].attempts).toBeGreaterThan(1);
           expect(mocks.readiness.mock.calls[0]?.[0].probeTimeoutMs).toBeGreaterThan(3_000);
-        } else {
-          await expect(observation).rejects.toThrow();
         }
         expect(mocks.health).toHaveBeenCalledOnce();
+        expect(before.stopped).toBe(false);
+        expect(mocks.nativeRestart).not.toHaveBeenCalled();
       });
     },
   );
@@ -444,25 +445,47 @@ export function registerCurrentF3Controls(fixture: () => Fixture) {
     });
   });
 
-  it("refuses a completed later fingerprint mismatch instead of downgrading it to a warning", async () => {
-    const { rootB, before } = fixture();
+  it("waits for HTTP readiness after restoring the retained service", async () => {
+    const { rootB, before, mocks } = fixture();
     await admitted(async (run) => {
       const original = await observeOriginalManagedServiceRuntime(
         { root: rootB, opts: { run } },
         before,
       );
-      if (!original?.packageFingerprint) {
-        throw new Error("missing complete baseline");
+      expect(original?.verified).toBe(true);
+      const actual = await vi.importActual<typeof import("../daemon-cli/restart-health.js")>(
+        "../daemon-cli/restart-health.js",
+      );
+      let readinessRequests = 0;
+      const listener = await reserveTestPortListener({
+        offsets: [0],
+        createListener: () =>
+          createServer((request, response) => {
+            const ready = request.url !== "/readyz" || ++readinessRequests > 1;
+            response.writeHead(ready ? 200 : 503).end();
+          }),
+      });
+      // Route the mocked service's HTTP transport to a real loopback listener.
+      mocks.readiness.mockImplementation((params) =>
+        actual.waitForGatewayHttpReadiness({ ...params, port: listener.claim.port }),
+      );
+      try {
+        await expect(
+          maybeRestartServiceAfterFailedMutableUpdate({
+            updateRun: run,
+            preManagedServiceStop: { ...before, stopped: true },
+            originalManagedServiceRuntime: original,
+            jsonMode: true,
+            timeoutMs: 30_000,
+          }),
+        ).resolves.toBe("healthy");
+        expect(mocks.nativeRestart).toHaveBeenCalledOnce();
+        expect(readinessRequests).toBe(2);
+      } finally {
+        listener.listener.closeAllConnections();
+        await listener.releaseListener();
+        await listener.claim.release();
       }
-      const reader = integrity.createPackageIntegrityReader;
-      vi.spyOn(integrity, "createPackageIntegrityReader").mockImplementation((timeout) => ({
-        ...reader(timeout),
-        tree: async () => ({ ...original.packageFingerprint!, digest: "different" }),
-      }));
-      await expect(
-        revalidateOriginalManagedServiceRuntime(original, () => run.executorFence!.assertCurrent()),
-      ).rejects.toThrow("package changed");
-      expect(original.packageFingerprintWarning).toBeUndefined();
     });
   });
 

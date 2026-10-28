@@ -48,7 +48,7 @@ export async function resolveMatrixInboundContext(config: {
     historyLimit,
     dmSessionScope,
     resolveStorePath: resolveStorePathImpl,
-    createChannelInboundEnvelopeBuilder: createChannelInboundEnvelopeBuilderImpl,
+    createChannelInboundEnvelopeBuilderAsync: createChannelInboundEnvelopeBuilderImpl,
     finalizeInboundContext,
   } = handler;
   const {
@@ -73,6 +73,7 @@ export async function resolveMatrixInboundContext(config: {
     canDetectMention,
     shouldRequireMention,
     commandAuthorized,
+    isControlCommand,
     locationPayload,
     media,
     preflightAudioTranscript,
@@ -144,7 +145,7 @@ export async function resolveMatrixInboundContext(config: {
   const storePath = resolveStorePathImpl(cfg.session?.store, {
     agentId: _route.agentId,
   });
-  const buildEnvelope = createChannelInboundEnvelopeBuilderImpl({ cfg, route: _route });
+  const buildEnvelope = await createChannelInboundEnvelopeBuilderImpl({ cfg, route: _route });
   const sharedDmNoticeSessionKey = threadTarget
     ? _route.mainSessionKey || _route.sessionKey
     : _route.sessionKey;
@@ -276,7 +277,7 @@ export async function resolveMatrixInboundContext(config: {
       GroupSubject: isRoom ? (roomName ?? roomId) : undefined,
       GroupId: isRoom ? roomId : undefined,
       ...locationPayload?.context,
-      CommandSource: "text" as const,
+      CommandSource: isControlCommand ? ("text" as const) : undefined,
       NativeDirectUserId: isDirectMessage ? senderId : undefined,
     },
   });

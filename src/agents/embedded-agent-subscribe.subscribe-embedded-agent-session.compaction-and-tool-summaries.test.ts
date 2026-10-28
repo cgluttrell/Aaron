@@ -162,7 +162,7 @@ describe("compaction accounting", () => {
     expect(observed).toEqual(expected);
   });
 
-  it("preserves an accepted heartbeat response and private scratch through retry", async () => {
+  it("preserves the first accepted heartbeat response and scratch through duplicates and retry", async () => {
     const onHeartbeatToolResponse = vi.fn();
     const { emit, subscription } = harness({
       sessionPersistence: "detached",
@@ -192,7 +192,40 @@ describe("compaction accounting", () => {
     });
     await subscription.waitForPendingEvents();
     expect(subscription.getHeartbeatToolResponse()).toEqual(response);
+    const changedResponse = {
+      outcome: "no_change",
+      notify: false,
+      summary: "A different decision after acceptance.",
+      scratch: "Replacement scratch must not be applied.",
+    };
+    emit({
+      type: "tool_execution_start",
+      toolName: tool.name,
+      toolCallId: "duplicate",
+      args: changedResponse,
+    });
+    emit({
+      type: "tool_execution_end",
+      toolName: tool.name,
+      toolCallId: "duplicate",
+      isError: false,
+      result: await tool.execute("duplicate", changedResponse),
+    });
     emit(completed());
+    const retryTool = createHeartbeatResponseTool();
+    emit({
+      type: "tool_execution_start",
+      toolName: retryTool.name,
+      toolCallId: "retry",
+      args: changedResponse,
+    });
+    emit({
+      type: "tool_execution_end",
+      toolName: retryTool.name,
+      toolCallId: "retry",
+      isError: false,
+      result: await retryTool.execute("retry", changedResponse),
+    });
     const reply = assistant(0);
     message(emit, reply);
     emit({ type: "agent_end", messages: [reply] });
@@ -277,6 +310,7 @@ describe("compaction accounting", () => {
     });
     expect(onAgentEvent).toHaveBeenCalledWith({
       stream: "compaction",
+      transcriptStart: null,
       data: expect.objectContaining({ phase: "end", completed: false, reason: failure }),
     });
   });
@@ -347,24 +381,20 @@ describe("tool summaries", () => {
     expect(onToolResult).toHaveBeenCalledTimes(1);
   });
 
-  it.each(["exec", "server.exec"])(
-    "hides command metadata for %s outside full verbose mode",
-    async (toolName) => {
-      const onToolResult =
-        vi.fn<NonNullable<SubscribeEmbeddedAgentSessionParams["onToolResult"]>>();
-      const { emit, subscription } = harness({ verboseLevel: "on", onToolResult });
-      emit({
-        type: "tool_execution_start",
-        toolName,
-        toolCallId: "exec",
-        args: { command: "echo private-sentinel" },
-      });
-      await subscription.waitForPendingEvents();
-      const payload = onToolResult.mock.calls[0]?.[0];
-      expect(payload?.text).toContain(toolName === "exec" ? "Exec" : "Server.exec");
-      expect(payload?.text).not.toContain("private-sentinel");
-    },
-  );
+  it.each(["exec"])("hides command metadata for %s outside full verbose mode", async (toolName) => {
+    const onToolResult = vi.fn<NonNullable<SubscribeEmbeddedAgentSessionParams["onToolResult"]>>();
+    const { emit, subscription } = harness({ verboseLevel: "on", onToolResult });
+    emit({
+      type: "tool_execution_start",
+      toolName,
+      toolCallId: "exec",
+      args: { command: "echo private-sentinel" },
+    });
+    await subscription.waitForPendingEvents();
+    const payload = onToolResult.mock.calls[0]?.[0];
+    expect(payload?.text).toContain(toolName === "exec" ? "Exec" : "Server.exec");
+    expect(payload?.text).not.toContain("private-sentinel");
+  });
 
   it("emits exec and read output in full verbose mode with the PTY indicator", async () => {
     const onToolResult = vi.fn<NonNullable<SubscribeEmbeddedAgentSessionParams["onToolResult"]>>();

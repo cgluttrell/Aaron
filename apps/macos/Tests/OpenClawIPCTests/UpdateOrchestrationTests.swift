@@ -58,16 +58,16 @@ struct UpdateOrchestrationTests {
             false,
             receipt: incomplete,
             defaults: defaults)
-        let inFlight = PostAppUpdateReceiptStore.setNotificationInFlight(
+        let inFlight = try #require(PostAppUpdateReceiptStore.setNotificationInFlight(
             true,
             receipt: completed,
-            defaults: defaults)
+            defaults: defaults))
         #expect(inFlight.notificationInFlight)
         #expect(!PostUpdateController.isNotificationOnlyRetry(inFlight))
-        let readyToRetry = PostAppUpdateReceiptStore.setNotificationInFlight(
+        let readyToRetry = try #require(PostAppUpdateReceiptStore.setNotificationInFlight(
             false,
             receipt: inFlight,
-            defaults: defaults)
+            defaults: defaults))
         let firstNotificationFailure = PostAppUpdateReceiptStore.recordNotificationFailure(
             receipt: readyToRetry,
             defaults: defaults)
@@ -84,6 +84,23 @@ struct UpdateOrchestrationTests {
         #expect(PostAppUpdateReceiptStore.pending(
             currentVersion: "2026.7.4",
             defaults: defaults) == nil)
+    }
+
+    @Test func `persisted notification attempts saturate without overflowing`() throws {
+        let suite = "UpdateOrchestrationTests.notification-overflow.\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let receipt = PostAppUpdateReceipt(
+            fromVersion: "2026.7.3",
+            toVersion: "2026.7.4",
+            recordedAt: Date(timeIntervalSince1970: 1_720_000_000),
+            notificationAttempts: .max)
+        try defaults.set(JSONEncoder().encode(receipt), forKey: postAppUpdateReceiptKey)
+
+        let updated = PostAppUpdateReceiptStore.recordNotificationFailure(receipt: receipt, defaults: defaults)
+
+        #expect(updated.notificationAttempts == PostAppUpdateReceiptStore.notificationRetryLimit)
+        #expect(PostAppUpdateReceiptStore.pending(currentVersion: "2026.7.4", defaults: defaults) == updated)
     }
 
     @Test func `launch transition bootstraps upgrades but not fresh onboarding`() throws {
@@ -281,6 +298,13 @@ struct UpdateOrchestrationTests {
             ownsManagedRuntime: true,
             gatewayUpdateIncomplete: false) == .none)
         #expect(PostUpdateController.gatewayAction(
+            status: CLIInstaller.classifyVersion(
+                location: managed, output: "OpenClaw 2026.10.2-beta.1", expectedVersion: "2026.10.1"),
+            ownsManagedRuntime: true,
+            gatewayUpdateIncomplete: true) == .repair)
+        #expect(CLIInstaller.satisfiesUpdateTarget(
+            installedVersion: "2026.10.2+fixture", targetVersion: "2026.10.2"))
+        #expect(PostUpdateController.gatewayAction(
             status: .incompatible(location: managed, found: "2026.7.3", required: "2026.7.4"),
             ownsManagedRuntime: false,
             gatewayUpdateIncomplete: false) == .none)
@@ -388,7 +412,7 @@ struct UpdateOrchestrationTests {
 
     @Test func `dashboard exposes update bridge only for available updater`() throws {
         let url = try #require(URL(string: "http://127.0.0.1:18789/control/"))
-        let auth = DashboardWindowAuth(gatewayUrl: nil, token: nil, password: nil)
+        let auth = DashboardWindowAuth.unauthenticated
         let available = TestUpdater(isAvailable: true)
         let enabled = DashboardWindowController(
             url: url,

@@ -10,6 +10,19 @@ title: "Rollback and recovery"
 
 Downgrades, automatic rollback, verified pre-update backups, and triage when an update leaves you stuck. Part of the [Updating](/install/updating) guide.
 
+## Before you upgrade
+
+- Create a [verified backup](#before-updating-create-a-verified-backup) and keep the same service account, profile, and state/configuration paths.
+- Compare `openclaw --version` with `openclaw status` and `openclaw gateway status --deep`. The first reports the CLI version; status reports a Gateway service targeting a different installation. In `openclaw status --json`, compare `update.root` with `gatewayService.layout.packageRootReal`; `gatewayService.layout.entrypointReal` identifies the service binary, and `gatewayService.installationDrift` explains a mismatch.
+- Check the actual Node executable and version with `node -p "process.execPath + ' ' + process.version"`. Compare them with the updater's detected runtime and required range, since the service can select a different Node than your shell. See [supported Node versions](/install/node).
+- Run `openclaw update --dry-run` and inspect any named preflight check. Restore service-manager access as the owning account when requested. An unavailable manager produces a warning and skips automatic service restart; an ownership refusal requires resolving the reported mismatch before retrying.
+- If installation paths differ, align entry points before considering a reinstall. On Windows, use `Get-Command openclaw -All` and `Get-Command node -All`; on macOS/Linux, use `type -a openclaw node`. Retry through the intended installation's absolute launcher and follow the updater's recovery command. Changing the shell's Node alone does not update the service definition.
+
+Preflight diagnostics identify the update installation and binary, the detected
+runtime, and the service installation when inspected. An unresolved service path
+means it could not be verified, not that no Gateway is running. Older installed
+updaters keep their original messages for the first upgrade hop.
+
 ## Downgrade
 
 Verify the upgrade and your session history before retiring recovery originals
@@ -17,6 +30,16 @@ with `openclaw update cleanup`. Downgrading the package does not reverse config
 or database migrations. Once state has migrated beyond the older release's
 supported format, the supported recovery is to restore a verified pre-update
 backup with its matching OpenClaw release.
+
+<Warning>
+Fresh shared-state databases created after tenant-container management was retired
+omit `fleet_cells`. Older revisions that require this table can reject them even
+when the numeric schema version matches. Existing databases retain the old table
+and rows, but that alone does not establish downgrade compatibility. Do not
+reconstruct the retired table or alter schema markers to bypass validation.
+Continue with the current release, or restore a complete verified backup with its
+matching older release using the recovery procedure below.
+</Warning>
 
 Prefer `openclaw update` for upgrades and recovery. It validates the target,
 runs required Doctor migrations, and verifies the activated Gateway. A raw
@@ -37,8 +60,18 @@ are copied when supported. Regular-file launchers still require matching modes
 and contents. If backup verification fails, the report names the differing
 fields and the retained failed copy for inspection before retrying.
 
+Package rollback checks file hashes, inode identity, permissions, ownership, and
+symlink targets. It ignores regular `node_modules/.package-lock.json` files,
+which npm documents as a disposable cache, and link counts and change times
+that can change without altering the retained bytes. Executable `.bin` entries
+remain part of verification. During the original update process, a mismatch
+records up to five differing relative paths and field names (including `sha256`
+for changed contents) in the failure facts and report. Recovery after a process
+restart retains the saved digest check but cannot reconstruct that entry list.
+
 This behavior belongs to the installed updater. An older updater, including
-2026.9.4, can refuse a macOS launcher backup before the target version runs.
+2026.9.4, can refuse package or launcher verification before the target version runs
+and cannot gain these diagnostics from the candidate.
 Use the installation's [manual package-manager update procedure](/install/updating/update-methods#alternative-manual-npm-pnpm-or-bun)
 if that first update is blocked.
 
@@ -74,6 +107,16 @@ A complete recovery point must cover these together:
 - `state/openclaw.sqlite` and every `agents/<id>/agent/openclaw-agent.sqlite`,
   including databases at configured paths outside the default layout.
 - The workspaces, credentials, and retained originals needed by that installation.
+
+Restore that set from one backup generation. Do not combine a pre-update config
+or shared database with a post-update per-agent database, or the reverse. Model
+auth profiles and their state are authoritative in each
+`openclaw-agent.sqlite`. Files named
+`auth-profiles.json.sqlite-import.<id>.bak` or
+`auth-state.json.sqlite-import.<id>.bak` are preserved migration inputs or
+recovery artifacts, not the live credential store. Restoring those JSON files
+without the matching per-agent database does not restore that generation's auth
+state.
 
 Use `openclaw backup create --verify` for a verified, WAL-aware archive. Never copy only the
 main `.sqlite` file from a live WAL database: committed data can still be in
@@ -117,21 +160,37 @@ Confirm no update is in progress and inspect the corresponding update report and
 recovery state before manual cleanup.
 If the Gateway was confirmed stopped during capture, a failed candidate
 that was never allowed to start can restore those databases before package
-rollback when Doctor's recorded write fingerprints still match. A change between
-capture and Doctor admission, or after Doctor finishes, preserves the current
+rollback only when database write fingerprints remain unchanged through Doctor
+and restoration. Maintenance ownership cannot identify independent SQLite writers,
+so any change during Doctor, including Doctor's own writes or a newly created
+database, makes these snapshots available for manual recovery only. A change between
+capture and Doctor admission, during Doctor, or after Doctor finishes preserves the current
 databases and reports `state-migrated-no-rollback` with the snapshot location and
 Doctor recovery guidance. Without Doctor write evidence, rollback requires the
 last verified database generations to remain unchanged.
 Snapshot capture first settles local SQLite writers under maintenance ownership,
-so later writer shutdown is not mistaken for intervening writes. The installed
+so later writer shutdown is not mistaken for intervening writes. Under that
+ownership, capture copies each database file family privately instead of opening
+the source, so WAL files left by an exited writer are not mistaken for a change
+during capture. The installed
 updater owns this ordering; staging a newer candidate cannot change an
 already-running older updater.
+While those fingerprints are tracked, the new version's Doctor also reads databases
+through private copies for its schema checks. A Doctor that fails before writing
+therefore leaves the snapshots restorable, and the package rolls back.
+On Windows, an eligible capture first runs the same native SQLite exclusion check
+used by rollback. This settles any retained WAL before recording write fingerprints,
+so later check cleanup is not mistaken for another writer. If another connection
+prevents exclusion, snapshots remain available for manual recovery.
 Snapshots taken while a Gateway may still be writing are available for
 manual recovery only until verified successful activation, even if it exits later.
 Migrated files are kept as
 `<database>.migrated-<runId>` for inspection, and the report names the snapshots
 and displaced files. See [Recovery limits](/cli/update/how-updates-run#recovery-limits)
 for disk requirements and the lifecycle checks.
+
+Database restoration preserves current update history, including failure details
+recorded after capture. The retained original snapshots remain unchanged.
 
 This requires the repaired updater to drive the update; already-running older
 drivers cannot gain database rollback from the candidate. A candidate that
@@ -195,6 +254,13 @@ verification failure. The command still exits nonzero; recovery does not turn a
 rejected version into a successful update.
 
 Recovery reports distinguish restored package files from a healthy Gateway.
+Once the updater verifies that the target Gateway is serving, later optional
+recognized maintenance failures, such as a late restart-health report or removing
+an old CLI wrapper, remain warnings and do not trigger rollback or turn the update
+into a failure. Authority refusals, data-at-risk failures, and unclassified errors
+still block successful completion. This does not rewrite an earlier failed
+attempt when a later status check finds the Gateway healthy.
+
 A verified rollback names the version serving after recovery, including when
 an additional repair was needed. If the restored service fails its health check,
 the result records `recovery.service: "failed"`; the report says health failed
@@ -207,8 +273,12 @@ Detailed recovery reasons remain in the update result, status diagnostics, and f
 
 Use `openclaw update status` for the recorded reason and `openclaw triage` to
 diagnose a failed check. Recovery guidance reports whether the Gateway is running
-or stopped from the latest service observation, even when the new version is running but did
-not pass verification. A restored Gateway must pass its own verification checks
+or stopped from the latest service observation. When the Gateway answers with the
+update's target version, that observation supersedes a saved runtime-verification
+restart warning; the original failed run and any migration rollback restrictions
+remain recorded. An unsafe Doctor process settlement keeps its recovery guidance
+until the recovery owner verifies settlement; a responding Gateway alone cannot
+clear that refusal. A restored Gateway must pass its own verification checks
 before the run can finish as `rolled-back`.
 
 In the Control UI, open **Settings → Updates** and choose **Diagnose update** to
@@ -247,6 +317,15 @@ and follow the reported process-inspection guidance before retrying repair.
 The installed updater owns this process supervision: a first update driven by
 2026.9.5 remains limited by that older parent's settlement checks.
 
+Delegated update and Doctor workers also watch their recorded parent processes.
+If an updater exits while a worker is stalled, the worker requests shutdown and
+allows ten seconds for settlement before exiting. State remains protected until
+the worker has stopped; the next CLI or Gateway start can then reclaim its dead
+maintenance owner. A surviving maintenance owner is identified by role and PID
+in the refusal, with `openclaw update status --json` for update progress. Package
+recovery still verifies the installed candidate before settling its activation
+receipt, and retains the printed repair command when recovery is unsafe.
+
 Before starting a preserved candidate, the updater checks shared and existing
 agent database schemas against the candidate's contract. If migrations remain
 pending after the failed Doctor has stopped, it runs the candidate Doctor again
@@ -264,8 +343,8 @@ through Doctor and rollback.
 The temporary snapshots used to check migrations are removed after
 validation and do not replace your backup.
 If the schema comparison cannot be completed, automatic rollback is refused
-(`rollback-state-unverified`). The newly installed version owns final
-verification and reporting after migration,
+(`rollback-state-unverified`). The updater captures authored config and include files without opening migrated
+state; the newly installed version owns state verification and final reporting after migration,
 preserving the same run ID and recorded activation steps.
 
 For pnpm and Bun, changes to sibling global packages after staging refuse automatic rollback (`rollback-project-changed`) without restoring the shared project; keep a reachable version installed, otherwise keep the Gateway stopped and follow the report’s repair command.

@@ -56,16 +56,21 @@ const {
   },
   settingsManagerMock: {
     load: vi.fn().mockResolvedValue({}),
-    onChange: vi.fn().mockReturnValue(() => {}),
     startSubscription: vi.fn().mockResolvedValue(undefined),
   },
   realUrbitFixture: {
     config: undefined as OpenClawConfig | undefined,
     enabled: false,
+    useRealIngress: false,
+    openChannelIngressQueue: undefined as (() => unknown) | undefined,
     url: "https://urbit.example.com",
     client: null as {
       stopReceiving: () => void;
       close: () => Promise<void>;
+    } | null,
+    ingress: null as {
+      stop: () => Promise<void>;
+      waitForIdle: () => Promise<void>;
     } | null,
   },
 }));
@@ -76,7 +81,7 @@ vi.mock("openclaw/plugin-sdk/agent-runtime", () => ({
 
 vi.mock("openclaw/plugin-sdk/channel-inbound", async (importOriginal) => ({
   ...(await importOriginal<typeof import("openclaw/plugin-sdk/channel-inbound")>()),
-  createChannelInboundEnvelopeBuilder: createChannelInboundEnvelopeBuilderMock,
+  createChannelInboundEnvelopeBuilderAsync: createChannelInboundEnvelopeBuilderMock,
   formatInboundMediaUnavailableText: formatInboundMediaUnavailableTextMock,
 }));
 
@@ -90,8 +95,12 @@ vi.mock("openclaw/plugin-sdk/media-runtime", () => ({
   saveRemoteMedia: saveRemoteMediaMock,
 }));
 
-vi.mock("../runtime.js", () => ({
+vi.mock("../runtime.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../runtime.js")>()),
   getTlonRuntime: () => ({
+    state: {
+      openChannelIngressQueue: () => realUrbitFixture.openChannelIngressQueue?.(),
+    },
     config: {
       current: () =>
         realUrbitFixture.config ?? {
@@ -156,9 +165,22 @@ vi.mock("../settings.js", async (importOriginal) => ({
   createSettingsManager: vi.fn(() => settingsManagerMock),
 }));
 
-vi.mock("./ingress.js", () => ({
-  createTlonIngressMonitor: vi.fn(() => ingressMock),
-}));
+vi.mock("./ingress.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./ingress.js")>();
+  return {
+    ...actual,
+    createTlonIngressMonitor: vi.fn(function (
+      ...args: Parameters<typeof actual.createTlonIngressMonitor>
+    ) {
+      if (!realUrbitFixture.useRealIngress) {
+        return ingressMock;
+      }
+      const monitor = actual.createTlonIngressMonitor(...args);
+      realUrbitFixture.ingress = monitor;
+      return monitor;
+    }),
+  };
+});
 
 import { monitorTlonProvider } from "./index.js";
 
@@ -168,7 +190,7 @@ export function useTlonMonitorFixture() {
     inboundRuntimeMock.resolveStable
       .mockReset()
       .mockImplementation((params) => ingress.resolveStable(params));
-    createChannelInboundEnvelopeBuilderMock.mockReturnValue(buildChannelInboundEnvelopeMock);
+    createChannelInboundEnvelopeBuilderMock.mockResolvedValue(buildChannelInboundEnvelopeMock);
     buildChannelInboundEnvelopeMock.mockReturnValue("tlon-envelope");
     formatInboundMediaUnavailableTextMock.mockReturnValue("formatted-inbound-body");
     inboundRuntimeMock.buildContext.mockReset().mockReturnValue(builtInboundContextPayload);
@@ -183,15 +205,22 @@ export function useTlonMonitorFixture() {
     vi.clearAllMocks();
     vi.restoreAllMocks();
     vi.useRealTimers();
+    const realIngress = realUrbitFixture.ingress;
+    if (realIngress) {
+      await realIngress.stop().catch(() => undefined);
+    }
     const realClient = realUrbitFixture.client;
     if (realClient) {
       realClient.stopReceiving();
       await realClient.close().catch(() => undefined);
     }
     realUrbitFixture.enabled = false;
+    realUrbitFixture.useRealIngress = false;
+    realUrbitFixture.openChannelIngressQueue = undefined;
     realUrbitFixture.config = undefined;
     realUrbitFixture.url = "https://urbit.example.com";
     realUrbitFixture.client = null;
+    realUrbitFixture.ingress = null;
   });
 
   return {

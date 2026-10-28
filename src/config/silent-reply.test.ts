@@ -1,4 +1,3 @@
-// Covers silent-reply config normalization and policy behavior.
 import { describe, expect, it } from "vitest";
 import { resolveSilentReplySettings } from "./silent-reply.js";
 import type { OpenClawConfig } from "./types.openclaw.js";

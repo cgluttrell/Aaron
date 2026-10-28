@@ -17,6 +17,7 @@ import { resolveSecretRefString } from "./resolve.js";
 import { withSecureTestNodeExecPath } from "./test-node-command.test-support.js";
 
 const tempDirs: string[] = [];
+const originalVersions = Object.getOwnPropertyDescriptor(process, "versions")!;
 
 function makeTempDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "openclaw-secret-provider-integrations-"));
@@ -85,27 +86,76 @@ function pluginIntegrationProviderConfig(pluginId: string, integrationId: string
 }
 
 afterEach(() => {
+  Object.defineProperty(process, "versions", originalVersions);
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
 describe("secret provider integration presets", () => {
-  it("materializes plugin manifest exec providers without provider-specific core code", () => {
-    const rootDir = makeTempDir();
-    makeSecureDir(path.join(rootDir, "bin"));
-    writeSecureFile(path.join(rootDir, "bin", "resolve.mjs"), "process.stdin.resume();\n");
-    writePluginManifest(rootDir, {
-      id: "acme-secrets",
-      name: "Acme Secrets",
-      secretProviderIntegrations: {
-        acme: {
+  it.each([undefined, "1.4.3"])(
+    "materializes exec providers with the selected runtime flags (Bun: %s)",
+    (bun) => {
+      Object.defineProperty(process, "versions", {
+        configurable: true,
+        value: { ...process.versions, bun },
+      });
+      const rootDir = makeTempDir();
+      makeSecureDir(path.join(rootDir, "bin"));
+      writeSecureFile(path.join(rootDir, "bin", "resolve.mjs"), "process.stdin.resume();\n");
+      writePluginManifest(rootDir, {
+        id: "acme-secrets",
+        name: "Acme Secrets",
+        secretProviderIntegrations: {
+          acme: {
+            providerAlias: "acme",
+            displayName: "Acme Vault",
+            description: "Acme exec resolver",
+            source: "exec",
+            command: "${node}",
+            args: ["./bin/resolve.mjs", "--profile", "work"],
+            timeoutMs: 3000,
+            noOutputTimeoutMs: 3000,
+            maxOutputBytes: 4096,
+            passEnv: ["HOME"],
+            env: {
+              ACME_PROFILE: "work",
+            },
+            jsonOnly: false,
+          },
+        },
+      });
+
+      const registry = loadTestRegistry(rootDir, "acme-secrets");
+
+      expect(registry.diagnostics).toEqual([]);
+      expect(listSecretProviderIntegrationPresets({ manifestRegistry: registry })).toEqual([
+        {
+          id: "acme",
+          pluginId: "acme-secrets",
           providerAlias: "acme",
           displayName: "Acme Vault",
           description: "Acme exec resolver",
+          providerConfig: pluginIntegrationProviderConfig("acme-secrets", "acme"),
+        },
+      ]);
+      expect(
+        resolveSecretProviderIntegrationConfig({
+          manifestRegistry: registry,
+          providerAlias: "acme",
+          providerConfig: pluginIntegrationProviderConfig("acme-secrets", "acme"),
+        }),
+      ).toEqual({
+        ok: true,
+        providerConfig: {
           source: "exec",
-          command: "${node}",
-          args: ["./bin/resolve.mjs", "--profile", "work"],
+          command: process.execPath,
+          args: [
+            ...(bun ? ["--no-install"] : []),
+            fs.realpathSync(path.join(rootDir, "bin", "resolve.mjs")),
+            "--profile",
+            "work",
+          ],
           timeoutMs: 3000,
           noOutputTimeoutMs: 3000,
           maxOutputBytes: 4096,
@@ -113,48 +163,12 @@ describe("secret provider integration presets", () => {
           env: {
             ACME_PROFILE: "work",
           },
+          trustedDirs: [path.dirname(process.execPath), rootDir],
           jsonOnly: false,
         },
-      },
-    });
-
-    const registry = loadTestRegistry(rootDir, "acme-secrets");
-
-    expect(registry.diagnostics).toEqual([]);
-    expect(listSecretProviderIntegrationPresets({ manifestRegistry: registry })).toEqual([
-      {
-        id: "acme",
-        pluginId: "acme-secrets",
-        providerAlias: "acme",
-        displayName: "Acme Vault",
-        description: "Acme exec resolver",
-        providerConfig: pluginIntegrationProviderConfig("acme-secrets", "acme"),
-      },
-    ]);
-    expect(
-      resolveSecretProviderIntegrationConfig({
-        manifestRegistry: registry,
-        providerAlias: "acme",
-        providerConfig: pluginIntegrationProviderConfig("acme-secrets", "acme"),
-      }),
-    ).toEqual({
-      ok: true,
-      providerConfig: {
-        source: "exec",
-        command: process.execPath,
-        args: [fs.realpathSync(path.join(rootDir, "bin", "resolve.mjs")), "--profile", "work"],
-        timeoutMs: 3000,
-        noOutputTimeoutMs: 3000,
-        maxOutputBytes: 4096,
-        passEnv: ["HOME"],
-        env: {
-          ACME_PROFILE: "work",
-        },
-        trustedDirs: [path.dirname(process.execPath), rootDir],
-        jsonOnly: false,
-      },
-    });
-  });
+      });
+    },
+  );
 
   it("normalizes manifest exec provider options to SecretRef provider schema limits", () => {
     const rootDir = makeTempDir();
@@ -196,7 +210,11 @@ describe("secret provider integration presets", () => {
       providerConfig: {
         source: "exec",
         command: process.execPath,
-        args: [fs.realpathSync(path.join(rootDir, "resolve.mjs")), "ok"],
+        args: [
+          ...(process.versions.bun ? ["--no-install"] : []),
+          fs.realpathSync(path.join(rootDir, "resolve.mjs")),
+          "ok",
+        ],
         trustedDirs: [path.dirname(process.execPath), rootDir],
         passEnv: ["GOOD_ENV"],
       },
@@ -614,7 +632,7 @@ describe("secret provider integration presets", () => {
     });
     expect(resolved.ok).toBe(true);
     if (resolved.ok) {
-      expect(resolved.providerConfig.args?.[0]).toBe(
+      expect(resolved.providerConfig.args?.at(-1)).toBe(
         fs.realpathSync(path.join(realRoot, "bin", "resolve.mjs")),
       );
     }
@@ -662,7 +680,7 @@ describe("secret provider integration presets", () => {
       });
       expect(resolved.ok).toBe(process.platform === "win32" && !outsideRoot);
       if (resolved.ok) {
-        expect(resolved.providerConfig.args?.[0]).toBe(
+        expect(resolved.providerConfig.args?.at(-1)).toBe(
           fs.realpathSync(path.join(targetDir, "resolve.mjs")),
         );
       }
@@ -697,14 +715,18 @@ describe("secret provider integration presets", () => {
     },
   );
 
-  it.skipIf(process.platform === "win32")(
-    "skips node presets whose entrypoint parent directory is writable by others",
-    () => {
+  it.skipIf(process.platform === "win32").each([
+    { writable: "world", dirMode: 0o777, fileMode: 0o644, presets: 0 },
+    { writable: "group", dirMode: 0o775, fileMode: 0o664, presets: 1 },
+  ])(
+    "lists $presets preset(s) when the node entrypoint path is $writable-writable",
+    ({ dirMode, fileMode, presets }) => {
       const rootDir = makeTempDir();
       const binDir = path.join(rootDir, "bin");
       fs.mkdirSync(binDir);
       fs.writeFileSync(path.join(binDir, "resolve.mjs"), "process.stdin.resume();\n");
-      fs.chmodSync(binDir, 0o777);
+      fs.chmodSync(path.join(binDir, "resolve.mjs"), fileMode);
+      fs.chmodSync(binDir, dirMode);
       try {
         writePluginManifest(rootDir, {
           id: "writable-parent-secrets",
@@ -720,7 +742,9 @@ describe("secret provider integration presets", () => {
 
         const registry = loadTestRegistry(rootDir, "writable-parent-secrets");
 
-        expect(listSecretProviderIntegrationPresets({ manifestRegistry: registry })).toEqual([]);
+        expect(listSecretProviderIntegrationPresets({ manifestRegistry: registry })).toHaveLength(
+          presets,
+        );
       } finally {
         fs.chmodSync(binDir, 0o700);
       }

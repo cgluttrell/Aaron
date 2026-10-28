@@ -1,8 +1,9 @@
 import fs from "node:fs";
+import fsPromises from "node:fs/promises";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import { pathMayExistSync } from "./path-existence.js";
+import { lstatIfExists, pathMayExistSync } from "./path-existence.js";
 
 const tempDirs = useAutoCleanupTempDirTracker(afterEach);
 
@@ -30,4 +31,20 @@ it.each(["EACCES", "EPERM", "ELOOP", "EIO"])("preserves uncertainty for %s", (co
   } finally {
     probe.mockRestore();
   }
+});
+
+it("returns link metadata while treating definite absence as missing", async () => {
+  const root = tempDirs.make("openclaw-lstat-if-exists-");
+  const file = path.join(root, "file");
+  const dangling = path.join(root, "dangling");
+  await fsPromises.writeFile(file, "fixture");
+  await fsPromises.symlink("missing-target", dangling);
+
+  expect((await lstatIfExists(dangling))?.isSymbolicLink()).toBe(true);
+  expect(await lstatIfExists(path.join(root, "missing"))).toBeUndefined();
+  expect(await lstatIfExists(path.join(file, "child"))).toBeUndefined();
+
+  const failure = Object.assign(new Error("filesystem probe failed"), { code: "EIO" });
+  vi.spyOn(fsPromises, "lstat").mockRejectedValueOnce(failure);
+  await expect(lstatIfExists("blocked")).rejects.toBe(failure);
 });

@@ -1,5 +1,4 @@
 import path from "node:path";
-import { note } from "../../packages/terminal-core/src/note.js";
 import type { ConfigSnapshotReadMeasure } from "../config/io.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { DeferredPluginMigration } from "../infra/deferred-plugin-migrations.js";
@@ -30,6 +29,7 @@ import type { PluginMigrationInspection } from "./doctor/shared/plugin-migration
 export async function prepareDoctorMigrationPlugins(params: {
   cfg: OpenClawConfig;
   env: NodeJS.ProcessEnv;
+  retainedPluginIds?: readonly string[];
   measure?: ConfigSnapshotReadMeasure;
   snapshotRead: ConfigPreflightSnapshotRead;
   readRefreshedSnapshot: () => Promise<ConfigPreflightSnapshotRead>;
@@ -37,7 +37,7 @@ export async function prepareDoctorMigrationPlugins(params: {
     pending: readonly DeferredPluginMigration[],
     inspection?: PluginMigrationInspection,
   ) => Promise<void>;
-}): Promise<ConfigPreflightSnapshotRead> {
+}): Promise<{ snapshotRead: ConfigPreflightSnapshotRead; warnings: string[] }> {
   const convergence = await runDoctorPluginConvergence(params);
   setActiveDegradedPlugins(convergence.quarantinedPlugins);
   await params.onDeferredPlugins(
@@ -46,7 +46,10 @@ export async function prepareDoctorMigrationPlugins(params: {
   );
   const refreshed = await params.readRefreshedSnapshot();
   assertPreflightConfigUnchanged(params.snapshotRead.snapshot, refreshed.snapshot);
-  return refreshed;
+  return {
+    snapshotRead: refreshed,
+    warnings: convergence.warnings ?? [],
+  };
 }
 
 export async function assertDoctorPreflightMigrationsComplete(params: {
@@ -103,13 +106,5 @@ export async function assertDoctorPreflightMigrationsComplete(params: {
       }
     }
     throw error;
-  }
-}
-
-export function noteStateMigrationResult(result: MigrationMessages): void {
-  for (const key of ["changes", "notices", "warnings"] as const) {
-    if (result[key]?.length) {
-      note(result[key].map((entry) => `- ${entry}`).join("\n"), `Doctor ${key}`);
-    }
   }
 }

@@ -1,8 +1,9 @@
 import { toErrorObject } from "openclaw/plugin-sdk/error-runtime";
-import { expectDefined } from "openclaw/plugin-sdk/expect-runtime";
+import { sleepWithAbort } from "openclaw/plugin-sdk/retry-runtime";
 import { formatErrorMessage } from "openclaw/plugin-sdk/security-runtime";
 import type { SsrFPolicy } from "openclaw/plugin-sdk/security-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
+import { raceWithTimeout } from "openclaw/plugin-sdk/time-runtime";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 import { withManagedProxyForCdpUrl, withNoProxyForCdpUrl } from "./cdp-proxy-bypass.js";
 import {
@@ -51,6 +52,11 @@ import {
   normalizeCdpUrl,
   targetKey,
 } from "./pw-session-state.js";
+import {
+  guardHeadlessContexts,
+  isHeadlessChromium,
+  refuseHeadlessPasskeyDialogs,
+} from "./pw-session-webauthn.js";
 
 export { pageTargetInfo } from "./pw-session-page-target.js";
 
@@ -170,7 +176,7 @@ function takeCachedPlaywrightBrowserConnection(cdpUrl: string): ConnectedBrowser
   if (!cur) {
     return null;
   }
-  if (cur.onDisconnected && typeof cur.browser.off === "function") {
+  if (cur.onDisconnected) {
     cur.browser.off("disconnected", cur.onDisconnected);
   }
   return cur;
@@ -218,23 +224,14 @@ async function closeTrackedPlaywrightConnection(connection: ConnectedBrowser): P
 }
 
 async function withPlaywrightCloseTimeout(task: Promise<void>): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      task,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error("Playwright adapter disconnect timed out.")),
-          PLAYWRIGHT_CONNECTION_CLOSE_TIMEOUT_MS,
-        );
-        timer.unref?.();
-      }),
-    ]);
-  } finally {
-    if (timer) {
-      clearTimeout(timer);
-    }
-  }
+  await raceWithTimeout(
+    task,
+    PLAYWRIGHT_CONNECTION_CLOSE_TIMEOUT_MS,
+    () => {
+      throw new Error("Playwright adapter disconnect timed out.");
+    },
+    { ref: false },
+  );
 }
 
 /** Capture and retire only the adapter handles currently owned by one lifecycle transition. */
@@ -515,19 +512,49 @@ export async function connectBrowser(
           void closeTrackedPlaywrightConnection(connectionAttempt.retired).catch(() => {});
           throw new Error("Playwright connection attempt was superseded.");
         }
+        let disconnected = false;
         const onDisconnected = () => {
+          disconnected = true;
           const current = cachedByCdpUrl.get(normalized);
           if (current?.browser === browser) {
             cachedByCdpUrl.delete(normalized);
           }
         };
-        if (resolveBrowserEngine(engine).descriptor.sessionScope === "connection") {
+        // Listen before the awaited setup below, so a browser lost meanwhile is not cached.
+        browser.on("disconnected", onDisconnected);
+        const engineAdapter = resolveBrowserEngine(engine);
+        if (engineAdapter.descriptor.sessionScope === "connection") {
           markConnectionScopedBrowser(browser);
         }
-        const connected: ConnectedBrowser = { browser, cdpUrl: normalized, onDisconnected, engine };
-        cachedByCdpUrl.set(normalized, connected);
-        browser.on("disconnected", onDisconnected);
+        // Relay connections drive the user's visible Chrome, which shows its own dialogs.
+        const headless =
+          !relay && engineAdapter.descriptor.id === "chromium"
+            ? await isHeadlessChromium(browser)
+            : false;
         observeBrowser(browser);
+        if (headless) {
+          // Before any caller can load a document through this connection.
+          await guardHeadlessContexts(browser.contexts());
+        }
+        if (disconnected) {
+          browser.off("disconnected", onDisconnected);
+          throw new Error("Browser disconnected while connecting.");
+        }
+        const connected: ConnectedBrowser = {
+          browser,
+          cdpUrl: normalized,
+          onDisconnected,
+          engine,
+          headless,
+        };
+        // Headless detection and guard registration await; recheck supersession before caching.
+        if (connectionAttempt.cancelled) {
+          browser.off("disconnected", onDisconnected);
+          connectionAttempt.retired = { browser, cdpUrl: normalized };
+          void closeTrackedPlaywrightConnection(connectionAttempt.retired).catch(() => {});
+          throw new Error("Playwright connection attempt was superseded.");
+        }
+        cachedByCdpUrl.set(normalized, connected);
         return connected;
       } catch (err) {
         lastErr = err;
@@ -539,9 +566,7 @@ export async function connectBrowser(
         if (errMsg.includes("rate limit")) {
           break;
         }
-        await new Promise((r) => {
-          setTimeout(r, 250 + attempt * 250);
-        });
+        await sleepWithAbort(250 + attempt * 250);
       }
     }
     const message = lastErr ? formatErrorMessage(lastErr) : "CDP connect failed";
@@ -564,12 +589,11 @@ export async function getAllPages(browser: Browser): Promise<Page[]> {
   return browser.contexts().flatMap((context) => context.pages());
 }
 
-async function partitionAccessiblePages(opts: { cdpUrl: string; pages: Page[] }): Promise<{
-  accessible: Array<{ page: Page; targetId: string | null }>;
-  blockedCount: number;
-}> {
+async function getAccessiblePages(opts: {
+  cdpUrl: string;
+  pages: Page[];
+}): Promise<Array<{ page: Page; targetId: string | null }>> {
   const accessible: Array<{ page: Page; targetId: string | null }> = [];
-  let blockedCount = 0;
   const candidates = await Promise.all(
     opts.pages.map(async (page) => {
       if (isBlockedPageRef(opts.cdpUrl, page)) {
@@ -581,28 +605,18 @@ async function partitionAccessiblePages(opts: { cdpUrl: string; pages: Page[] })
     }),
   );
   for (const { page, targetId } of candidates) {
-    if (isBlockedPageRef(opts.cdpUrl, page)) {
-      blockedCount += 1;
-      continue;
-    }
     // Fail closed when we cannot resolve a target id while this session has
     // quarantined targets; otherwise a blocked tab can become selectable.
-    if (!targetId) {
-      if (hasBlockedTargetsForCdpUrl(opts.cdpUrl)) {
-        blockedCount += 1;
-        continue;
-      }
-      accessible.push({ page, targetId: null });
-      continue;
-    }
-    if (isBlockedTarget(opts.cdpUrl, targetId)) {
-      blockedCount += 1;
+    if (
+      isBlockedPageRef(opts.cdpUrl, page) ||
+      (targetId ? isBlockedTarget(opts.cdpUrl, targetId) : hasBlockedTargetsForCdpUrl(opts.cdpUrl))
+    ) {
       continue;
     }
     bindRoleRefsTarget(page, opts.cdpUrl, targetId);
     accessible.push({ page, targetId });
   }
-  return { accessible, blockedCount };
+  return accessible;
 }
 
 async function getPageForTargetIdOnce(opts: {
@@ -614,30 +628,32 @@ async function getPageForTargetIdOnce(opts: {
   if (opts.targetId && isBlockedTarget(opts.cdpUrl, opts.targetId)) {
     throw new BlockedBrowserTargetError();
   }
-  const { browser } = await connectBrowser(opts.cdpUrl, opts.ssrfPolicy, opts.relayReference);
+  const { browser, headless } = await connectBrowser(
+    opts.cdpUrl,
+    opts.ssrfPolicy,
+    opts.relayReference,
+  );
   const pages = await getAllPages(browser);
   if (!pages.length) {
     throw new Error("No pages available in the connected browser.");
   }
 
-  const { accessible, blockedCount } = await partitionAccessiblePages({
+  const accessible = await getAccessiblePages({
     cdpUrl: opts.cdpUrl,
     pages,
   });
   if (!accessible.length) {
-    if (blockedCount > 0) {
-      throw new BlockedBrowserTargetError();
-    }
-    throw new Error("No pages available in the connected browser.");
+    throw new BlockedBrowserTargetError();
   }
-  const first = expectDefined(accessible.at(0), "non-empty accessible browser pages");
-  if (!opts.targetId) {
-    bindRoleRefsTarget(first.page, opts.cdpUrl, first.targetId);
-    return first.page;
-  }
-  const found = accessible.find((entry) => entry.targetId === opts.targetId);
+  const found = opts.targetId
+    ? accessible.find((entry) => entry.targetId === opts.targetId)
+    : accessible[0];
   if (found) {
     bindRoleRefsTarget(found.page, opts.cdpUrl, found.targetId);
+    if (headless) {
+      // Settled guards are cached; this only re-registers one that failed.
+      void refuseHeadlessPasskeyDialogs(found.page.context());
+    }
     return found.page;
   }
   throw new BrowserTabNotFoundError();

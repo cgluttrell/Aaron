@@ -1,16 +1,15 @@
 import { EventEmitter } from "node:events";
 import { performance } from "node:perf_hooks";
-import { expect, it, vi, type Mock } from "vitest";
+import { setImmediate as nextLoopTurn } from "node:timers/promises";
+import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { afterEach, expect, it, vi, type Mock } from "vitest";
+import { useAutoCleanupTempDirTracker } from "../../../test/helpers/temp-dir.js";
 import type { GatewayServer } from "../../gateway/server-public.js";
 import type { GatewayActiveWorkSnapshot } from "../../infra/gateway-active-work.js";
-import type { GatewayBootLifecycleCompletion } from "../../infra/gateway-boot-lifecycle.js";
 import type { GatewayRestartIntent } from "../../infra/restart-intent.js";
 import { createDeferredCore } from "../../shared/deferred.js";
-import type { GatewayRestartSnapshot } from "../daemon-cli/restart-health.js";
 
 type ManagedUpdateOwner = NonNullable<GatewayRestartIntent["successorOwner"]>;
-type GatewayStart = Parameters<typeof import("./run-loop.js").runGatewayLoop>[0]["start"];
-type ExitRuntime = { log: Mock; error: Mock; exit: Mock<(code: number) => void> };
 
 export function createGatewayLogger() {
   return {
@@ -23,97 +22,18 @@ export function createGatewayLogger() {
   };
 }
 
-export type UpdateRespawnFixtures = {
-  spawnProcess: Mock<typeof import("node:child_process").spawn>;
-  hostedStopPrepare: Mock<typeof import("../../daemon/hosted-stop.js").prepareHostedGatewayStop>;
-  waitForGatewayActiveWork: Mock<
-    typeof import("../../infra/gateway-active-work.js").waitForGatewayActiveWork
-  >;
-  peekGatewayRestartReason: Mock<() => string | undefined>;
-  respawnGatewayProcessForUpdate: Mock<
-    (opts?: { env?: NodeJS.ProcessEnv }) => UpdateRespawnResultFixture
-  >;
-  waitForGatewayHealthyRestart: Mock<
-    typeof import("../daemon-cli/restart-health.js").waitForGatewayHealthyRestart
-  >;
-  respawnHealth: (overrides?: Partial<GatewayRestartSnapshot>) => GatewayRestartSnapshot;
-  readRestartSentinelReadOnly: Mock<
-    typeof import("../../infra/restart-sentinel.js").readRestartSentinelReadOnly
-  >;
-  writeRestartSentinelIfUnchanged: Mock<
-    typeof import("../../infra/restart-sentinel.js").writeRestartSentinelIfUnchanged
-  >;
-  restartGatewayProcessWithFreshPid: Mock<
-    (opts?: { env?: NodeJS.ProcessEnv }) => {
-      mode: "supervised" | "disabled" | "failed";
-      detail?: string;
-      exitCode?: number;
-      handoffSpawned?: Promise<boolean>;
-    }
-  >;
-  withIsolatedSignals: typeof withIsolatedSignals;
-  createSignaledStart: (close: GatewayServer["close"]) => {
-    start: Mock<GatewayStart>;
-    started: Promise<void>;
+export type UpdateRespawnFixtures =
+  typeof import("./run-loop-mocks.test-support.js").runLoopFixture & {
+    managedUpdateSuccessorOwner: ManagedUpdateOwner;
+    isGatewayWorkAdmissionClosed: () => boolean;
+    withIsolatedSignals: typeof withIsolatedSignals;
+    createSignaledStart: typeof createSignaledStart;
+    createRuntimeWithExitSignal: typeof createRuntimeWithExitSignal;
+    waitForStart: typeof waitForStart;
+    waitForLoopCondition: typeof waitForLoopCondition;
+    setPlatform: typeof setPlatform;
+    originalPlatformDescriptor: typeof originalPlatformDescriptor;
   };
-  createRuntimeWithExitSignal: () => { runtime: ExitRuntime; exited: Promise<number> };
-  runLoopWithStart: (params: {
-    start: Mock<GatewayStart>;
-    runtime: ExitRuntime;
-    ownsProcessLifecycle?: boolean;
-    lockPort?: number;
-    completeBoot?: (completion: GatewayBootLifecycleCompletion) => void;
-  }) => Promise<unknown>;
-  waitForStart: (started: Promise<void>) => Promise<void>;
-  waitForLoopCondition: (predicate: () => boolean, message: string) => Promise<void>;
-  createSignaledLoopHarness: (
-    exitCallOrder?: string[],
-    ownsProcessLifecycle?: boolean,
-  ) => Promise<{
-    close: Mock<GatewayServer["close"]>;
-    start: Mock<GatewayStart>;
-    runtime: ExitRuntime;
-    exited: Promise<number>;
-  }>;
-  markUpdateRestartSentinelFailure: Mock<(reason: string) => Promise<null>>;
-  writeGatewayRestartHandoffSync: { mockReturnValueOnce: (value: null) => unknown };
-  consumeGatewayRestartIntent: Mock<() => GatewayRestartIntent | null>;
-  managedUpdateSuccessorOwner: ManagedUpdateOwner;
-  claimManagedServiceUpdateHandoff: Mock<(identity: ManagedUpdateOwner) => boolean>;
-  isForegroundUpdateHandoff: Mock<(identity: ManagedUpdateOwner) => boolean>;
-  requestManagedServiceUpdateHandoffPark: Mock<(identity: ManagedUpdateOwner) => Promise<boolean>>;
-  hasManagedProviderLocalServices: Mock<() => boolean>;
-  stopManagedProviderLocalServices: Mock<() => Promise<void>>;
-  cancelManagedServiceUpdateHandoff: Mock<
-    (identity: ManagedUpdateOwner) => Promise<false | "restored-in-process" | "restart-after-exit">
-  >;
-  acquireGatewayLock: Mock<
-    (opts?: { port?: number }) => Promise<{ release: Mock<() => Promise<void>> }>
-  >;
-  completeForegroundUpdateHandoffAfterClose: Mock<
-    typeof import("../../infra/update-managed-service-handoff.js").completeForegroundUpdateHandoffAfterClose
-  >;
-  captureForegroundUpdateHandoffStop: Mock<
-    typeof import("../../infra/update-managed-service-handoff.js").captureForegroundUpdateHandoffStop
-  >;
-  killProcessTree: Mock;
-  flushLogger: Mock<() => Promise<void>>;
-  gatewayLog: { warn: Mock; info: Mock };
-  isGatewayWorkAdmissionClosed: () => boolean;
-  consumeGatewayRestartIntentPayloadSync: Mock<
-    () => { reason?: string; force?: boolean; waitMs?: number } | null
-  >;
-  commitManagedServiceUpdateHandoff: Mock<
-    (identity: ManagedUpdateOwner, outcome?: "update" | "restore") => Promise<boolean>
-  >;
-  setPlatform: (platform: string) => void;
-  expectRestartHandoffCall: (expected: {
-    restartKind: "full-process" | "update-process";
-    reason: string | undefined;
-    supervisorMode: "external" | "launchd";
-  }) => void;
-  originalPlatformDescriptor: PropertyDescriptor | undefined;
-};
 
 export const createActiveWorkSnapshot = (
   counts: Partial<GatewayActiveWorkSnapshot["counts"]> = {},
@@ -330,31 +250,8 @@ export function registerUpdateRespawnProgressTests({
   respawnHealth,
   markUpdateRestartSentinelFailure,
   writeRestartSentinelIfUnchanged,
-  writeGatewayRestartHandoffSync,
-}: {
-  runLoopWithStart: (params: {
-    start: ReturnType<typeof createSignaledStart>["start"];
-    runtime: ReturnType<typeof createRuntimeWithExitSignal>["runtime"];
-    lockPort: number;
-  }) => Promise<unknown>;
-  peekGatewayRestartReason: Mock<() => string | undefined>;
-  consumeGatewayRestartIntent: Mock<() => GatewayRestartIntent | null>;
-  respawnGatewayProcessForUpdate: Mock<
-    (_opts?: { env?: NodeJS.ProcessEnv }) => UpdateRespawnResultFixture
-  >;
-  readRestartSentinelReadOnly: Mock<
-    typeof import("../../infra/restart-sentinel.js").readRestartSentinelReadOnly
-  >;
-  waitForGatewayHealthyRestart: Mock<
-    typeof import("../daemon-cli/restart-health.js").waitForGatewayHealthyRestart
-  >;
-  respawnHealth: (overrides?: Partial<GatewayRestartSnapshot>) => GatewayRestartSnapshot;
-  markUpdateRestartSentinelFailure: Mock<(reason: string) => Promise<null>>;
-  writeRestartSentinelIfUnchanged: Mock<
-    typeof import("../../infra/restart-sentinel.js").writeRestartSentinelIfUnchanged
-  >;
-  writeGatewayRestartHandoffSync: Mock;
-}) {
+  writeGatewayRestartHandoff,
+}: UpdateRespawnFixtures) {
   it.each([
     { waitOutcome: "healthy", elapsedMs: 20_000, closeMs: 0, sentinelStatus: "ok" },
     { waitOutcome: "still-starting", elapsedMs: 300_000, closeMs: 40_000, sentinelStatus: "ok" },
@@ -428,14 +325,19 @@ export function registerUpdateRespawnProgressTests({
         } else {
           expect(writeRestartSentinelIfUnchanged).not.toHaveBeenCalled();
         }
-        expect(writeGatewayRestartHandoffSync).not.toHaveBeenCalled();
+        expect(writeGatewayRestartHandoff).not.toHaveBeenCalled();
       });
     },
   );
 }
 
 export function registerGatewayRestartOwnershipTests({
-  consumeGatewayRestartIntentPayloadSync,
+  consumeGatewayRestartIntentPayload,
+  consumeGatewayRestartAuthorization,
+  markGatewayRestartHandled,
+  rollbackGatewayRestartSignalAdmission,
+  isGatewayWorkAdmissionClosed,
+  createSignaledLoopHarness,
   readCgroup,
   systemctl,
   consumeGatewayRestartIntent,
@@ -451,26 +353,104 @@ export function registerGatewayRestartOwnershipTests({
   waitForGatewayHealthyRestart,
   restartGatewayProcessWithFreshPid,
   commitManagedServiceUpdateHandoff,
-}: Pick<
-  UpdateRespawnFixtures,
-  | "consumeGatewayRestartIntentPayloadSync"
-  | "consumeGatewayRestartIntent"
-  | "runLoopWithStart"
-  | "acquireGatewayLock"
-  | "gatewayLog"
-  | "managedUpdateSuccessorOwner"
-  | "isForegroundUpdateHandoff"
-  | "completeForegroundUpdateHandoffAfterClose"
-  | "respawnGatewayProcessForUpdate"
-  | "cancelManagedServiceUpdateHandoff"
-  | "requestManagedServiceUpdateHandoffPark"
-  | "waitForGatewayHealthyRestart"
-  | "restartGatewayProcessWithFreshPid"
-  | "commitManagedServiceUpdateHandoff"
-> & {
-  readCgroup: Mock;
-  systemctl: Mock;
-}) {
+}: UpdateRespawnFixtures) {
+  const tempDirs = useAutoCleanupTempDirTracker(afterEach);
+  it("reopens refused SIGUSR2 admission without consuming a later signal token (#83131)", async () => {
+    consumeGatewayRestartAuthorization.mockReturnValueOnce(false);
+    consumeGatewayRestartIntentPayload.mockRejectedValueOnce(
+      new Error("lifecycle module corrupted"),
+    );
+
+    await withIsolatedSignals(async ({ captureSignal }) => {
+      const { close, start, exited } = await createSignaledLoopHarness();
+      const restartSignal = captureSignal("SIGUSR2");
+      const sigterm = captureSignal("SIGTERM");
+
+      restartSignal();
+      await nextLoopTurn();
+      await nextLoopTurn();
+
+      expect(gatewayLog.error).toHaveBeenCalledWith(
+        "SIGUSR2 handler failed: lifecycle module corrupted",
+      );
+      expect(markGatewayRestartHandled).toHaveBeenCalledOnce();
+      expect(rollbackGatewayRestartSignalAdmission).not.toHaveBeenCalled();
+      expect(isGatewayWorkAdmissionClosed()).toBe(false);
+      expect(close).not.toHaveBeenCalled();
+      expect(start).toHaveBeenCalledTimes(1);
+
+      sigterm();
+      await expect(exited).resolves.toBe(0);
+    });
+  });
+
+  it("restarts and reacquires custody when owner-loss recovery cannot read the restart intent", async () => {
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const workerCpu = await import("../../infra/worker-cpu.js");
+    const { startGatewayStateOwnerHeartbeat } =
+      await import("../../infra/gateway-state-owner-heartbeat.js");
+    const root = tempDirs.make("openclaw-run-loop-owner-loss-");
+    const lockPath = path.join(root, "owner.lock");
+    fs.writeFileSync(lockPath, "owner");
+    let lastBeat: BigInt64Array | undefined;
+    const createWorker = workerCpu.createCpuTrackedWorker;
+    const observe = vi
+      .spyOn(workerCpu, "createCpuTrackedWorker")
+      .mockImplementation((_url, opts) => {
+        const data: unknown = opts?.workerData;
+        if (!isRecord(data) || !(data.lastBeat instanceof SharedArrayBuffer)) {
+          throw new Error("Expected heartbeat observation");
+        }
+        lastBeat = new BigInt64Array(data.lastBeat);
+        // This regression exercises parent fencing and restart settlement; worker renewal has its own suite.
+        return createWorker(
+          new URL(
+            'data:text/javascript,import { parentPort } from "node:worker_threads"; parentPort.on("message", () => parentPort.close());',
+          ),
+          opts,
+        );
+      });
+    try {
+      await withIsolatedSignals(async ({ captureSignal }) => {
+        const { close, start, exited } = await createSignaledLoopHarness();
+        const onLost = vi.fn(() => captureSignal("SIGUSR2")());
+        const heartbeat = startGatewayStateOwnerHeartbeat(
+          new Set([
+            { lockPath, verifyStillHeld: () => fs.readFileSync(lockPath, "utf8") === "owner" },
+          ]),
+          onLost,
+        );
+        try {
+          fs.renameSync(lockPath, `${lockPath}.retired`);
+          fs.writeFileSync(lockPath, "successor");
+          Atomics.store(lastBeat!, 0, BigInt(Date.now() - 65_000));
+          consumeGatewayRestartIntentPayload.mockRejectedValueOnce(
+            new Error("owner lock was removed or replaced; restart the Gateway"),
+          );
+          vi.useFakeTimers();
+          heartbeat.inspect();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(onLost).toHaveBeenCalledOnce();
+          expect(start).toHaveBeenCalledTimes(2);
+          expect(acquireGatewayLock).toHaveBeenCalledTimes(2);
+          expect(close).toHaveBeenCalledWith(
+            expect.objectContaining({ reason: "gateway restarting" }),
+          );
+        } finally {
+          heartbeat.stop();
+          await heartbeat.worker.terminate();
+          captureSignal("SIGINT")();
+          await vi.advanceTimersByTimeAsync(0);
+          await expect(exited).resolves.toBe(0);
+          vi.useRealTimers();
+        }
+      });
+    } finally {
+      observe.mockRestore();
+    }
+  });
+
   it.each(
     [false, true].flatMap((noRespawn) =>
       [false, true].map((cleanupCompletes) => ({ noRespawn, cleanupCompletes })),
@@ -538,7 +518,7 @@ export function registerGatewayRestartOwnershipTests({
       setPlatform("linux");
       vi.stubEnv("OPENCLAW_SYSTEMD_UNIT", "openclaw-gateway.service");
       vi.stubEnv("OPENCLAW_SUPERVISOR_MODE", "external");
-      consumeGatewayRestartIntentPayloadSync.mockReturnValueOnce({ force: true });
+      consumeGatewayRestartIntentPayload.mockResolvedValueOnce({ force: true });
       systemctl.mockResolvedValue({
         code: 0,
         stdout: "LoadState=loaded\nTimeoutStopUSec=90s",

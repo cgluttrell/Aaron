@@ -1,7 +1,12 @@
 import process from "node:process";
 import { expectDefined } from "@openclaw/normalization-core";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
-import { resolveTimerTimeoutMs } from "@openclaw/normalization-core/number-coercion";
+import {
+  asPositiveFiniteNumber,
+  clampPositiveTimerTimeoutMs,
+  resolveOptionalIntegerOption,
+  resolveTimerTimeoutMs,
+} from "@openclaw/normalization-core/number-coercion";
 import { isPromiseLike } from "@openclaw/normalization-core/promise-like";
 import { hasErrnoCode } from "../infra/errno.js";
 import {
@@ -9,6 +14,7 @@ import {
   resolveWindowsConsoleEncoding,
 } from "../infra/windows-encoding.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import { sleep } from "../utils/sleep.js";
 import {
   EXIT_STDIO_GRACE_MS,
   hasChildProcessExited,
@@ -193,12 +199,10 @@ async function runCommandWithOutputEncoding(
   const stderrCapture = createCapturedOutputBuffers();
   const maxStdoutBytes = resolveMaxOutputBytes(options.maxOutputBytes, "stdout");
   const maxStderrBytes = resolveMaxOutputBytes(options.maxOutputBytes, "stderr");
-  const maxCombinedOutputBytes =
-    typeof options.maxCombinedOutputBytes === "number" &&
-    Number.isFinite(options.maxCombinedOutputBytes) &&
-    options.maxCombinedOutputBytes > 0
-      ? Math.max(1, Math.floor(options.maxCombinedOutputBytes))
-      : undefined;
+  const maxCombinedOutputBytes = resolveOptionalIntegerOption(
+    asPositiveFiniteNumber(options.maxCombinedOutputBytes),
+    { min: 1 },
+  );
   const stdoutCaptureMode = resolveOutputCapture(options.outputCapture, "stdout");
   const stderrCaptureMode = resolveOutputCapture(options.outputCapture, "stderr");
   if (maxCombinedOutputBytes !== undefined && stdoutCaptureMode !== stderrCaptureMode) {
@@ -271,13 +275,7 @@ async function runCommandWithOutputEncoding(
     return Object.assign(failure, { cleanup });
   };
   const ownsExitedProcessTree = Boolean(killProcessTree && process.platform !== "win32");
-  const shouldTrackOutputTimeout =
-    typeof noOutputTimeoutMs === "number" &&
-    Number.isFinite(noOutputTimeoutMs) &&
-    noOutputTimeoutMs > 0;
-  const resolvedNoOutputTimeoutMs = shouldTrackOutputTimeout
-    ? resolveTimerTimeoutMs(noOutputTimeoutMs, 1)
-    : undefined;
+  const resolvedNoOutputTimeoutMs = clampPositiveTimerTimeoutMs(noOutputTimeoutMs);
   const ownsOutputDeadline =
     ownsExitedProcessTree &&
     (resolvedTimeoutMs !== undefined || resolvedNoOutputTimeoutMs !== undefined);
@@ -439,12 +437,11 @@ async function runCommandWithOutputEncoding(
 
   const captureOutput = (
     capture: CapturedOutputBuffers,
-    chunk: Buffer | string,
+    buffer: Buffer,
     maxBytes: number,
     stream: CommandOutputStream,
     captureMode: CommandOutputCaptureMode,
   ) => {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     outputBytesByStream[stream] += buffer.byteLength;
     const streamLimitExceeded = outputBytesByStream[stream] > maxBytes;
     if (maxCombinedOutputBytes === undefined) {
@@ -643,9 +640,7 @@ async function runCommandWithOutputEncoding(
       ) {
         break;
       }
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, WINDOWS_CLOSE_STATE_POLL_MS);
-      });
+      await sleep(WINDOWS_CLOSE_STATE_POLL_MS);
     }
   }
   if (

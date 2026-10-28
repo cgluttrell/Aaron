@@ -32,14 +32,12 @@ import {
 } from "./lib/arg-utils.mts";
 import { readBoundedResponseText } from "./lib/bounded-response.mjs";
 import { parsePluginReleaseSelection } from "./lib/plugin-npm-release.ts";
-import { loadChangelogCollection, loadReleaseChangelog } from "./lib/release-changelog.mjs";
+import { gitIsAncestor, validateCandidateChangelog } from "./lib/release-candidate-changelog.mts";
 import { releaseBranchForTag } from "./lib/release-context.mjs";
 import { ensureReleasePublishToolingTag } from "./lib/release-publish-preflight-evidence.mts";
-import {
-  formatReleasePublishPreflight,
-  isStableLatestPublication,
-} from "./lib/release-publish-preflight-interface.mts";
+import { formatReleasePublishPreflight } from "./lib/release-publish-preflight-interface.mts";
 import { classifyReleaseTrain, parseReleaseVersion } from "./lib/release-version.mjs";
+import { sleep as wait } from "./lib/sleep.mjs";
 import {
   downloadFullReleaseNpmPreflight,
   verifyNpmPreflightProducer,
@@ -52,17 +50,7 @@ import {
 } from "./plugin-sdk-api-release-evidence.mjs";
 import { runReleasePublishPreflight } from "./release-publish-preflight.mts";
 import { runReleaseToolingGh, verifyReleaseToolingIdentity } from "./release-tooling-identity.mjs";
-import {
-  dedicatedSectionVersionForTag,
-  extractChangelogReleaseSections,
-  extractChangelogSection,
-  formatShippedBaselineExclusions,
-  loadReleaseNotesForTag,
-  parseContributionRecordProvenance,
-  parseShippedBaselineExclusions,
-  releaseNotesVersionForTag,
-  renderGithubReleaseNotes,
-} from "./render-github-release-notes.mts";
+import { formatShippedBaselineExclusions } from "./render-github-release-notes.mts";
 import {
   isShaPinnedReleaseValidationBranch,
   authenticateFullReleaseValidationEvidence,
@@ -74,6 +62,7 @@ type CandidateState = ReturnType<typeof buildReleaseCandidateState>;
 type WorkflowArtifact = Awaited<ReturnType<typeof runArtifacts>>[number];
 type GithubFetch = (url: string, init?: RequestInit) => Promise<Response>;
 type GithubApiOptions = Partial<{
+  allowAnonymousFallback: boolean;
   fetchImpl: GithubFetch;
   maxBodyBytes: number;
   timeoutMs: number;
@@ -120,13 +109,15 @@ const SHA256_HEX_PATTERN = /^[a-f0-9]{64}$/u;
 const RELEASE_CANDIDATE_STATE_VERSION = 2;
 const RELEASE_CANDIDATE_STATE_FILE = "release-candidate-state.json";
 const TRUSTED_TOOLING_SHA_ENV = "OPENCLAW_RELEASE_CANDIDATE_TRUSTED_TOOLING_SHA";
+// Release tooling (toolingSha and its publishWorkflowRef tag) is not candidate
+// identity: each run re-verifies the current tooling against trusted main, and
+// saved FRV/npm evidence is authenticated against its own producer run. Tooling
+// repaired mid-release can therefore resume the same state.
 const RELEASE_CANDIDATE_STATE_KEYS = [
   "repo",
   "tag",
   "targetSha",
-  "toolingSha",
   "workflowRef",
-  "publishWorkflowRef",
   "provider",
   "mode",
   "releaseProfile",
@@ -164,8 +155,8 @@ prepare-once release button for complete regular beta/stable releases.
 Options:
   --tag <tag>                         Release tag. An existing tag must resolve to the target SHA.
   --target-sha <sha>                  Frozen release SHA. Defaults to the current HEAD.
-  --workflow-ref <ref>                Trusted workflow ref. Default: main.
-  --workflow-sha <sha>                Trusted helper/publisher SHA (P); reuses or mints its release-publish tag. Fresh qualification runs Q=C.
+  --workflow-ref <ref>                Trusted helper/publisher source (P), not the candidate harness. Default: main.
+  --workflow-sha <sha>                Trusted helper/publisher SHA (P), a trusted-main commit, not the candidate; reuses or mints its release-publish tag. Fresh qualification runs Q=C.
   --publish-workflow-ref <tag>         Protected publication tooling tag matching the trusted helper checkout.
   --publication-route <normal|prepared>
                                       Intended publication route. Default: normal; not inferred from a protected ref.
@@ -193,9 +184,6 @@ Options:
 `;
 }
 
-/**
- * Parses release-candidate validation options and enforces publish-scope policy.
- */
 export function parseArgs(argv: string[]) {
   const args = stripLeadingPackageManagerSeparator(argv);
   const terminatorIndex = args.indexOf("--");
@@ -591,9 +579,6 @@ function githubApiTimedOut(error: unknown) {
   );
 }
 
-/**
- * Calls the GitHub REST API with the gh-auth token and a bounded timeout.
- */
 export async function githubApi(path: string, options: GithubApiOptions = {}): Promise<unknown> {
   const token = options.token ?? run("gh", ["auth", "token"], { capture: true }).trim();
   const timeoutMs = options.timeoutMs ?? githubApiTimeoutMs();
@@ -627,7 +612,7 @@ export async function githubApi(path: string, options: GithubApiOptions = {}): P
       (response.status === 403 || response.status === 429) &&
       (/API rate limit exceeded/iu.test(text) ||
         response.headers.get("x-ratelimit-remaining") === "0");
-    if (primaryRateLimitExhausted) {
+    if (primaryRateLimitExhausted && options.allowAnonymousFallback !== false) {
       // Public release evidence remains readable without auth when one maintainer
       // token is exhausted. Mutating gh commands keep their authenticated path.
       response = await Promise.race([request(""), timeoutPromise]);
@@ -650,9 +635,6 @@ export async function githubApi(path: string, options: GithubApiOptions = {}): P
   }
 }
 
-/**
- * Validates the immutable Windows source release contract for a stable candidate.
- */
 export async function validateWindowsSourceRelease(tag: string, options: GithubApiOptions = {}) {
   const release = await githubApi(
     `repos/${WINDOWS_NODE_REPO}/releases/tags/${encodeURIComponent(tag)}`,
@@ -734,7 +716,18 @@ function runFromTrustedTooling(
       workflowSha !== trustedToolingSha &&
       !gitIsAncestor(workflowSha, "refs/remotes/origin/main", targetRoot)
     ) {
-      throw new Error(`--workflow-sha ${workflowSha} is not reachable from trusted ${workflowRef}`);
+      // P runs admission, protected-tag creation, and publication with release
+      // credentials, so it must be reviewed trusted-main code (RELEASING.md,
+      // "Frozen qualification identity"). The candidate is selected separately.
+      const candidateHead = run("git", ["rev-parse", "HEAD"], {
+        capture: true,
+        cwd: targetRoot,
+      }).trim();
+      throw new Error(
+        `--workflow-sha ${workflowSha} is not reachable from trusted ${workflowRef}.${
+          workflowSha === candidateHead ? " It is the checked-out release candidate." : ""
+        } --workflow-sha pins the release tooling that runs with release credentials, so it must be a commit on trusted ${workflowRef}; the candidate comes from the checkout or --target-sha. Pass a trusted ${workflowRef} commit (for example \`git rev-parse origin/${workflowRef}\`), or land the tooling repair on ${workflowRef} first.`,
+      );
     }
     trustedToolingSha = workflowSha;
   }
@@ -886,34 +879,15 @@ export function assertReleaseCandidateTag(tag: string, targetSha: string, cwd: s
   }
 }
 
-function savedPublishWorkflowRef(statePath: string) {
+function savedPublishWorkflowRef(statePath: string, toolingSha: string) {
   const saved = existsSync(statePath)
     ? readJson(statePath, "release candidate state").publishWorkflowRef
     : undefined;
-  return typeof saved === "string" && PUBLISH_TOOLING_TAG_PATTERN.test(saved) ? saved : "";
-}
-
-function gitIsAncestor(ancestor: string, target: string, cwd = process.cwd()) {
-  const result = spawnSync(
-    "git",
-    ["merge-base", "--is-ancestor", `${ancestor}^{commit}`, `${target}^{commit}`],
-    {
-      cwd,
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "pipe"],
-    },
-  );
-  if (result.status === 0) {
-    return true;
-  }
-  if (result.status === 1) {
-    return false;
-  }
-  throw new Error(
-    `could not validate changelog provenance ${ancestor}..${target}: ${
-      result.stderr?.trim() || result.signal || result.status
-    }`,
-  );
+  return typeof saved === "string" &&
+    PUBLISH_TOOLING_TAG_PATTERN.test(saved) &&
+    saved.startsWith(`release-publish/${toolingSha.slice(0, 12)}-`)
+    ? saved
+    : "";
 }
 
 export function validateTrustedToolingPin({
@@ -1005,212 +979,11 @@ export async function validateNpmPreflightRunSource(
   return { status: "passed", headSha: workflowRun.headSha, workflowRef: ref };
 }
 
-function candidateContributionRecordPullRequests(
-  section: string,
-  label: string,
-  { requireExactProvenance = true }: { requireExactProvenance?: boolean } = {},
-) {
-  const recordStart = section.search(/\n### Complete contribution record\r?$/m);
-  if (recordStart < 0) {
-    throw new Error(`${label} is missing ### Complete contribution record`);
-  }
-  const record = section.slice(recordStart);
-  const rowNumbers = [...record.matchAll(/^- \*\*PR #(?<number>[0-9]+)\*\*/gmu)].map((match) =>
-    Number(match.groups?.number),
-  );
-  const rows = new Set(rowNumbers);
-  if (rows.size !== rowNumbers.length) {
-    const duplicate = rowNumbers.find((number, index) => rowNumbers.indexOf(number) !== index);
-    throw new Error(`${label} contains duplicate contribution record PR #${duplicate}`);
-  }
-  if (!requireExactProvenance) {
-    return rows;
-  }
-  const provenance = parseContributionRecordProvenance(record);
-  if (!provenance || !/^[0-9a-f]{40}$/u.test(provenance.target)) {
-    throw new Error(`${label} is missing exact complete contribution record provenance`);
-  }
-  return rows;
-}
-
-export function candidateCumulativeShippedPullRequests(changelog: string, label: string) {
-  const pullRequests = new Set<number>();
-  for (const section of extractChangelogReleaseSections(changelog)) {
-    if (
-      section.version === "Unreleased" ||
-      !section.source.includes("\n### Complete contribution record")
-    ) {
-      continue;
-    }
-    for (const number of candidateContributionRecordPullRequests(
-      section.source,
-      `${label} section ${section.version}`,
-      { requireExactProvenance: false },
-    )) {
-      pullRequests.add(number);
-    }
-  }
-  return pullRequests;
-}
-
 function requireString(value: unknown, label: string) {
   if (typeof value !== "string") {
     throw new TypeError(`${label} must be a string`);
   }
   return value;
-}
-
-export function loadCandidateShippedBaseline(ref: string, rootDir = process.cwd()) {
-  const tagRef = `refs/tags/${ref}`;
-  gitRevParse(`${tagRef}^{commit}`, rootDir);
-  const changelog = loadChangelogCollection({ rootDir, ref: tagRef, recordsOnly: true });
-  const version = requireString(releaseNotesVersionForTag(ref), "release notes version");
-  const source = loadReleaseChangelog({ rootDir, ref: tagRef, version });
-  candidateContributionRecordPullRequests(
-    source.record ?? source.section,
-    `shipped baseline ${ref}`,
-  );
-  const pullRequests = candidateCumulativeShippedPullRequests(changelog, `shipped baseline ${ref}`);
-  return { ref, pullRequests };
-}
-
-export function validateCandidateReleaseNotes({
-  changelog,
-  repository,
-  tag,
-  contributionRecordPath,
-}: StringFields<"changelog" | "repository" | "tag"> & { contributionRecordPath?: string }) {
-  const rendered = renderGithubReleaseNotes({
-    changelog,
-    version: releaseNotesVersionForTag(tag),
-    tag,
-    repository,
-    contributionRecordPath,
-  });
-  return {
-    status: "passed",
-    mode: rendered.mode,
-    characters: rendered.size.characters,
-    bytes: rendered.size.bytes,
-  };
-}
-
-export function validateCandidateChangelogProvenance({
-  changelog,
-  version,
-  tag,
-  targetSha,
-  isAncestor = gitIsAncestor,
-  loadShippedBaseline = loadCandidateShippedBaseline,
-}: {
-  changelog: string;
-  version: string;
-  tag: string;
-  targetSha: string;
-  isAncestor?: (ancestor: string, target: string) => boolean;
-  loadShippedBaseline?: (ref: string) => { pullRequests: Set<number> };
-}) {
-  // Correction tags may carry their own changelog heading.
-  let section: string | undefined;
-  let sectionVersion = version;
-  const dedicatedVersion = dedicatedSectionVersionForTag(tag);
-  if (typeof dedicatedVersion === "string" && dedicatedVersion !== version) {
-    try {
-      section = requireString(
-        extractChangelogSection(changelog, dedicatedVersion),
-        "changelog section",
-      );
-      sectionVersion = dedicatedVersion;
-    } catch {
-      // No dedicated section; validate the base section.
-    }
-  }
-  if (section === undefined) {
-    section = requireString(extractChangelogSection(changelog, version), "changelog section");
-  }
-  if (section === undefined) {
-    throw new Error(`CHANGELOG.md ## ${sectionVersion} could not be resolved`);
-  }
-  const recordStart = section.search(/\n### Complete contribution record\r?$/m);
-  if (recordStart < 0) {
-    throw new Error(
-      `CHANGELOG.md ## ${sectionVersion} is missing ### Complete contribution record`,
-    );
-  }
-  const record = section.slice(recordStart);
-  const recordedPullRequests = candidateContributionRecordPullRequests(
-    section,
-    `CHANGELOG.md ## ${sectionVersion}`,
-  );
-  const provenance = parseContributionRecordProvenance(record);
-  const base = provenance?.base;
-  const recordedTarget = provenance?.target;
-  if (!base || !recordedTarget || !/^[0-9a-f]{40}$/u.test(recordedTarget)) {
-    throw new Error(
-      `CHANGELOG.md ## ${sectionVersion} is missing exact complete contribution record provenance`,
-    );
-  }
-  const shippedBaselines = parseShippedBaselineExclusions(record);
-  const sectionShippedBaselines = parseShippedBaselineExclusions(section);
-  if (
-    formatShippedBaselineExclusions(sectionShippedBaselines) !==
-    formatShippedBaselineExclusions(shippedBaselines)
-  ) {
-    throw new Error(
-      "shipped baseline exclusions must appear inside the complete contribution record",
-    );
-  }
-  if (!isAncestor(base, recordedTarget)) {
-    throw new Error(
-      `CHANGELOG.md contribution record base ${base} is not an ancestor of recorded target ${recordedTarget}`,
-    );
-  }
-  // The record is generated before its own changelog/finalization commit. Require
-  // reachability so the tag can contain that bounded release-only follow-up.
-  if (!isAncestor(recordedTarget, targetSha)) {
-    throw new Error(
-      `CHANGELOG.md contribution record target ${recordedTarget} is not reachable from release tag ${targetSha}`,
-    );
-  }
-  // The verifier persists associated and text-linked PR exclusions together.
-  // Revalidate that exact inventory here instead of rediscovering a narrower set from git text.
-  const excludedPullRequests = new Set<number>();
-  for (const baseline of shippedBaselines) {
-    const loaded = loadShippedBaseline(baseline.ref);
-    if (!(loaded.pullRequests instanceof Set)) {
-      throw new Error(`shipped baseline ${baseline.ref} did not provide a PR inventory`);
-    }
-    const duplicateExclusions = baseline.pullRequests.filter((number) =>
-      excludedPullRequests.has(number),
-    );
-    if (duplicateExclusions.length > 0) {
-      throw new Error(
-        `release contribution record repeats shipped PR exclusions across baselines: ${duplicateExclusions.map((number) => `#${number}`).join(", ")}`,
-      );
-    }
-    const absent = baseline.pullRequests.filter((number) => !loaded.pullRequests.has(number));
-    if (absent.length > 0) {
-      throw new Error(
-        `release contribution record lists PRs absent from shipped baseline ${baseline.ref}: ${absent.map((number) => `#${number}`).join(", ")}`,
-      );
-    }
-    const retained = [...recordedPullRequests].filter((number) => loaded.pullRequests.has(number));
-    if (retained.length > 0) {
-      throw new Error(
-        `release contribution record still contains shipped PRs from ${baseline.ref}: ${retained.map((number) => `#${number}`).join(", ")}`,
-      );
-    }
-    for (const number of baseline.pullRequests) {
-      excludedPullRequests.add(number);
-    }
-  }
-  return {
-    status: "passed",
-    base,
-    target: recordedTarget,
-    shippedBaselines,
-    reason: undefined,
-  };
 }
 
 async function runArtifacts(repo: string, runId: string) {
@@ -1303,15 +1076,8 @@ function runLocalGeneratedCheckIfNeeded(options: ReturnType<typeof parseArgs>): 
   return { status: "passed", command: "pnpm release:generated:check" };
 }
 
-/**
- * Extracts a GitHub Actions run id from gh workflow dispatch output.
- */
-export function parseRunIdFromDispatchOutput(output: string) {
-  return output.match(/actions\/runs\/([0-9]+)/u)?.[1] ?? "";
-}
-
 export function requireRunIdFromDispatchOutput(output: string, workflowFile: string) {
-  const runId = parseRunIdFromDispatchOutput(output);
+  const runId = output.match(/actions\/runs\/([0-9]+)/u)?.[1];
   if (!runId) {
     throw new Error(
       `gh workflow run ${workflowFile} did not return an Actions run URL; refusing to guess from recent workflow_dispatch runs`,
@@ -1389,12 +1155,6 @@ function dispatchFullReleaseUsingHelper(
   return String(observed!.id);
 }
 
-async function wait(ms: number) {
-  await new Promise<void>((resolve) => {
-    setTimeout(resolve, ms);
-  });
-}
-
 function dispatchWorkflow(
   repo: string,
   workflowFile: string,
@@ -1442,30 +1202,40 @@ type RunInfo = Awaited<ReturnType<typeof runInfo>>;
 
 async function pendingDeployments(repo: string, runId: string) {
   try {
-    return await githubApi(`repos/${repo}/actions/runs/${runId}/pending_deployments`);
+    // Approval capability belongs to this caller, unlike public release evidence.
+    return await githubApi(`repos/${repo}/actions/runs/${runId}/pending_deployments`, {
+      allowAnonymousFallback: false,
+    });
   } catch {
-    return [];
+    return null;
   }
 }
 
 function summarizePendingDeployments(repo: string, runId: string, deployments: unknown) {
-  if (!Array.isArray(deployments) || deployments.length === 0) {
+  if (!Array.isArray(deployments)) {
+    return `- environment approval status unavailable for the authenticated caller; this is not proof that no approval is pending. Inspect https://github.com/${repo}/actions/runs/${runId} with an eligible environment reviewer. Validation monitoring continues; repository or CI-bypass access does not establish approval or production deployment authority.`;
+  }
+  if (deployments.length === 0) {
     return "";
   }
-  return deployments
+  const summary = deployments
     .map((deploymentValue) => {
       const deployment = isRecord(deploymentValue) ? deploymentValue : {};
       const environment = isRecord(deployment.environment) ? deployment.environment : {};
+      const canApprove = deployment.current_user_can_approve;
       return [
-        `- pending approval: env=${formatJsonValue(environment.name ?? "<unknown>")} canApprove=${formatJsonValue(deployment.current_user_can_approve ?? "<unknown>")}`,
-        `  approve: gh api -X POST repos/${repo}/actions/runs/${runId}/pending_deployments -F 'environment_ids[]=${formatJsonValue(environment.id ?? "<id>")}' -f state=approved -f comment='Approve release gate'`,
+        `- pending approval: env=${formatJsonValue(environment.name ?? "<unknown>")} canApprove=${formatJsonValue(canApprove ?? "<unknown>")}`,
+        canApprove === true
+          ? `  approve: gh api -X POST repos/${repo}/actions/runs/${runId}/pending_deployments -F 'environment_ids[]=${formatJsonValue(environment.id ?? "<id>")}' -f state=approved -f comment='Approve release gate'`
+          : `  ${canApprove === false ? "The authenticated caller cannot approve this environment" : "Caller approval capability is unknown"}; ask an eligible environment reviewer to inspect https://github.com/${repo}/actions/runs/${runId}.`,
       ].join("\n");
     })
     .join("\n");
+  return `${summary}\nEnvironment approval is separate from repository write, organization membership, branch-policy read, CI bypass, and production deployment authority.`;
 }
 
 function summarizeFailedRun(info: RunInfo) {
-  const failedJobs = (info.jobs ?? []).filter(
+  const failedJobs = info.jobs.filter(
     (job) => job.conclusion && job.conclusion !== "success" && job.conclusion !== "skipped",
   );
   return [
@@ -1552,33 +1322,31 @@ function sha256(path: string) {
   return run("shasum", ["-a", "256", path], { capture: true }).trim().split(/\s+/u)[0] ?? "";
 }
 
-function pluginPlanArgs(options: ReturnType<typeof parseArgs>) {
-  const args = ["--selection-mode", options.pluginPublishScope];
-  if (options.pluginPublishScope === "selected") {
-    args.push("--plugins", options.plugins);
-  }
-  return args;
-}
-
 function collectPluginPlan(script: string, options: ReturnType<typeof parseArgs>): unknown {
   const plan: unknown = JSON.parse(
-    run("node", ["--import", "tsx", join(TOOLING_ROOT, script), ...pluginPlanArgs(options)], {
-      capture: true,
-    }),
+    run(
+      "node",
+      [
+        "--import",
+        "tsx",
+        join(TOOLING_ROOT, script),
+        "--selection-mode",
+        options.pluginPublishScope,
+      ],
+      { capture: true },
+    ),
   );
   console.log(formatPluginPlanSummary(script, plan).join("\n"));
   return plan;
 }
 
 async function collectPluginPlanWithRetry(script: string, options: ReturnType<typeof parseArgs>) {
-  let lastError: unknown;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
+  for (let attempt = 1; ; attempt += 1) {
     try {
       return collectPluginPlan(script, options);
     } catch (error) {
-      lastError = error;
       if (attempt === 3) {
-        break;
+        throw error;
       }
       console.warn(
         `${script} failed on attempt ${attempt}; retrying: ${
@@ -1588,7 +1356,6 @@ async function collectPluginPlanWithRetry(script: string, options: ReturnType<ty
       await wait(5_000 * attempt);
     }
   }
-  throw lastError;
 }
 
 function formatPluginPlanSummary(label: string, plan: unknown): string[] {
@@ -1625,16 +1392,12 @@ function publicationSelectionForChecklist(
   return normalizePublicationIntent("publish", JSON.stringify(selection)).publicationSelection!;
 }
 
-/**
- * Builds the final release publish workflow command once validation evidence is ready.
- */
-export function buildPublishCommand(
+export function buildPrepareCommand(
   options: ReturnType<typeof parseArgs> & {
     fullReleaseRunAttempt?: number;
     npmTelegramRunId?: string;
   },
   npmPreflightSource?: Awaited<ReturnType<typeof validateNpmPreflightRunSource>>,
-  mode: "publish" | "prepare" = "publish",
 ) {
   const workflowRef =
     options.publishWorkflowRef || npmPreflightSource?.workflowRef || options.workflowRef;
@@ -1662,10 +1425,6 @@ export function buildPublishCommand(
     ["release_profile", "from-validation"],
     ["wait_for_clawhub", "false"],
   ];
-  if (mode === "publish" && isStableLatestPublication(options.tag, options.npmDistTag)) {
-    // Stable policy: GitHub goes Latest right after npm verification, before Docker.
-    fields.push(["finalize_release_before_docker", "true"]);
-  }
   if (options.npmTelegramRunId) {
     fields.push(["npm_telegram_run_id", options.npmTelegramRunId]);
   }
@@ -1679,36 +1438,28 @@ export function buildPublishCommand(
     fields.push(["plugins", options.plugins]);
   }
   if (
-    mode === "prepare" &&
-    (!PUBLISH_TOOLING_TAG_PATTERN.test(workflowRef) ||
-      options.pluginPublishScope !== "all-publishable" ||
-      options.npmDistTag === "extended-stable")
+    options.pluginPublishScope !== "all-publishable" ||
+    options.npmDistTag === "extended-stable"
   ) {
     throw new Error(
       "Prepared publication requires a protected tooling tag and the complete regular-release plugin roster.",
     );
   }
-  if (mode === "prepare") {
-    const version = parseReleaseVersion(options.tag.slice(1));
-    if (!version || !["beta", "stable"].includes(classifyReleaseTrain(version))) {
-      throw new Error("Prepared publication requires a regular beta or stable release train.");
-    }
+  const version = parseReleaseVersion(options.tag.slice(1));
+  if (!version || !["beta", "stable"].includes(classifyReleaseTrain(version))) {
+    throw new Error("Prepared publication requires a regular beta or stable release train.");
   }
   return [
     "gh",
     "workflow",
     "run",
-    mode === "prepare" ? "openclaw-release-prepare.yml" : "openclaw-release-publish.yml",
+    "openclaw-release-prepare.yml",
     "--repo",
     options.repo,
     "--ref",
     workflowRef,
-    ...(mode === "prepare"
-      ? [
-          "-f",
-          `publish_inputs=${JSON.stringify(Object.fromEntries(fields.filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])))}`,
-        ]
-      : fields.flatMap(([key, value]) => ["-f", `${key}=${String(value)}`])),
+    "-f",
+    `publish_inputs=${JSON.stringify(Object.fromEntries(fields.filter(([, value]) => value !== undefined).map(([key, value]) => [key, String(value)])))}`,
   ]
     .map(shellQuote)
     .join(" ");
@@ -1733,7 +1484,7 @@ export function validatePreflightManifest(manifest: JsonRecord, params: JsonReco
   const dependencyTarballs = preflightDependencyTarballs(manifest);
   for (const dependency of [...corePackageTarballs, ...dependencyTarballs]) {
     if (
-      !dependency?.packageName ||
+      !dependency.packageName ||
       !dependency.packageVersion ||
       !dependency.tarballName ||
       !dependency.tarballSha256 ||
@@ -2055,10 +1806,10 @@ async function main() {
         `--workflow-sha ${options.workflowSha} does not match tooling checkout ${toolingSha}`,
       );
     }
-    // A resumed candidate keeps the exact tag it recorded; a newer tag at the
-    // same SHA must not fail state reconciliation. The identity check below
-    // still proves that saved tag resolves to this tooling SHA.
-    const savedTag = savedPublishWorkflowRef(statePath);
+    // A resumed candidate reuses the tag it recorded for this tooling SHA; a
+    // repaired tooling SHA gets its own tag. The identity check below proves
+    // the selected tag resolves to this tooling SHA.
+    const savedTag = savedPublishWorkflowRef(statePath, toolingSha);
     const ensured = savedTag
       ? { tag: savedTag, created: false }
       : ensureReleasePublishToolingTag({
@@ -2118,22 +1869,9 @@ async function main() {
   if (androidVersionCheck) {
     console.log(androidVersionCheck.message);
   }
-  const releaseNotesVersion = releaseNotesVersionForTag(options.tag);
-  const releaseChangelog = loadReleaseNotesForTag({
+  const { releaseNotesCheck, releaseNotesProvenance } = validateCandidateChangelog({
     rootDir: targetRoot,
-    ref: targetSha,
-    tag: options.tag,
-    version: releaseNotesVersion,
-  });
-  const releaseNotesCheck = validateCandidateReleaseNotes({
-    changelog: releaseChangelog.section,
     repository: options.repo,
-    tag: options.tag,
-    contributionRecordPath: releaseChangelog.recordPath ?? undefined,
-  });
-  const releaseNotesProvenance = validateCandidateChangelogProvenance({
-    changelog: releaseChangelog.record ?? releaseChangelog.section,
-    version: releaseNotesVersion,
     tag: options.tag,
     targetSha,
   });
@@ -2310,6 +2048,23 @@ async function main() {
     });
   } catch (error) {
     if (error instanceof PluginSdkApiAcknowledgementError) {
+      const reportPath = join(pluginSdkApiDir, "plugin-sdk-api-release-diff.md");
+      let report = "";
+      if (existsSync(reportPath)) {
+        const bytes = readFileSync(reportPath);
+        if (bytes.length > 2 * 1024 * 1024) {
+          throw new Error("Plugin SDK API diff report exceeds its byte limit", { cause: error });
+        }
+        report = new TextDecoder("utf-8", { fatal: true }).decode(bytes).trim();
+        if (
+          !report.startsWith("# Plugin SDK API diff\n") ||
+          !report.includes(`Acknowledgement digest: \`${error.digest}\``)
+        ) {
+          throw new Error("Plugin SDK API diff report does not match its acknowledgement", {
+            cause: error,
+          });
+        }
+      }
       const argv = stripLeadingPackageManagerSeparator(process.argv.slice(2));
       const end = argv.indexOf("--");
       const flag = "--plugin-sdk-api-acknowledgement";
@@ -2324,7 +2079,11 @@ async function main() {
         argv.unshift(flag, error.digest);
       }
       throw new Error(
-        `${error.message}\nReview the Plugin SDK API diff before rerunning.\n${["pnpm", "release:candidate", "--", ...argv].map(shellQuote).join(" ")}`,
+        [
+          error.message,
+          report || "Review the Plugin SDK API diff artifact before rerunning.",
+          ["pnpm", "release:candidate", "--", ...argv].map(shellQuote).join(" "),
+        ].join("\n\n"),
         { cause: error },
       );
     }
@@ -2453,7 +2212,7 @@ async function main() {
     options.publicationRoute === "normal" ? publishPreflight.command : undefined;
   const prepareCommand =
     options.publicationRoute === "prepared"
-      ? buildPublishCommand(publicationOptions, npmPreflightSource, "prepare")
+      ? buildPrepareCommand(publicationOptions, npmPreflightSource)
       : undefined;
   if (prepareCommand) {
     publishPreflight.command = prepareCommand;
@@ -2530,9 +2289,7 @@ async function main() {
       }`,
       `- full release artifact: ${fullArtifactName}`,
       `- GitHub release notes: ${releaseNotesCheck.status} (${releaseNotesCheck.mode}, ${releaseNotesCheck.characters} characters, ${releaseNotesCheck.bytes} bytes)`,
-      releaseNotesProvenance.status === "passed"
-        ? `- changelog provenance: passed (${releaseNotesProvenance.base}..${releaseNotesProvenance.target})`
-        : `- changelog provenance: skipped (${releaseNotesProvenance.reason})`,
+      `- changelog provenance: passed (${releaseNotesProvenance.base}..${releaseNotesProvenance.target})`,
       `- ${
         formatShippedBaselineExclusions(releaseNotesProvenance.shippedBaselines) ||
         "Shipped baseline exclusions: none"

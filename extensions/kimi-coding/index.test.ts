@@ -33,9 +33,12 @@ describe("kimi provider plugin", () => {
     );
   });
 
-  it("uses binary thinking with thinking off by default", async () => {
+  it("uses binary thinking with thinking off by default and repairs replay signatures", async () => {
     const provider = await registerSingleProviderPlugin(plugin);
 
+    expect(provider.buildReplayPolicy?.({ provider: "kimi" })).toEqual({
+      preserveSignatures: false,
+    });
     expect(
       provider.resolveThinkingProfile?.({
         provider: "kimi",
@@ -105,6 +108,23 @@ describe("kimi provider plugin", () => {
       }),
     ).toBeUndefined();
   });
+
+  it.each(["k3.1-pro", "k3.1-pro-highspeed"])(
+    "exposes K3 thinking levels without off for %s",
+    async (modelId) => {
+      const provider = await registerSingleProviderPlugin(plugin);
+
+      expect(
+        provider.resolveThinkingProfile?.({ provider: "kimi", modelId, reasoning: true } as never),
+      ).toEqual({
+        levels: ["minimal", "low", "medium", "high", "adaptive", "xhigh", "max"].map((id) => ({
+          id,
+        })),
+        defaultLevel: "high",
+        preserveWhenCatalogReasoningFalse: true,
+      });
+    },
+  );
 
   it("exposes adaptive thinking levels for case-insensitive K3 ids", async () => {
     const provider = await registerSingleProviderPlugin(plugin);

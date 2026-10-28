@@ -21,7 +21,8 @@ The official Android app is available on [Google Play](https://play.google.com/s
   - Protocols: [Gateway protocol](/gateway/protocol) (nodes + control plane).
 - Select an agent in the sidebar to view its credential status in **Settings → Providers & Models**. The page updates when the Gateway publishes model, credential, or config changes. Use **Refresh** to recheck model availability.
 - The sidebar marks sessions waiting for an answer or approval, including inactive sessions and collapsed groups. Tap the attention icon, hover over it, or focus it with a keyboard to read the oldest pending request and the count of additional requests of the same kind. The indicator clears when requests resolve, are canceled, or expire. Question previews never include answer drafts.
-- The sidebar and recent Threads view keep cron sessions and system-created probes out of ordinary chat lists, without changing saved pins. The selected conversation stays reachable; named work and human-created background conversations remain visible. Open **Threads → Automations** to find and reopen automation and system conversations, including previously pinned chats. This is a view filter, not a saved setting. **Sidebar → Pages pencil → Automations** shows scheduled jobs and their recent run summaries. Other sessions without creation metadata remain visible rather than being classified from their titles.
+- The sidebar and recent Threads view keep cron sessions and system-created checks out of ordinary chat lists, without changing saved pins. The selected conversation stays reachable; named work and human-created background conversations remain visible. Open **Threads → Automations** to find and reopen automation and system conversations, including previously pinned chats. This is a view filter, not a saved setting. **Sidebar → Pages pencil → Automations** shows scheduled jobs and their recent run summaries. Other sessions without creation metadata remain visible rather than being classified from their titles.
+- Long-press an eligible thread and choose **Snooze**: **In 1 hour**, **In 3 hours**, **This evening** (18:00 local, when more than one hour away), **Tomorrow** (09:00 local), or **Next week** (next Monday at 09:00 local, omitted on Sundays). Snoozed sessions hide from Recent, Current, and sidebar recents. The **Snoozed** pill shows their wake times; **Wake session** brings one back early. Time expiry, a real inbound message, or a completed run wakes the session; pinning or archiving clears snooze too. Snooze syncs through the Gateway and never stops runs, messages, or automations. Archived, child, and protected sessions cannot be snoozed.
 - **Settings → OpenClaw** opens a dedicated Gateway settings assistant when the operator connection has `operator.admin` and the Gateway supports `openclaw.chat`. Its setup conversation stays separate from ordinary Chat, redacts secret replies locally, and moves to Chat only after you tap **Open Chat**.
 
 Its reply field switches to masked input for secret prompts. Tap it again if a prompt change closes the keyboard. Android sends sensitive replies without trimming them and clears unsent drafts when you leave this page or background the app.
@@ -494,6 +495,17 @@ Open **Home** from the sidebar's **Pages** menu to chat, or select an existing s
 - Push updates (best-effort): `chat.subscribe` -> `event:"chat"`
 - Listen: long-press an assistant message and choose **Listen** to hear it; audio renders via Gateway `tts.speak` with the configured TTS provider chain, and on-device system TTS is used when the Gateway cannot render audio. Playback stops on session switch, new chat, app backgrounding, or chat close.
 
+#### Reactions
+
+Saved prompts and assistant replies show emoji reaction chips with counts and
+reactor names, highlighting your own reactions. Tap a chip to toggle your
+reaction, or long-press a message (including a media-only message) and choose
+**Add reaction**. The quick palette matches the Control UI; **More…** accepts
+one emoji, including joined emoji and flags. Controls follow the Gateway's
+operator and session-sharing permissions; read-only viewers can still see
+reactions. Updates appear live while the conversation is open and do not create
+notifications. See [Reactions](/concepts/multi-user#reactions).
+
 #### Agent browser in chat
 
 When the Browser plugin returns an identifiable tab, Chat shows a preview of
@@ -547,8 +559,11 @@ Camera commands (foreground only; permission-gated): `camera.snap` (jpg), `camer
   Dictation, voice-note recording, and Talk are mutually exclusive microphone paths.
 - Your selected agent stays bound to Talk and the main chat when the same Gateway
   reconnects, including while its agent list refreshes. Removing that agent falls
-  back to the Gateway default. Switching Gateways or restarting the app clears
-  this in-memory choice.
+  back to the Gateway default if your role allows it, or the first available agent.
+  Switching Gateways or restarting the app clears this in-memory choice and waits
+  for the allowed agent list before starting Chat. An empty list shows **No agents
+  available for this role**. If discovery fails, retry the Gateway connection to
+  initialize Chat.
 - Talk Mode promotes the existing foreground service from `connectedDevice` to `connectedDevice|microphone` before capture starts, then demotes it when Talk Mode stops. The node service declares `FOREGROUND_SERVICE_CONNECTED_DEVICE` with `CHANGE_NETWORK_STATE`; Android 14+ also requires the `FOREGROUND_SERVICE_MICROPHONE` declaration, the `RECORD_AUDIO` runtime grant, and the microphone service type at runtime.
 - By default, Android Talk uses native speech recognition, Gateway chat, and `talk.speak` through the configured Gateway Talk provider. It inherits the session's thinking setting. Local system TTS is used only when `talk.speak` is unavailable.
 - Gateway config changes refresh Android's cached Talk settings on the next use, without reconnecting or interrupting an active capture.

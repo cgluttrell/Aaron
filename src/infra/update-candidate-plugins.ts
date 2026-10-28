@@ -11,6 +11,7 @@ import {
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginInstallRecord } from "../config/types.plugins.js";
 import {
+  areBundledPluginsDisabled,
   isPluginInPackageBundledRoots,
   resolveBundledDirFromPackageRoot,
   resolveBundledPluginsDir,
@@ -37,7 +38,8 @@ import {
 } from "./kysely-sync.js";
 import { openNodeSqliteDatabase } from "./node-sqlite.js";
 import { resolveOpenClawPackageRootSync } from "./openclaw-root.js";
-import { hasNodeErrorCode, isPathInside } from "./path-guards.js";
+import { isPathInside } from "./path-guards.js";
+import { ignoreMissingUpdateCandidateFile } from "./update-candidate-files.js";
 import { resolveUpdateCandidatePluginPath } from "./update-candidate-paths.js";
 import type { UpdateCandidatePluginCodeLink } from "./update-candidate-plugin-code-links.js";
 import {
@@ -45,25 +47,44 @@ import {
   resolveUpdateCandidatePluginSourceEntries,
 } from "./update-candidate-plugin-sources.js";
 import { verifyUpdateCandidatePluginTree } from "./update-candidate-plugin-tree-links.js";
+import { UpdateCandidatePluginTreePlanSchema } from "./update-candidate-plugin-tree-schema.js";
 import {
   assertUpdateCandidatePluginCopySource,
   copyUpdateCandidatePluginTrees,
   prepareUpdateCandidatePluginTrees,
-  UpdateCandidatePluginTreePlanSchema,
 } from "./update-candidate-plugin-tree.js";
 import { relocateRuntimePath } from "./update-runtime-relocation.js";
+
+/** Discovery captured in the serving updater, before entering the candidate worker. */
+export type UpdateCandidateBundledSource = {
+  packageRoot: string;
+  directory?: string;
+};
 
 function bundledPluginRedirects(
   candidateRoot: string,
   env?: NodeJS.ProcessEnv,
+  sourceBundle?: UpdateCandidateBundledSource,
 ): Map<string, string> {
   const redirects = new Map<string, string>();
-  const sourceDir = resolveBundledPluginsDir(env);
+  if (areBundledPluginsDisabled(env)) {
+    return redirects;
+  }
+  // A candidate worker's argv/module discovery names the candidate itself.
+  // Retain the serving updater's actual selection, including overrides or no bundle.
+  const sourceDir = sourceBundle ? sourceBundle.directory : resolveBundledPluginsDir(env);
   const sourcePackageRoot = sourceDir && resolveOpenClawPackageRootSync({ cwd: sourceDir });
   const candidateDir = resolveBundledDirFromPackageRoot(candidateRoot);
   if (
     !sourceDir ||
     !sourcePackageRoot ||
+    (sourceBundle &&
+      (pluginCacheRealpathSync(sourcePackageRoot, true) !==
+        pluginCacheRealpathSync(sourceBundle.packageRoot, true) ||
+        !isPluginInPackageBundledRoots({
+          rootDir: sourceDir,
+          packageRoot: sourceBundle.packageRoot,
+        }))) ||
     !candidateDir ||
     !isPluginInPackageBundledRoots({ rootDir: candidateDir, packageRoot: candidateRoot })
   ) {
@@ -154,12 +175,7 @@ async function resolvePluginFilePackageRoot(file: string): Promise<string> {
   for (let current = directory; ; current = path.dirname(current)) {
     const manifestExists = await fs.access(path.join(current, "package.json")).then(
       () => true,
-      (error: unknown) => {
-        if (hasNodeErrorCode(error, "ENOENT")) {
-          return false;
-        }
-        throw error;
-      },
+      (error: unknown) => ignoreMissingUpdateCandidateFile(error) ?? false,
     );
     if (manifestExists) {
       return current;
@@ -175,6 +191,7 @@ type UpdateCandidatePluginProjectionParams = {
   stateDir: string;
   targetStateDir: string;
   candidateRoot: string;
+  sourceBundledPlugins?: UpdateCandidateBundledSource;
   env?: NodeJS.ProcessEnv;
 };
 
@@ -210,6 +227,10 @@ function installRecordsHash(records: Record<string, PluginInstallRecord>): strin
   return sha256Hex(serializePluginInstallRecordMap(records));
 }
 
+async function statPluginLocator(source: string) {
+  return fs.stat(source, { bigint: true }).catch(ignoreMissingUpdateCandidateFile);
+}
+
 async function readCopiedPluginIndex(shared: string): Promise<
   | {
       value: Record<string, unknown>;
@@ -217,12 +238,7 @@ async function readCopiedPluginIndex(shared: string): Promise<
     }
   | undefined
 > {
-  const stat = await fs.stat(shared).catch((error: unknown) => {
-    if (hasNodeErrorCode(error, "ENOENT")) {
-      return undefined;
-    }
-    throw error;
-  });
+  const stat = await fs.stat(shared).catch(ignoreMissingUpdateCandidateFile);
   if (!stat) {
     return undefined;
   }
@@ -269,12 +285,9 @@ export async function prepareUpdateCandidatePlugins(
   const copied = await readCopiedPluginIndex(shared);
   const records = copied?.records ?? params.config.plugins?.installs ?? {};
   const resolve = (locator: string) => resolveUserPath(locator, params.env);
-  const canonicalStateRoot = await fs.realpath(sourceRoot).catch((error: unknown) => {
-    if (hasNodeErrorCode(error, "ENOENT")) {
-      return sourceRoot;
-    }
-    throw error;
-  });
+  const canonicalStateRoot = await fs
+    .realpath(sourceRoot)
+    .catch((error: unknown) => ignoreMissingUpdateCandidateFile(error) ?? sourceRoot);
   const project = (source: string) =>
     resolveUpdateCandidatePluginPath(canonicalStateRoot, targetStateDir, source);
   const bindings: UpdateCandidatePluginPlan["bindings"] = [];
@@ -304,16 +317,11 @@ export async function prepareUpdateCandidatePlugins(
   }
   const bundledRedirects =
     sources.size > 0
-      ? bundledPluginRedirects(params.candidateRoot, params.env)
+      ? bundledPluginRedirects(params.candidateRoot, params.env, params.sourceBundledPlugins)
       : new Map<string, string>();
   const pluginPaths: Record<string, string> = {};
   for (const source of sources) {
-    const stat = await fs.stat(source, { bigint: true }).catch((error: unknown) => {
-      if (hasNodeErrorCode(error, "ENOENT")) {
-        return undefined;
-      }
-      throw error;
-    });
+    const stat = await statPluginLocator(source);
     if (!stat) {
       // Keep a missing locator private and missing; candidate validation owns the failure.
       pluginPaths[source] = project(source);
@@ -431,6 +439,7 @@ export async function copyUpdateCandidatePlugins(
   plan: UpdateCandidatePluginPlan,
   params: UpdateCandidatePluginProjectionParams & {
     onCodeLink?: (fact: UpdateCandidatePluginCodeLink) => void;
+    onProgress?: () => void;
   },
 ): Promise<Record<string, string>> {
   const targetStateDir = resolvePathViaExistingAncestorSync(path.resolve(params.targetStateDir));
@@ -450,12 +459,7 @@ export async function copyUpdateCandidatePlugins(
   }
   const assertBindings = async () => {
     for (const binding of plan.bindings) {
-      const stat = await fs.stat(binding.source, { bigint: true }).catch((error: unknown) => {
-        if (hasNodeErrorCode(error, "ENOENT")) {
-          return undefined;
-        }
-        throw error;
-      });
+      const stat = await statPluginLocator(binding.source);
       const real = stat ? await fs.realpath(binding.source) : null;
       if (
         real !== binding.real ||
@@ -478,12 +482,7 @@ export async function copyUpdateCandidatePlugins(
     const target = rebase(entry.target);
     // Preserve the entry basename/ID while imports use the canonical copied owner.
     const [existing, targetIdentity] = await Promise.all([
-      fs.stat(alias, { bigint: true }).catch((error: unknown) => {
-        if (hasNodeErrorCode(error, "ENOENT")) {
-          return undefined;
-        }
-        throw error;
-      }),
+      statPluginLocator(alias),
       fs.stat(target, { bigint: true }),
     ]);
     // A case-equivalent name can already be this file; unlinking it destroys the target.
@@ -502,6 +501,7 @@ export async function copyUpdateCandidatePlugins(
         candidateRoot: plan.trees.candidateRoot,
         hostLinks: new Set(),
         onCodeLink: params.onCodeLink,
+        onProgress: params.onProgress,
       });
     }
   }

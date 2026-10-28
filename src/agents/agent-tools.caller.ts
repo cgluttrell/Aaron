@@ -1,3 +1,4 @@
+import type { SessionEventSourcePolicy } from "../auto-reply/reply/session-event-contract.js";
 import { resolveGatewayMessageChannel } from "../utils/message-channel.js";
 import type { OpenClawCodingToolsOptions } from "./agent-tools.options.js";
 import type { ResolvedConversationCapabilityProfile } from "./conversation-capability-profile.js";
@@ -11,18 +12,30 @@ export function createCodingToolsGatewayCaller(params: {
   sessionKey?: string;
   accountId?: string;
   capabilityProfile: ResolvedConversationCapabilityProfile;
+  sessionEventSourcePolicy?: SessionEventSourcePolicy;
 }) {
   const { options, agentId, sessionKey, capabilityProfile } = params;
+  const settleBatch =
+    capabilityProfile.policy.requesterPolicySource === "completion-handoff"
+      ? options?.trustedInternalHandoff?.settleBatch
+      : undefined;
   const identity =
     options && agentId && sessionKey?.trim()
       ? {
           agentId,
           sessionKey: sessionKey.trim(),
+          sessionEventToolsAllow: params.sessionEventSourcePolicy?.toolsAllow,
+          sessionEventSettings: params.sessionEventSourcePolicy?.settings ?? {
+            permissionMode: options.sessionPermissionPolicy?.mode,
+          },
+          ...(options.sourceReplyDeliveryMode === "message_tool_only"
+            ? { sessionEventDelivery: false as const }
+            : {}),
           // The existing source fence rechecks this after tool preparation and at final I/O.
-          receiptAuthority:
-            capabilityProfile.policy.requesterPolicySource === "completion-handoff"
-              ? options.trustedInternalHandoff?.settleBatch?.isCurrent
-              : undefined,
+          receiptAuthority: settleBatch?.isCurrent,
+          receiptAdmissions: settleBatch?.receiptAdmission
+            ? [settleBatch.receiptAdmission]
+            : undefined,
           assertToolAllowed: (toolName: string) => {
             if (!isConversationToolAllowed(capabilityProfile, toolName)) {
               throw new Error(`${toolName} is not allowed by this conversation's tool policy`);

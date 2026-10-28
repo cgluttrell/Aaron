@@ -37,6 +37,10 @@ By default, the command creates a temporary state directory and removes it after
 
 Config is layered in three parts, entirely in memory: exec composes the run config and publishes it as this process's runtime config rather than writing a copy to disk. Exec defaults apply only where your config leaves a setting unset: workspace bootstrap files are skipped, the agent sandbox is off, the `coding` tool profile is selected, filesystem tools are restricted to `--cwd`, and exec runs under the full execution policy a headless turn needs. Anything your config sets wins over those defaults, so a configured sandbox, shell env, or tool profile is never downgraded, and exec host routing stays with the sandbox when your config enables one. The invocation itself always wins last: the run is scoped to `--cwd` and never bootstraps.
 
+With the Codex runtime, `agent exec` uses OpenClaw's shell and filesystem tools
+instead of Codex-native execution, keeping tool cleanup under the one-shot run's
+owner. Ordinary Gateway-backed Codex turns keep their native tool surface.
+
 When your tool policy enables `browser`, local browser control works without a Gateway. Explicit Gateway or node routing and sandbox restrictions still apply; see [Node browser proxy](/tools/browser/remote#node-browser-proxy-zero-config-default).
 
 Use `--state-dir <dir>` to retain sessions and other run state. The directory must already exist and is never created or deleted by the command. A retained state directory requires exclusive ownership: exec refuses to start while a Gateway or another embedded writer owns it, then holds the state lock for the complete run. Omit `--state-dir` for isolated temporary state, or stop the Gateway first with `openclaw gateway stop`.
@@ -74,7 +78,7 @@ openclaw agent exec "Inspect this repository" \
 
 The timeout defaults to 600 seconds for `agent exec`; this does not change the existing embedded `agent --local` default. A successful run exits `0`, any model or result error exits `1`, and a timeout exits `2`. Failure includes `meta.error`, aborted runs, exhausted model fallbacks, an error stop reason, and any error payload.
 
-If cleanup fails after a run error or timeout, the original result and exit code are preserved and the cleanup failure is reported on stderr. A cleanup failure after a successful run exits `1`.
+If cleanup fails after a run error or timeout, the original result and exit code are preserved and the cleanup failure is reported on stderr. A cleanup failure after a successful run exits `1`, but preserves the completed final text, payloads, and run metadata. The JSON envelope reports `error.kind: "cleanup"` so callers can distinguish completed work with failed cleanup from a failed task.
 
 Uncertain runtime cleanup preserves temporary state for inspection and keeps any
 acquired state lock until this process exits. Inspect the reported cleanup failure
@@ -205,7 +209,7 @@ prompt/fixture fingerprints, and settings. Per-cell accounting includes parent
 and descendant input, cache reads/writes, and output, reconciled with runtime
 totals. Missing usage or prices remain unavailable, never zero. Failed attempts
 remain in operational totals. Successful-pair deltas require both arms to pass
-and complete measurements; observed error counts include intentional probes and
+and complete measurements; observed error counts include intentional checks and
 are not repair-turn counts. Task latency excludes startup and interviews.
 
 Automated completion means artifact/effect checks passed. Final-response
@@ -280,7 +284,7 @@ alongside the complete ledger. The process helper's exact written source bytes
 are part of its workload fingerprint. The JavaScript contract task verifies
 declaration discovery, runtime input validation, and the dependent file operation
 sequence, including completion through `wait`. Preview-completeness checks use the observed metadata
-for probed references; missing or conflicting metadata remains unknown.
+for checked references; missing or conflicting metadata remains unknown.
 Keep transcripts local unless their
 publication is explicitly requested. Interview claims about sample coverage,
 freshness, lifetime, limits, and retry safety must be reviewed against these
@@ -371,6 +375,7 @@ openclaw agent --agent ops --message "Run locally" --local
 - With `--agent`, `--channel` and `--to` together, session routing follows the channel's canonical recipient and `session.dmScope`. Channels with a stable outbound-only recipient identity use a provider-owned session isolated from the agent's main session. `--reply-channel` and `--reply-account` affect delivery only.
 - `--session-key` selects an explicit session key. Agent-prefixed keys must use `agent:<agent-id>:<session-key>`, and `--agent` must match the key's agent id when both are given. Bare non-sentinel keys scope to `--agent` when supplied, or to the configured default agent otherwise; for example `--agent ops --session-key incident-42` routes to `agent:ops:incident-42`. The literal keys `global` and `unknown` stay unscoped only when no `--agent` is supplied.
 - `--json` reserves stdout for the JSON response; Gateway, plugin, and `--local` diagnostics go to stderr so scripts can parse stdout directly.
+- If a queued input reaches `--timeout` before its turn starts, the Gateway withdraws it. A confirmed withdrawal returns `reason: "input_withdrawn_before_turn"` and `pendingInputId` with a nonzero exit status. The input was not delivered; raise `--timeout` and retry. This differs from a transport timeout, whose outcome remains unknown.
 - After transient handshake retries are exhausted, a Gateway timeout or closed connection fails the command; the CLI never silently reruns the turn embedded. Transport loss is ambiguous — the Gateway may have accepted and may still finish the turn — so the stderr hint says to check `openclaw gateway status` and the session transcript before retrying or rerunning with `--local`, to avoid executing the turn twice. When the Gateway accepted the run before the transport error, the hint names the accepted run ID, and `--json` failures keep the canonical `ok: false` envelope with `runId` and `origin: "gateway"` fields alongside `error.type`/`error.message`.
 - `SIGTERM`/`SIGINT` interrupt a waiting Gateway-backed request; if the Gateway already accepted the run, the CLI also sends `chat.abort` for that run id before exiting. `--local` runs receive the same signal but do not send `chat.abort`. On Unix, startup wrappers preserve the runtime child's actual termination signal, including `SIGKILL` after shutdown escalation; shells report `SIGINT` and `SIGTERM` as statuses 130 and 143. Explicit numeric returns stay numeric, including a handled shutdown returning `0`. Windows retains its numeric termination behavior. If the internal run-dedup key already has an active run for this session, the response reports `status: "in_flight"` and the non-JSON CLI prints a stderr diagnostic instead of an empty reply. For external cron/systemd wrappers, keep a hard-kill backstop such as `timeout -k 60 600 openclaw agent ...` so the supervisor can reap the process if shutdown cannot drain.
 - When this command triggers `models.json` regeneration, SecretRef-managed provider credentials are persisted as non-secret markers (for example env var names, `secretref-env:ENV_VAR_NAME`, or `secretref-managed`), never resolved secret plaintext. Marker writes come from the active source config snapshot, not from resolved runtime secret values.

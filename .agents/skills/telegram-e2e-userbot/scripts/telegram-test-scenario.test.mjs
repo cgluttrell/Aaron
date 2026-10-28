@@ -11,7 +11,6 @@ function fixture() {
   let released = 0;
   let healthy = true;
   let revoke;
-  let proxyClosed = false;
   const credential = {
     driverEnv: {},
     groupId: "-1001",
@@ -61,12 +60,6 @@ function fixture() {
               },
       ),
     }),
-    startProxy: async () => ({
-      apiRoot: "http://127.0.0.1:1",
-      close: async () => {
-        proxyClosed = true;
-      },
-    }),
     fetchImpl: async (url) =>
       new URL(url).pathname.endsWith("/getChat")
         ? Response.json(
@@ -84,7 +77,6 @@ function fixture() {
     credential,
     options,
     releaseCount: () => released,
-    proxyClosed: () => proxyClosed,
     revoke() {
       healthy = false;
       revoke(new Error("lease revoked"));
@@ -96,6 +88,7 @@ function fixture() {
         dm: args?.dm,
         chat: args?.chat,
         requireForum: args?.scenario?.actions.some((action) => action.forumTopicId !== undefined),
+        createForum: args?.createForum,
         ...options,
       }),
   };
@@ -235,7 +228,6 @@ test("scenario provisions a fresh group when the stored group is unusable and re
     driveScenario: async (_args, _root, credential) => {
       assert.equal(credential, f.credential);
       credential.assertLeaseHealthy();
-      assert.equal(f.proxyClosed(), true);
       assert.equal(credential.groupId, "-2042");
       assert.equal(credential.driverEnv.TELEGRAM_USER_DRIVER_CHAT_ID, "-2042");
       assert.equal(groupExists, true);
@@ -246,6 +238,112 @@ test("scenario provisions a fresh group when the stored group is unusable and re
   assert.equal(acquisitions, 1);
   assert.equal(f.releaseCount(), 1);
   assert.equal(f.credential.testGroup.cleanup.status, "deleted");
+});
+
+test("a run-owned forum receives the scenario's topic sends and is deleted before release", async (context) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "telegram-owned-forum-"));
+  context.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const f = fixture();
+  const events = [];
+  let forumExists = false;
+  const forum = { ok: true, groupId: "-1002042", forumTopicId: 777 };
+  const command = f.options.runCommandImpl;
+  f.options.runCommandImpl = async (name, args) => {
+    const reply = (value) => ({ status: 0, timedOut: false, stdout: JSON.stringify(value) });
+    if (args.includes("prepare-forum")) {
+      forumExists = true;
+      events.push("forum-created");
+      return reply({ ...forum, status: "ready" });
+    }
+    if (args.includes("cleanup-forum")) {
+      forumExists = false;
+      events.push("forum-deleted");
+      return reply({ ...forum, status: "deleted" });
+    }
+    if (args.includes("resolve-chat")) {
+      assert.equal(args[args.indexOf("--chat") + 1], forum.groupId);
+      return reply({
+        ok: true,
+        chatId: forum.groupId,
+        type: { "@type": "chatTypeSupergroup" },
+        isForum: true,
+      });
+    }
+    assert.equal(args.includes("--require-chat"), false, "the leased default group is not used");
+    assert.equal(args.includes("prepare-group"), false);
+    return await command(name, args);
+  };
+  f.options.fetchImpl = async (url) =>
+    Response.json({
+      ok: true,
+      result: {
+        getMe: { id: 42, username: "sut_bot", can_read_all_group_messages: true },
+        getChat: { id: -1002042, type: "supergroup", is_forum: forumExists },
+        getChatMember: { status: "member" },
+      }[new URL(url).pathname.split("/").at(-1)],
+    });
+  const release = f.credential.release;
+  f.credential.release = async () => {
+    assert.equal(forumExists, false, "forum must be deleted before releasing its credential");
+    events.push("released");
+    await release();
+  };
+  const output = path.join(root, "summary.json");
+  await runTelegramTestScenario({
+    args: {
+      createForum: true,
+      output,
+      scenario: { actions: [{ type: "send", atMs: 0, text: "@{sut} topic turn" }] },
+    },
+    acquireCredential: async () => f.credential,
+    checkCredential: f.check,
+    driveScenario: async (args, _root, credential) => {
+      assert.equal(credential.groupId, forum.groupId);
+      assert.equal(credential.chatTarget.recorderSelector, forum.groupId);
+      assert.equal(args.scenario.actions[0].forumTopicId, forum.forumTopicId);
+      fs.writeFileSync(output, JSON.stringify({ recordingComplete: true }));
+      events.push("delivered");
+    },
+  });
+  assert.deepEqual(events, ["forum-created", "delivered", "forum-deleted", "released"]);
+  const summary = JSON.parse(fs.readFileSync(output, "utf8"));
+  assert.equal(summary.recordingComplete, true);
+  assert.equal(summary.testForum.setup.groupId, forum.groupId);
+  assert.equal(summary.testForum.setup.forumTopicId, forum.forumTopicId);
+  assert.equal(summary.testForum.cleanup.status, "deleted");
+});
+
+test("a failed run still deletes its run-owned forum before release", async () => {
+  const f = fixture();
+  const events = [];
+  const command = f.options.runCommandImpl;
+  f.options.runCommandImpl = async (name, args) => {
+    if (args.includes("prepare-forum")) {
+      events.push("forum-created");
+      return { status: 1, timedOut: false, stderr: "topic creation failed" };
+    }
+    if (args.includes("cleanup-forum")) {
+      events.push("forum-deleted");
+      return {
+        status: 0,
+        timedOut: false,
+        stdout: JSON.stringify({ ok: true, status: "deleted" }),
+      };
+    }
+    return await command(name, args);
+  };
+  await assert.rejects(
+    runTelegramTestScenario({
+      args: { createForum: true, scenario: { actions: [] } },
+      acquireCredential: async () => f.credential,
+      checkCredential: f.check,
+      driveScenario: async () => assert.fail("failed forum setup cannot start the scenario"),
+    }),
+    /prepare-forum failed: topic creation failed/,
+  );
+  assert.deepEqual(events, ["forum-created", "forum-deleted"]);
+  assert.equal(f.releaseCount(), 1);
+  assert.equal(f.credential.testForum.cleanup.status, "deleted");
 });
 
 test("DM reaches its SUT with an unusable group and group privacy enabled", async () => {
@@ -557,7 +655,6 @@ test("strict membership prevents product delivery and cleans up the created grou
     /not an active member/u,
   );
   assert.equal(delivered, false);
-  assert.equal(f.proxyClosed(), true);
   assert.equal(f.releaseCount(), 1);
   assert.equal(f.credential.testGroup.cleanup.status, "deleted");
 });
@@ -639,11 +736,10 @@ test("cancellation interrupts pending readiness HTTP and closes before release",
   controller.abort(new Error("cancelled HTTP"));
   await assert.rejects(run, /cancelled HTTP/u);
   assert.equal(delivered, false);
-  assert.equal(f.proxyClosed(), true);
   assert.equal(f.releaseCount(), 1);
 });
 
-test("SIGTERM during CLI readiness closes its proxy before the sole lease release", async (context) => {
+test("SIGTERM during CLI readiness settles its check before the sole lease release", async (context) => {
   const { spawn } = await import("node:child_process");
   const { once } = await import("node:events");
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "telegram-signal-owner-"));
@@ -667,7 +763,7 @@ test("SIGTERM during CLI readiness closes its proxy before the sole lease releas
       } finally {
         await new Promise(resolve=>setImmediate(resolve));
         clearInterval(keepAlive);
-        fs.appendFileSync(${JSON.stringify(trace)}, 'proxy closed\\n');
+        fs.appendFileSync(${JSON.stringify(trace)}, 'readiness settled\\n');
       }
     }`;
   fs.writeFileSync(
@@ -707,7 +803,7 @@ test("SIGTERM during CLI readiness closes its proxy before the sole lease releas
   const [code, signal] = await completion;
   assert.equal(code, 143);
   assert.equal(signal, null);
-  assert.equal(fs.readFileSync(trace, "utf8"), "proxy closed\nrelease\n");
+  assert.equal(fs.readFileSync(trace, "utf8"), "readiness settled\nrelease\n");
 });
 
 test("scenario cancellation aborts a pending request in the real drive path", async (context) => {
@@ -758,49 +854,42 @@ test("scenario cancellation aborts a pending request in the real drive path", as
 });
 
 for (const event of ["caller cancellation", "lease loss"]) {
-  test(`${event} during readiness proxy cleanup rejects the completed doctor result`, async () => {
+  test(`${event} during readiness response consumption stops and releases`, async () => {
     const { runTelegramTestDoctor } = await import("./telegram-test-doctor.mjs");
     const f = fixture();
     const closing = Promise.withResolvers();
     const finish = Promise.withResolvers();
     const controller = new AbortController();
-    const start = f.options.startProxy;
-    f.options.startProxy = async () => {
-      const proxy = await start();
+    f.options.fetchImpl = async (url) => {
+      assert.equal(url, "https://api.telegram.org/botsynthetic-token/test/getMe");
       return {
-        ...proxy,
-        close: async () => {
+        ok: true,
+        json: async () => {
           closing.resolve();
           await finish.promise;
-          await proxy.close();
+          return { ok: true, result: { id: 42, username: "sut_bot" } };
         },
       };
     };
     const run = runTelegramTestDoctor({
       acquireCredential: async () => f.credential,
-      dm: false,
+      dm: true,
       signal: controller.signal,
       ...f.options,
     });
     await closing.promise;
     if (event === "caller cancellation") {
-      controller.abort(new Error("cancelled during proxy close"));
+      controller.abort(new Error("cancelled during response"));
     } else {
       f.revoke();
     }
     finish.resolve();
     await assert.rejects(
       run,
-      event === "lease loss"
-        ? (error) => error instanceof AggregateError && error.errors[0].message === "lease revoked"
-        : /cancelled during proxy close/u,
+      event === "lease loss" ? /lease revoked/u : /cancelled during response/u,
     );
-    assert.equal(f.proxyClosed(), true);
-    assert.equal(f.releaseCount(), event === "lease loss" ? 0 : 1);
-    assert.equal(
-      f.credential.testGroup.cleanup.status,
-      event === "lease loss" ? "failed" : "deleted",
-    );
+    assert.equal(f.releaseCount(), 1);
+    assert.equal(f.credential.testGroup, undefined);
   });
 
   test(`${event} during final release cannot become a successful scenario`, async () => {

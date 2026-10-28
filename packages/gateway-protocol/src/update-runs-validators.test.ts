@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { toPublicUpdateRun } from "../../../src/infra/update-run-record.js";
 import { UpdateRunRecordSchema as LedgerRecordSchema } from "../../../src/infra/update-run-schema.js";
 import {
   validateUpdateRunChangedEvent,
@@ -101,6 +102,22 @@ describe("update run wire contract", () => {
       ).toBe(true);
     },
   );
+
+  it.each([true, false, undefined])("projects optional core readiness (%s)", (coreReady) => {
+    const record = toPublicUpdateRun(
+      LedgerRecordSchema.parse({
+        ...run,
+        verification: { ...run.verification, coreReady, readyz: false, channelsReady: false },
+      }),
+    );
+    expect(record.verification.coreReady).toBe(coreReady);
+    expect(validateUpdateRunRecord(record)).toBe(true);
+    expect(validateUpdateRunsGetResult({ run: record })).toBe(true);
+    expect(validateUpdateRunsListResult({ runs: [record] })).toBe(true);
+    expect(
+      validateUpdateStatusResult({ sentinel: null, updateAvailable: null, lastRun: record }),
+    ).toBe(true);
+  });
 
   it("rejects non-string candidate Node engine facts", () => {
     const record = {
@@ -224,6 +241,11 @@ describe("update run wire contract", () => {
   );
 
   it.each([
+    {
+      failureFacts: [
+        { check: "npm", code: "ETARGET", npmErrorCode: "ETARGET", packageSpec: "file-type@22.1.1" },
+      ],
+    },
     { exitCode: 23 },
     { exitCode: 0 },
     { exitCode: null },
@@ -324,6 +346,18 @@ describe("update run wire contract", () => {
         },
       },
     ],
+    [
+      "unknown npm error code",
+      {
+        steps: [
+          {
+            step: "package-install",
+            status: "failed",
+            failureFacts: [{ check: "npm", code: "unknown", npmErrorCode: "private-code" }],
+          },
+        ],
+      },
+    ],
     ["negative timestamp", { updatedAtMs: -1 }],
     ["unsafe timestamp", { updatedAtMs: Number.MAX_SAFE_INTEGER + 1 }],
     ["oversized text", { reason: "x".repeat(1025) }],
@@ -366,6 +400,7 @@ describe("update run wire contract", () => {
       [
         ["errorName", 81],
         ["location", 161],
+        ["packageSpec", 201],
       ] as const
     ).map(
       ([field, length]) =>

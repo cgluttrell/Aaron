@@ -6,12 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { runQaGatewayFixture } from "../../test/helpers/qa-gateway-cleanup.js";
-import { runNodeScript } from "../../test/helpers/run-node-script.js";
 import { LOOPBACK_PORT_PROBE_HOSTS, probePortUsage } from "../infra/ports-probe.js";
 import { withEnvAsync } from "../test-utils/env.js";
-import { acquireTestPortBlock } from "../test-utils/port-claims.js";
-import { waitForPidToExit } from "../test-utils/process-tree.js";
 import { withTimeout } from "../utils/with-timeout.js";
 import {
   installLaunchAgent,
@@ -24,7 +20,7 @@ import {
   uninstallLaunchAgent,
 } from "./launchd.js";
 import type { GatewayServiceEnv } from "./service-types.js";
-import { readGatewayServiceState, resolveGatewayService, startGatewayService } from "./service.js";
+import { resolveGatewayService, startGatewayService } from "./service.js";
 
 const WAIT_INTERVAL_MS = 200;
 const WAIT_TIMEOUT_MS = 30_000;
@@ -168,6 +164,45 @@ describeLaunchdIntegration("launchd integration", () => {
   let homeDir = "";
   const stdout = new PassThrough();
 
+  it("recovers registered services after their plists are deleted", async () => {
+    const testId = randomUUID().slice(0, 8);
+    const fixtureHome = await fs.mkdtemp(
+      path.join(os.tmpdir(), `openclaw-launchd-missing-plist-${testId}-`),
+    );
+    const fixtureEnv: GatewayServiceEnv = {
+      HOME: fixtureHome,
+      OPENCLAW_LAUNCHD_LABEL: `ai.openclaw.launchd-int-missing-plist-${testId}`,
+      OPENCLAW_LOG_PREFIX: `gateway-launchd-int-missing-plist-${testId}`,
+    };
+    const args = {
+      env: fixtureEnv,
+      stdout,
+      programArguments: [process.execPath, "-e", "setInterval(() => {}, 1000);"],
+    };
+    const plist = resolveLaunchAgentPlistPath(fixtureEnv);
+    try {
+      await installLaunchAgent(args);
+      await waitForRunningRuntime({ env: fixtureEnv });
+      await fs.unlink(plist);
+
+      await uninstallLaunchAgent({ env: fixtureEnv, stdout });
+      await waitForNotRunningRuntime({ env: fixtureEnv });
+
+      await installLaunchAgent(args);
+      const previous = await waitForRunningRuntime({ env: fixtureEnv });
+      await fs.unlink(plist);
+      const warnings: string[] = [];
+
+      await installLaunchAgent({ ...args, warn: (message) => warnings.push(message) });
+
+      await expectRuntimePidReplaced({ env: fixtureEnv, previousPid: previous.pid });
+      expect(warnings.some((message) => message.includes("plist is missing"))).toBe(true);
+    } finally {
+      await uninstallLaunchAgent({ env: fixtureEnv, stdout }).catch(() => {});
+      await fs.rm(fixtureHome, { recursive: true, force: true });
+    }
+  }, 90_000);
+
   it("real launchctl: node-host LaunchAgent stop/restart survives a co-located busy Gateway port (#124296)", async () => {
     // Real-world proof for https://github.com/openclaw/openclaw/issues/124296:
     // this drives actual `launchctl` LaunchAgents (no mocked port-inspection
@@ -298,142 +333,6 @@ describeLaunchdIntegration("launchd integration", () => {
       await fs.rm(homeDir, { recursive: true, force: true });
     }
   }, 60_000);
-
-  it("refuses real run-node publication while a sibling LaunchAgent holds checkout dist", async ({
-    signal,
-  }) => {
-    const id = randomUUID().slice(0, 8);
-    // openclaw-temp-dir: allow native service cleanup to retain evidence if retirement fails.
-    const root = await fs.realpath(
-      await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-dist-fence-")),
-    );
-    const home = path.join(root, "home");
-    const checkout = path.join(root, "openclaw-checkout");
-    const dist = path.join(checkout, "dist");
-    const entry = path.join(dist, "entry.cjs");
-    const siblingProfile = `dist-sibling-${id}`;
-    const selectedProfile = `dist-selected-${id}`;
-    const siblingEnv: GatewayServiceEnv = {
-      HOME: home,
-      OPENCLAW_PROFILE: siblingProfile,
-      OPENCLAW_LAUNCHD_LABEL: `ai.openclaw.${siblingProfile}`,
-      OPENCLAW_LOG_PREFIX: siblingProfile,
-    };
-    let portClaim: Awaited<ReturnType<typeof acquireTestPortBlock>> | undefined;
-    let nativeAttempted = false;
-    let nativeRetired = false;
-    let servicePid: number | undefined;
-    let commandAttempted = false;
-    let commandSettled = false;
-    await runQaGatewayFixture(
-      async () => {
-        await fs.mkdir(home);
-        await fs.mkdir(dist, { recursive: true });
-        await fs.mkdir(path.join(root, "tmp"));
-        await fs.writeFile(
-          path.join(checkout, "package.json"),
-          '{"name":"openclaw","version":"0.0.0"}\n',
-        );
-        const files = new Map([
-          ["entry.cjs", "setInterval(() => {}, 1000);\n"],
-          ["retained-chunk.js", "export const retained = true;\n"],
-        ]);
-        for (const [name, bytes] of files) {
-          await fs.writeFile(path.join(dist, name), bytes);
-        }
-        portClaim = await acquireTestPortBlock({ offsets: [0], signal });
-        const selectedEnv: NodeJS.ProcessEnv = {
-          PATH: process.env.PATH,
-          HOME: home,
-          USERPROFILE: home,
-          TMPDIR: path.join(root, "tmp"),
-          OPENCLAW_PROFILE: selectedProfile,
-          OPENCLAW_STATE_DIR: path.join(home, `.openclaw-${selectedProfile}`),
-          OPENCLAW_CONFIG_PATH: path.join(home, `.openclaw-${selectedProfile}`, "openclaw.json"),
-          OPENCLAW_LAUNCHD_LABEL: `ai.openclaw.${selectedProfile}`,
-          OPENCLAW_GATEWAY_PORT: String(portClaim.port),
-          OPENCLAW_FORCE_BUILD: "1",
-        };
-        const selected = await readGatewayServiceState(resolveGatewayService(), {
-          env: selectedEnv,
-          requireEffective: true,
-          requireLoadedCommand: true,
-        });
-        expect(selected.installed).toBe(false);
-        expect(selected.command).toBeNull();
-        expect(selected.loadState.status).toBe("not-loaded");
-        expect(selected.runtime?.missingUnit).toBe(true);
-        expect(await probePortUsage(portClaim.port, LOOPBACK_PORT_PROBE_HOSTS)).toBe("free");
-        await expect(fs.access(resolveLaunchAgentPlistPath(siblingEnv))).rejects.toMatchObject({
-          code: "ENOENT",
-        });
-        expect((await readLaunchAgentRuntime(siblingEnv)).missingUnit).toBe(true);
-        nativeAttempted = true;
-        await installLaunchAgent({
-          env: siblingEnv,
-          environment: {
-            HOME: home,
-            OPENCLAW_PROFILE: siblingProfile,
-            OPENCLAW_SERVICE_KIND: "gateway",
-          },
-          stdout,
-          programArguments: [process.execPath, entry, "gateway"],
-          workingDirectory: checkout,
-        });
-        const before = await waitForRunningRuntime({ env: siblingEnv });
-        servicePid = before.pid;
-        commandAttempted = true;
-        const result = await runNodeScript(
-          [path.resolve("scripts/run-node.mjs"), "models", "status"],
-          selectedEnv,
-          undefined,
-          { cwd: checkout, signal, requireProcessTreeExit: true, maxBuffer: 128 * 1024 },
-        );
-        commandSettled = result.error === undefined && result.status !== null;
-        expect(result.error).toBeUndefined();
-        expect(result.status, result.stderr).toBe(1);
-        expect(result.stderr).toContain(
-          `Refusing to rebuild dist while a managed Gateway (profile ${siblingProfile})`,
-        );
-        expect(result.stderr).toContain(entry);
-        expect(result.stderr).toContain(`openclaw gateway stop --profile ${siblingProfile}`);
-        expect(result.stderr).not.toContain("Building TypeScript");
-        expect((await fs.readdir(dist)).toSorted()).toEqual([...files.keys()].toSorted());
-        for (const [name, bytes] of files) {
-          expect(await fs.readFile(path.join(dist, name), "utf8")).toBe(bytes);
-        }
-        expect((await waitForRunningRuntime({ env: siblingEnv })).pid).toBe(before.pid);
-      },
-      async () => {
-        if (nativeAttempted) {
-          await uninstallLaunchAgent({ env: siblingEnv, stdout });
-          await waitForNotRunningRuntime({ env: siblingEnv });
-          await expect(fs.access(resolveLaunchAgentPlistPath(siblingEnv))).rejects.toMatchObject({
-            code: "ENOENT",
-          });
-          expect((await readLaunchAgentRuntime(siblingEnv)).missingUnit).toBe(true);
-          if (servicePid === undefined) {
-            throw new Error(
-              `Synthetic service PID was never captured; cleanup remains unverified at ${root}`,
-            );
-          }
-          expect(
-            await waitForPidToExit(servicePid),
-            `Synthetic service PID ${servicePid} has not exited; retained ${root}`,
-          ).toBe(true);
-        }
-        nativeRetired = true;
-      },
-      async () => {
-        await portClaim?.release();
-      },
-      async () => {
-        if (nativeRetired && (!commandAttempted || commandSettled)) {
-          await fs.rm(root, { recursive: true, force: true });
-        }
-      },
-    );
-  }, 90_000);
 
   it("restarts launchd service and keeps it running with a new pid", async () => {
     const launchEnv = launchEnvOrThrow(env);

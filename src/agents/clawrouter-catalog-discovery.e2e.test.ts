@@ -3,10 +3,7 @@ import { createServer, type Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { captureClawInstallSchemaVersionFacts } from "../claws/provenance-runtime-read.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import {
-  buildModelsListResult,
-  createGatewayAgentModelCatalogProjector,
-} from "../gateway/server-methods/models-list-result.js";
+import { buildModelsListResult } from "../gateway/server-methods/models-list-result.js";
 import type { GatewayRequestContext } from "../gateway/server-methods/types.js";
 import { runtimeProcessEntrypoints } from "../infra/runtime-process-entrypoints.js";
 import { resolveRuntimeWorkerUrl } from "../infra/runtime-worker-url.js";
@@ -20,11 +17,12 @@ import {
   createApiKeyCredential,
   createAuthProfileStoreFixture,
 } from "./auth-profiles/credential-fixtures.test-support.js";
-import {
-  createPreparedModelCatalogWorkerInput,
-  type PreparedModelCatalogWorkerTask,
-  type PreparedModelWorkerResult,
-} from "./prepared-model-catalog-worker.js";
+import { createModelCatalogDecisions } from "./model-catalog-decisions.js";
+import { createPreparedModelCatalogWorkerInput } from "./prepared-model-catalog-worker.js";
+import type {
+  PreparedModelCatalogWorkerTask,
+  PreparedModelWorkerResult,
+} from "./prepared-model-catalog-worker.types.js";
 import { prepareWorkspaceBuildGroup } from "./prepared-model-runtime.facts.js";
 
 describe("ClawRouter cold prepared catalog", () => {
@@ -142,12 +140,11 @@ describe("ClawRouter cold prepared catalog", () => {
           },
           modelPolicy: { allow: ["clawrouter/codex-latest"] },
         },
-        list: [
-          {
-            id: agentId,
+        entries: {
+          [agentId]: {
             model: { primary: refreshedAuth ? "openai/codex-latest" : "clawrouter/codex-latest" },
           },
-        ],
+        },
       },
     };
     const input = {
@@ -162,9 +159,44 @@ describe("ClawRouter cold prepared catalog", () => {
     const prepared = await prepareWorkspaceBuildGroup([input], "static", {
       preferBuiltPluginArtifacts: true,
     });
+    const metadata = prepared.pluginGeneration.pluginMetadataSnapshot;
+    // The local catalog server stands in for the provider-owned endpoint. Match the
+    // fixture's manifest route to that endpoint without relaxing production policy.
+    const withLocalEndpoint = (plugin: (typeof metadata.plugins)[number]) => {
+      const catalog = plugin.modelCatalog;
+      const provider = catalog?.providers?.clawrouter;
+      if (plugin.id !== "clawrouter" || !catalog || !provider) {
+        return plugin;
+      }
+      return {
+        ...plugin,
+        modelCatalog: {
+          ...catalog,
+          providers: {
+            ...catalog.providers,
+            clawrouter: { ...provider, baseUrl },
+          },
+        },
+      };
+    };
+    const pluginMetadataSnapshot = {
+      ...metadata,
+      plugins: metadata.plugins.map(withLocalEndpoint),
+      manifestRegistry: {
+        ...metadata.manifestRegistry,
+        plugins: metadata.manifestRegistry.plugins.map(withLocalEndpoint),
+      },
+      byPluginId: new Map(
+        [...metadata.byPluginId].map(([id, plugin]) => [id, withLocalEndpoint(plugin)]),
+      ),
+    };
+    expect(pluginMetadataSnapshot.byPluginId.get("clawrouter")).toMatchObject({
+      modelCatalog: { discovery: { clawrouter: "runtime" }, runtimeAugment: true },
+    });
     const value = createPreparedModelCatalogWorkerInput({
       agentFacts: prepared.agentFacts[0]!,
-      pluginMetadataSnapshot: prepared.pluginGeneration.pluginMetadataSnapshot,
+      pluginMetadataSnapshot,
+      preferBuiltPluginArtifacts: true,
     });
     if (refreshedAuth) {
       // The new credential must enter through the worker's durable auth refresh,
@@ -209,11 +241,11 @@ describe("ClawRouter cold prepared catalog", () => {
         baseUrl: `${baseUrl}/v1`,
       }),
     );
-    const projector = createGatewayAgentModelCatalogProjector({
+    const projector = createModelCatalogDecisions({
       cfg: config,
       agentId,
       snapshot: result.snapshot,
-      metadataSnapshot: prepared.pluginGeneration.pluginMetadataSnapshot,
+      metadataSnapshot: pluginMetadataSnapshot,
       preparedAuthStore: result.authStore,
       preparedRuntimeAuthModes: result.authModes,
     });

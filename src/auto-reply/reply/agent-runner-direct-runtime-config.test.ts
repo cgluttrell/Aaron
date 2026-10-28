@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import { createAdmittedRunOperatorAuthority } from "../../agents/admitted-run-context.js";
 import { OAuthRefreshFailureError } from "../../agents/auth-profiles/oauth-refresh-failure.js";
 import { FailoverError } from "../../agents/failover-error.js";
 import { SessionManager } from "../../agents/sessions/session-manager.js";
@@ -16,6 +17,7 @@ import {
   clearMemoryPluginState,
   registerMemoryCapability,
 } from "../../plugins/memory-state.test-fixtures.js";
+import { createUserTurnTranscriptRecorder } from "../../sessions/user-turn-transcript.js";
 import { withTestDir } from "../../test-helpers/temp-dir.js";
 import { withReplyDispatcher } from "../dispatch-dispatcher.js";
 import { getReplyPayloadMetadata } from "../reply-payload.js";
@@ -119,7 +121,7 @@ vi.mock("./queue.js", async () => {
   };
 });
 
-const { runReplyAgent } = await import("./agent-runner.js");
+const { runReplyAgent } = await import("./agent-runner-run.js");
 
 function createTelegramSessionCtx(): TemplateContext {
   return {
@@ -141,7 +143,6 @@ function createReplyOperation(): TestReplyOperation {
   return Object.assign(replyOperation, {
     phase: "queued" as const,
     setPhase: vi.fn<ReplyOperation["setPhase"]>(),
-    hasOwnedSessionId: vi.fn(() => false),
     captureOwnedSessionIds: vi.fn(() => new Set()),
   });
 }
@@ -343,14 +344,8 @@ describe("runReplyAgent runtime config", () => {
     });
     runSessionCompactionIfNeededMock.mockImplementation(runRequiredCheckpoint);
     runMemoryFlushIfNeededMock.mockImplementation(
-      async (params: {
-        replyOperation: ReplyOperation;
-        onVisibleErrorPayloads?: (payloads: Array<{ text?: string; isError?: boolean }>) => void;
-      }) => {
+      async (params: { replyOperation: ReplyOperation }) => {
         params.replyOperation.setPhase("memory_flushing");
-        params.onVisibleErrorPayloads?.([
-          { text: "⚠️ memory flush preparation failed", isError: true },
-        ]);
         return { sessionEntry: undefined, outcome: "failed" };
       },
     );
@@ -727,7 +722,7 @@ describe("runReplyAgent runtime config", () => {
       if (!result || Array.isArray(result)) {
         throw new Error("expected a single preflight compaction failure reply payload");
       }
-      expect(result.text).toContain("auto-compaction could not recover");
+      expect(result.text).toContain("OpenClaw couldn't shorten it.");
       expect(getReplyPayloadMetadata(result)?.deliverDespiteSourceReplySuppression).toBe(true);
       expect(followupRun.run.sessionId).toBe(sessionSnapshot.sessionId);
       expect(sessionEntry).toEqual(sessionSnapshot);
@@ -867,13 +862,85 @@ describe("runReplyAgent runtime config", () => {
     if (!result || Array.isArray(result)) {
       throw new Error("expected a single preflight compaction failure reply payload");
     }
-    expect(result.text).toContain("Context is too large");
-    expect(result.text).toContain("auto-compaction could not recover");
+    expect(result.text).toContain("This conversation is too long");
+    expect(result.text).toContain("OpenClaw couldn't shorten it.");
     expect(result.text).toContain("/compact");
     expect(result.text).toContain("/new");
     const metadata = getReplyPayloadMetadata(result);
     expect(metadata?.deliverDespiteSourceReplySuppression).toBe(true);
   });
+
+  it.each([
+    { source: "current", revokeDuring: undefined, kept: true },
+    { source: "revoked during preflight", revokeDuring: "preflight", kept: false },
+    { source: "revoked while the append awaits", revokeDuring: "persist", kept: false },
+    { source: "revoked original input", revokeDuring: "source", kept: false },
+  ] as const)(
+    "keeps the user turn after a failed required preflight only for a $source source",
+    async ({ revokeDuring, kept }) => {
+      await withTestDir({ prefix: "openclaw-preflight-user-turn-" }, async (tempDir) => {
+        const { replyParams, followupRun } = createDirectRuntimeReplyParams();
+        const sessionKey = "agent:main:telegram:default:direct:test";
+        const sessionEntry: SessionEntry = { sessionId: "session-1", updatedAt: 1 };
+        const storePath = join(tempDir, "sessions.json");
+        const scope = { agentId: "main", sessionId: sessionEntry.sessionId, sessionKey, storePath };
+        await replaceSessionEntry(scope, sessionEntry);
+        await appendTranscriptMessage(scope, { message: { role: "user", content: "earlier" } });
+        let revoked = false;
+        const input = {
+          text: "the turn that hit the failed preflight",
+          idempotencyKey: "source-1",
+        };
+        followupRun.userTurnTranscriptRecorder = createUserTurnTranscriptRecorder({
+          input,
+          assertOriginalInputCommit: () => {
+            if (revokeDuring === "source") {
+              throw new Error("original input source revoked");
+            }
+          },
+          // Message resolution is the first await inside persistApproved().
+          resolveInput: async () => {
+            revoked ||= revokeDuring === "persist";
+            return input;
+          },
+          target: { ...scope, sessionEntry, cwd: tempDir, config: {} },
+        });
+        followupRun.operatorAuthority = createAdmittedRunOperatorAuthority({
+          profileId: "linked-admin",
+          scopes: ["operator.admin"],
+          gatewayAccessGrant: null,
+          source: {},
+          assertCurrent: () => {
+            if (revoked) {
+              throw new Error("operator access revoked");
+            }
+          },
+        });
+        replyParams.sessionKey = sessionKey;
+        replyParams.storePath = storePath;
+        replyParams.sessionEntry = sessionEntry;
+        replyParams.sessionStore = { [sessionKey]: sessionEntry };
+        runSessionCompactionIfNeededMock.mockImplementation(async () => {
+          revoked = revokeDuring === "preflight";
+          throw new Error("Preflight compaction required but failed: summarization_failed");
+        });
+
+        const result = await runReplyAgent(replyParams);
+
+        expect(result).toMatchObject({ text: expect.stringContaining("couldn't shorten it") });
+        expect(executeAgentTurnMock).not.toHaveBeenCalled();
+        const failedTurn = expect.objectContaining({
+          role: "user",
+          content: "the turn that hit the failed preflight",
+          idempotencyKey: "source-1",
+        });
+        expect((await SessionManager.openAsync(scope)).buildSessionContext().messages).toEqual([
+          expect.objectContaining({ role: "user", content: "earlier" }),
+          ...(kept ? [failedTurn] : []),
+        ]);
+      });
+    },
+  );
 
   it("does not resolve secrets before the enqueue-followup queue path", async () => {
     const { followupRun, resolvedQueue, replyParams } = createDirectRuntimeReplyParams({

@@ -90,6 +90,7 @@ const releaseStateSchema = z.strictObject({
     appcastVerifiedAt: timestamp.optional(),
   }),
   closeout: z.strictObject({
+    websiteRunId: id.optional(),
     publishRunConclusion: z.string().optional(),
     runId: id.optional(),
     verifiedAt: timestamp.optional(),
@@ -346,8 +347,8 @@ export function saveReleaseState(options: ReleaseOptions, state: ReleaseState): 
     rmSync(temporary, { force: true });
   }
 }
-export function resetReleasePhases(state: ReleaseState, from: ReleasePhase): void {
-  const data = {
+export function getReleasePhaseData(state: ReleaseState) {
+  return {
     cut: state.cut,
     validate: state.validate,
     publish: state.publish,
@@ -356,6 +357,9 @@ export function resetReleasePhases(state: ReleaseState, from: ReleasePhase): voi
     macos: state.macos,
     closeout: state.closeout,
   };
+}
+export function resetReleasePhases(state: ReleaseState, from: ReleasePhase): void {
+  const data = getReleasePhaseData(state);
   for (const phase of RELEASE_PHASES.slice(RELEASE_PHASES.indexOf(from))) {
     state.history.push({
       at: new Date().toISOString(),

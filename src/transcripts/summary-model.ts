@@ -142,6 +142,7 @@ export async function summarizeTranscriptsWithModel(params: {
         params.assertCurrent?.();
         const completion = await runSummaryWork(signal, () =>
           runIsolatedCompletion({
+            purpose: "transcript-summary",
             config: params.cfg,
             provider: selection.runtimeProvider ?? selection.provider,
             model: selection.modelId,
@@ -161,6 +162,7 @@ export async function summarizeTranscriptsWithModel(params: {
             abortSignal: signal,
             assertCurrent: params.assertCurrent,
             outputTextPolicy: "strict-visible",
+            thinkLevel: "off",
             streamParams: { maxTokens: MODEL_SUMMARY_MAX_TOKENS },
           }),
         );

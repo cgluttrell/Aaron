@@ -6,12 +6,15 @@ import type { WidgetPresenter } from "../plugins/plugin-registration.types.js";
 import { createEmptyPluginRegistry } from "../plugins/registry-empty.js";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../plugins/runtime.js";
 import * as userProfileList from "../state/user-profile-list.js";
+import { finalizeAgentToolAvailability } from "./agent-tool-availability.js";
 import { createOpenClawCodingTools } from "./agent-tools.js";
+import { createCodeModeTools } from "./code-mode.js";
 import { resolveCoreToolFactoryFamily } from "./core-tool-factory-descriptors.js";
 import {
   createCronCreatorAuthorityCapability,
   runWithCronCreatorAuthorityCapability,
 } from "./cron-creator-authority-context.js";
+import { createLazyExecTool } from "./lazy-exec-tool.js";
 import { createOpenClawTools } from "./openclaw-tools.js";
 import {
   shouldIncludePrimarySessionToolForOpenClawTools,
@@ -29,7 +32,7 @@ type CreateOpenClawToolsOptions = NonNullable<Parameters<typeof createOpenClawTo
 function withDefaultRoster(config: OpenClawConfig | undefined): OpenClawConfig {
   return {
     ...config,
-    agents: config?.agents ?? { entries: { main: { default: true } } },
+    agents: config?.agents ?? { entries: { main: {} } },
   };
 }
 
@@ -67,6 +70,44 @@ function expectToolNamed(
   return tool;
 }
 
+it("keeps top-level tool argument names distinct from the required schema keyword", () => {
+  const config: OpenClawConfig = {
+    agents: { entries: { main: {} } },
+    tools: { swarm: true },
+  };
+  const directTools = createOpenClawCodingTools({
+    config,
+    sessionKey: "agent:main:main",
+    wrapBeforeToolCallHook: false,
+    toolConstructionPlan: {
+      includeBaseCodingTools: true,
+      includeShellTools: true,
+      includeChannelTools: false,
+      includeOpenClawTools: true,
+      includePluginTools: false,
+    },
+  });
+  const codeModeTools = createCodeModeTools({ config, agentId: "main" });
+  expect(toolNames(directTools)).toEqual(expect.arrayContaining(["exec", "agents_wait"]));
+  expect(toolNames(codeModeTools)).toEqual(["exec", "wait"]);
+  const completionTools = finalizeAgentToolAvailability([createLazyExecTool()]);
+  expect(completionTools[0]!.parameters).not.toHaveProperty(["properties", "background"]);
+  expect(completionTools[0]!.parameters).not.toHaveProperty(["properties", "yieldMs"]);
+  const surfaces = {
+    direct: directTools,
+    codeMode: codeModeTools,
+    completion: completionTools,
+  };
+  // Kimi confuses a top-level argument named required with JSON Schema's keyword.
+  for (const [surface, tools] of Object.entries(surfaces)) {
+    for (const tool of tools) {
+      expect
+        .soft(tool.parameters, `${surface}:${tool.name}`)
+        .not.toHaveProperty(["properties", "required"]);
+    }
+  }
+});
+
 describe("openclaw-tools progress_card gating", () => {
   afterEach(() => {
     setEmbeddedMode(false);
@@ -84,7 +125,7 @@ describe("openclaw-tools progress_card gating", () => {
         cwd: "/project/worktree",
         workspaceDir: "/project/worktree",
         config: {
-          agents: { entries: { main: { default: true, workspace: "/agent/workspace" } } },
+          agents: { entries: { main: { workspace: "/agent/workspace" } } },
           tools: { allow: ["personal_instructions"], fs: { workspaceOnly: true } },
         },
         disableMessageTool: true,
@@ -386,6 +427,30 @@ describe("gateway client capability tool filtering", () => {
     expect(
       hasTool(createOpenClawTools({ githubPublicationAvailable: true }), "github_publish"),
     ).toBe(true);
+  });
+
+  it("negotiates GitHub reconnect guidance with the requesting Control UI", () => {
+    const olderTools = createOpenClawTools({
+      githubPublicationAvailable: false,
+      clientCaps: ["ui-commands"],
+    });
+    const capableTools = createOpenClawTools({
+      githubPublicationAvailable: false,
+      clientCaps: ["ui-commands", "ui-agent-github-settings"],
+    });
+
+    expect(JSON.stringify(expectToolNamed(olderTools, "screen").parameters)).not.toContain(
+      "github_identity_settings",
+    );
+    expect(JSON.stringify(expectToolNamed(capableTools, "screen").parameters)).toContain(
+      "github_identity_settings",
+    );
+    expect(expectToolNamed(olderTools, "github_identity_status").description).not.toContain(
+      "github_identity_settings",
+    );
+    expect(expectToolNamed(capableTools, "github_identity_status").description).toContain(
+      "github_identity_settings",
+    );
   });
 
   it("omits host UI runtime tools for sandboxed agents", () => {

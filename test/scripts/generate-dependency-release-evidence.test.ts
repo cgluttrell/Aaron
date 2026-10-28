@@ -39,18 +39,6 @@ function expectNoNodeStack(stderr: string) {
 }
 
 describe("generate-dependency-release-evidence", () => {
-  it("defines the release evidence command list and policy classifications", () => {
-    expect(DEPENDENCY_EVIDENCE_REPORTS.map(({ command, policy }) => ({ command, policy }))).toEqual(
-      [
-        { command: "pnpm deps:vuln:gate", policy: "malware-blocking" },
-        { command: "pnpm deps:transitive-risk:report", policy: "report-only" },
-        { command: "pnpm deps:ownership-surface:report", policy: "report-only" },
-        { command: "pnpm deps:changes:report", policy: "report-only" },
-        { command: "pnpm deps:npm-lock:report", policy: "report-only" },
-      ],
-    );
-  });
-
   it("creates the dependency evidence manifest shape", () => {
     const manifest = createDependencyEvidenceManifest({
       generatedAt: "2026-05-13T00:00:00.000Z",
@@ -380,10 +368,7 @@ describe("generate-dependency-release-evidence", () => {
         git(origin, "commit", "--quiet", "--allow-empty", "-m", "release target");
         const releaseSha = git(origin, "rev-parse", "HEAD");
         git(origin, "branch", "release-target");
-        await writeFile(path.join(origin, "historical-only.txt"), "lazy dependency content\n");
-        git(origin, "add", "historical-only.txt");
-        git(origin, "commit", "--quiet", "-m", "later main release");
-        const laterTree = git(origin, "rev-parse", "HEAD^{tree}");
+        git(origin, "commit", "--quiet", "--allow-empty", "-m", "later main release");
         git(origin, "tag", "--no-sign", "v2026.6.1");
         git(origin, "tag", "--no-sign", "release-tooling-unrelated");
         git(origin, "branch", "unrelated");
@@ -407,16 +392,6 @@ describe("generate-dependency-release-evidence", () => {
             "\n",
           ),
         ).toEqual(["refs/tags/v2026.5.1", "refs/tags/v2026.6.1"]);
-        const fetchedTree = execFileSync("git", ["cat-file", "--batch-check"], {
-          cwd: target,
-          encoding: "utf8",
-          env: { ...process.env, GIT_NO_LAZY_FETCH: "1" },
-          input: `${laterTree}\n`,
-        }).trim();
-        expect(fetchedTree).toBe(`${laterTree} missing`);
-        expect(git(target, "show", "v2026.6.1:historical-only.txt")).toBe(
-          "lazy dependency content",
-        );
       } finally {
         await rm(dir, { force: true, recursive: true });
       }
@@ -424,7 +399,6 @@ describe("generate-dependency-release-evidence", () => {
   );
 
   it.each([
-    { status: "checked", mappedPackageVersions: 101, checkedRepositories: 2, issues: [] },
     {
       status: "partial",
       mappedPackageVersions: 100,

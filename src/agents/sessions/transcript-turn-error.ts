@@ -2,7 +2,9 @@
 export function isSessionTranscriptTurnMismatchErrorMessage(
   message: string | undefined,
 ): message is string {
-  return /^(?:Error: )?Session transcript keyed user is outside the current turn: \S/.test(
-    message ?? "",
+  const text = message?.replace(/^Error: /, "") ?? "";
+  return (
+    /^Session transcript keyed user is outside the current turn: \S/.test(text) ||
+    text === "Model prompt projection lost its canonical user turn"
   );
 }

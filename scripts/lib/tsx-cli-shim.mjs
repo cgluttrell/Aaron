@@ -54,7 +54,7 @@ export function resolveTsxImport(checkoutRoot) {
   );
 }
 
-export async function registerToolingTsx() {
+function configureToolingTsx() {
   // tsx indexes the entire shared disk cache before expiration, coupling startup
   // to other checkouts' cache size. This flag retains its in-process Map and
   // reaches descendant tooling before their loaders initialize.
@@ -70,6 +70,10 @@ export async function registerToolingTsx() {
   ) {
     process.env.TSX_TSCONFIG_PATH = checkoutTsconfig;
   }
+}
+
+export async function registerToolingTsx() {
+  configureToolingTsx();
   await import(resolveTsxImport(SHIM_CHECKOUT_ROOT));
 }
 
@@ -106,6 +110,7 @@ async function runCliShimInner(moduleUrl, options, nodeArgs) {
   const forceKillDelayMs = options.forceKillDelayMs ?? DEFAULT_FORCE_KILL_DELAY_MS;
   let child = null;
   let forceKillTimer = null;
+  let interrupted = false;
   const signalHandlers = new Map();
   const cleanup = () => {
     if (forceKillTimer) {
@@ -121,6 +126,7 @@ async function runCliShimInner(moduleUrl, options, nodeArgs) {
 
   for (const signal of FORWARDED_SIGNALS) {
     const handler = () => {
+      interrupted = true;
       signalChild(child, signal, detached);
       // A lifecycle-owning implementation must finish killing its own child groups.
       // A competing shim deadline can kill that owner and orphan those children.
@@ -175,26 +181,29 @@ async function runCliShimInner(moduleUrl, options, nodeArgs) {
     if (result.signal) {
       writeFailureTrailer(options.failureTool, signalExitCode(result.signal));
       process.kill(process.pid, result.signal);
-      return;
+      return { interrupted };
     }
     const exitCode = result.code ?? 1;
     writeFailureTrailer(options.failureTool, exitCode);
     process.exitCode = exitCode;
+    return { interrupted };
   } catch (error) {
     cleanup();
     console.error(error);
     writeFailureTrailer(options.failureTool, 1);
     process.exitCode = 1;
+    return { interrupted };
   }
 }
 
 async function runCliShim(moduleUrl, options, nodeArgs) {
   try {
-    await runCliShimInner(moduleUrl, options, nodeArgs);
+    return await runCliShimInner(moduleUrl, options, nodeArgs);
   } catch (error) {
     console.error(error);
     writeFailureTrailer(options.failureTool, 1);
     process.exitCode = 1;
+    return { interrupted: false };
   }
 }
 
@@ -202,6 +211,25 @@ export function runNodeCliShim(moduleUrl, options = {}) {
   return runCliShim(moduleUrl, options, []);
 }
 
-export function runTsxCliShim(moduleUrl, options = {}) {
+export async function runTsxCliShim(moduleUrl, options = {}) {
+  if (options.toolingDependencies) {
+    try {
+      const { toolingDependencyOptions } = await import("./tooling-dependencies.mjs");
+      const tooling = toolingDependencyOptions(SHIM_CHECKOUT_ROOT, options.toolingDependencies, {
+        tsx: true,
+      });
+      if (tooling.tsxImport) {
+        configureToolingTsx();
+        // Install qualified resolution before TSX loads source imports. Keeping
+        // its absolute preload also preserves fork() without a workspace link.
+        return runCliShim(moduleUrl, options, [...tooling.execArgv, "--import", tooling.tsxImport]);
+      }
+    } catch (error) {
+      console.error(error);
+      writeFailureTrailer(options.failureTool, 1);
+      process.exitCode = 1;
+      return { interrupted: false };
+    }
+  }
   return runCliShim(moduleUrl, options, ["--import", new URL("../tsx.mjs", import.meta.url).href]);
 }

@@ -1,8 +1,12 @@
+import { CRON_AGENT_SELECTION_REQUIRED_MESSAGE } from "../../cron/agent-id.js";
+import { CRON_DELIVERY_REPAIR_REQUIRED_MESSAGE } from "../../cron/store/delivery-codec.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 
 export function isCronInvalidRequestError(err: unknown): boolean {
   const message = formatErrorMessage(err);
   return (
+    message === CRON_AGENT_SELECTION_REQUIRED_MESSAGE ||
+    message === CRON_DELIVERY_REPAIR_REQUIRED_MESSAGE ||
     message.startsWith("unknown cron job id:") ||
     message.startsWith("cron job already exists:") ||
     message.includes("cron job id must not be blank") ||
@@ -20,7 +24,8 @@ export function isCronInvalidRequestError(err: unknown): boolean {
     message.includes("cron job is missing sessionTarget") ||
     message.includes("invalid cron sessionTarget session id") ||
     message.includes('main cron jobs require payload.kind="systemEvent"') ||
-    message.includes('isolated/current/session cron jobs require payload.kind="agentTurn"') ||
+    message.includes("script cron jobs require sessionTarget") ||
+    message.includes("isolated cron jobs require payload.kind") ||
     message.includes("has no upcoming run time and would never fire") ||
     message.includes('sessionTarget "main" is only valid for the default agent') ||
     message.includes('cron.update payload.kind="systemEvent" requires text') ||

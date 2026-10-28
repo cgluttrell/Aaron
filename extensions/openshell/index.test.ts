@@ -1,10 +1,11 @@
 import type {
-  OpenClawPluginService,
+  OpenClawPluginApi,
   PluginRuntimeLifecycleRegistration,
 } from "openclaw/plugin-sdk/plugin-entry";
 import { createTestPluginApi } from "openclaw/plugin-sdk/plugin-test-api";
 import { createPluginRegistryFixture } from "openclaw/plugin-sdk/plugin-test-contracts";
 import {
+  clearActivePluginRegistry,
   createEmptyPluginRegistry,
   createPluginRecord,
   disposePluginRegistryInstances,
@@ -110,7 +111,7 @@ describe("OpenShell plugin registration lifecycle", () => {
 
   it("does not register runtime hooks or services in discovery mode", () => {
     const original = readBackend();
-    const services: OpenClawPluginService[] = [];
+    const services: Parameters<OpenClawPluginApi["registerService"]>[0][] = [];
     const lifecycles: PluginRuntimeLifecycleRegistration[] = [];
     plugin.register(
       createTestPluginApi({
@@ -142,7 +143,9 @@ describe("OpenShell plugin registration lifecycle", () => {
       expect(readBackend().resolveWorkdir?.(workdirParams)).toBe("/sandbox/unstarted");
       setActivePluginRegistry(registry.registry);
       setActivePluginRegistry(createEmptyPluginRegistry());
-      await expect.poll(readBackend).toEqual(originalBackend);
+      // Publication retires the replaced registry asynchronously; clearing joins that cleanup.
+      await clearActivePluginRegistry();
+      expect(readBackend()).toEqual(originalBackend);
     } finally {
       await expect(disposePluginRegistryInstances(registry.registry)).resolves.toMatchObject({
         failures: [],

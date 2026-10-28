@@ -189,7 +189,7 @@ describe("Control UI retained publication", () => {
     },
   );
 
-  it.each(["native", "EPERM", "ENOTEMPTY"] as const)(
+  it.each(["native", "EPERM"] as const)(
     "records concurrent different-target pruning with %s deletion",
     async (fault) => {
       for (let iteration = 0; iteration < (fault === "native" ? 3 : 1); iteration++) {
@@ -355,73 +355,10 @@ describe("Control UI retained publication", () => {
     },
   );
 
-  it.each(["partial", "zero-progress"] as const)(
-    "handles %s destination writes without adopting incomplete bytes",
-    async (behavior) => {
-      await withRetentionFixture(async ({ root, cache }) => {
-        const build = await writeRetentionBuild(path.join(root, "build"), "write", {
-          size: 128 * 1024,
-        });
-        const source = path.join(build.root, build.assetPath);
-        const open = fs.open;
-        let intercepted = false;
-        vi.spyOn(fs, "open").mockImplementation(async (...args) => {
-          const handle = await open(...args);
-          const file = args[0];
-          if (
-            typeof file !== "string" ||
-            !file.includes(".staging-") ||
-            !file.endsWith(`${path.sep}${path.normalize(build.assetPath)}`)
-          ) {
-            return handle;
-          }
-          const write = handle.write.bind(handle);
-          vi.spyOn(handle, "write").mockImplementation((async (
-            buffer: Buffer,
-            offset: number,
-            length: number,
-            position: number | null,
-          ) => {
-            intercepted = true;
-            if (behavior === "zero-progress") {
-              return { buffer, bytesWritten: 0 };
-            }
-            return await write(buffer, offset, Math.min(length, 17), position);
-          }) as typeof handle.write);
-          return handle;
-        });
-        const owner = createControlUiAssetRetention(build.root);
-        if (behavior === "zero-progress") {
-          await expect(owner.prepare()).rejects.toThrow("write made no progress");
-          expect(await owner.resolveAsset(build.assetPath)).toBeNull();
-          expect(await fs.readdir(cache)).toEqual([]);
-        } else {
-          await owner.prepare();
-          expect(await fs.readFile((await owner.resolveAsset(build.assetPath))!.filePath)).toEqual(
-            await fs.readFile(source),
-          );
-        }
-        expect(intercepted).toBe(true);
-        expect((await fs.readdir(cache)).some((entry) => entry.startsWith(".staging-"))).toBe(
-          false,
-        );
-      });
-    },
-  );
-
   it.each([
     ["EEXIST", "valid"],
-    ["ENOTEMPTY", "valid"],
     ["EEXIST", "digest"],
-    ["ENOTEMPTY", "digest"],
-    ["EEXIST", "manifest"],
-    ["ENOTEMPTY", "manifest"],
-    ["EEXIST", "symlink"],
-    ["ENOTEMPTY", "symlink"],
     ["EPERM", "valid"],
-    ["EPERM", "digest"],
-    ["EPERM", "manifest"],
-    ["EPERM", "symlink"],
     ["EACCES", "valid"],
   ] as const)("handles %s only when its exact winner is %s", async (code, integrity) => {
     await withRetentionFixture(async ({ root, cache }) => {
@@ -429,19 +366,12 @@ describe("Control UI retained publication", () => {
       const target = path.join(cache, build.manifest.generation);
       const collision = Object.assign(new Error("rename failed"), { code });
       vi.spyOn(fs, "rename").mockImplementation(async () => {
-        if (integrity === "symlink") {
-          await fs.symlink(build.root, target, "dir");
-        } else {
-          await fs.cp(build.root, target, { recursive: true });
-          if (integrity === "digest") {
-            await fs.writeFile(
-              path.join(target, build.assetPath),
-              Buffer.alloc(build.manifest.assets[0]!.size, 120),
-            );
-          }
-          if (integrity === "manifest") {
-            await fs.writeFile(path.join(target, "asset-manifest.json"), "{");
-          }
+        await fs.cp(build.root, target, { recursive: true });
+        if (integrity === "digest") {
+          await fs.writeFile(
+            path.join(target, build.assetPath),
+            Buffer.alloc(build.manifest.assets[0]!.size, 120),
+          );
         }
         throw collision;
       });

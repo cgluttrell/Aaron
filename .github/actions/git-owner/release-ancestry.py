@@ -67,8 +67,7 @@ def fetch_history(depth_argument, *refspecs):
                 "--atomic",
                 "--no-tags",
                 "--no-recurse-submodules",
-                # Ancestry inspects commits only; historical trees are not needed.
-                "--filter=tree:0",
+                "--filter=blob:none",
                 "--refmap=",
                 depth_argument,
                 "origin",
