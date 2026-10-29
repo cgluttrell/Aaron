@@ -141,6 +141,7 @@ describe("writeMemoryCoreWorkspaceEntries", () => {
         pluginConfig,
         logger: { info: () => {}, warn: () => {}, error: () => {} },
         nowMs: Date.parse("2026-04-05T10:05:00.000Z"),
+        narrativeTimeoutMs: 180_000,
       });
 
     resetWriteCounts();

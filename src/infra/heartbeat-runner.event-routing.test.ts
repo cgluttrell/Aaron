@@ -10,18 +10,9 @@ import {
   loadTranscriptEvents,
 } from "../config/sessions/session-accessor.js";
 import { readTranscriptEventMessage } from "../config/sessions/session-accessor.sqlite-read.js";
-import {
-  clearCronJobActive,
-  markCronJobActive,
-  markCronJobWaitingForHeartbeat,
-  resetCronActiveJobs,
-} from "../cron/active-jobs.js";
-import { readCronScratchSnapshot } from "../cron/scratch-read.js";
-import { writeCronJobScratchForMaintenance } from "../cron/scratch-write.kernel.js";
-import { resolveCronJobsStorePathFromConfig } from "../cron/store.js";
+import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { resetCronActiveJobs } from "../cron/active-jobs.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
-import { enqueueCommandInLane, type CommandLaneTaskMarker } from "../process/command-queue.js";
-import { CommandLane } from "../process/lanes.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { racePromiseWithAbortSignal } from "./abort-signal.js";
 import {
@@ -106,7 +97,7 @@ describe("Heartbeat event routing", () => {
             workspace: tmpDir,
             heartbeat: { every: "5m", target: "discord", to: "channel:1483685213484613733" },
           },
-          list: [{ id: "qa-security" }],
+          entries: { "qa-security": {} },
         },
         session: { store: storePath },
       };
@@ -204,7 +195,7 @@ describe("Heartbeat event routing", () => {
             workspace: tmpDir,
             heartbeat: { every: "5m", target: "discord", to: "channel:1483685213484613733" },
           },
-          list: [{ id: "qa-security" }],
+          entries: { "qa-security": {} },
         },
         channels: { telegram: { allowFrom: ["*"] } },
         session: { store: storePath },
@@ -285,7 +276,7 @@ describe("Heartbeat event routing", () => {
             workspace: tmpDir,
             heartbeat: { every: "5m", target: "discord", to: "channel:1483685213484613733" },
           },
-          list: [{ id: "qa-security" }],
+          entries: { "qa-security": {} },
         },
         session: { store: storePath },
       };

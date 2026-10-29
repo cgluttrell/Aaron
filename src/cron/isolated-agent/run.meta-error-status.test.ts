@@ -1,5 +1,4 @@
 import { describe, expect, it, vi } from "vitest";
-import { FailoverError } from "../../agents/failover-error.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { expectObjectFields } from "../../test-utils/mock-call-assertions.js";
 import { makeCronJob } from "../delivery.test-helpers.js";

@@ -131,21 +131,21 @@ describe("cron service timer seam coverage", () => {
 
   it("routes main cron jobs to the owning agent's main session", async () => {
     const { storePath } = await makeStorePath();
-    const now = Date.parse("2026-03-23T12:00:00.000Z");
+    const jobNow = Date.parse("2026-03-23T12:00:00.000Z");
     const enqueueSystemEvent = vi.fn();
     const requestHeartbeat = vi.fn();
     const requestHeartbeatAndWait = vi.fn(async () => ({ status: "ran" as const, durationMs: 1 }));
     const job = {
-      ...createDueMainJob({ now, wakeMode: "now" }),
+      ...createDueMainJob({ now: jobNow, wakeMode: "now" }),
       sessionKey: "agent:main-pr-router:main",
-      state: { runningAtMs: now },
+      state: { runningAtMs: jobNow },
     };
     const sessionStorePath = path.join(path.dirname(path.dirname(storePath)), "sessions.json");
     await upsertSessionEntryCore(
       { storePath: sessionStorePath, sessionKey: "agent:main-pr-router:main" },
       {
         sessionId: "main-pr-router-session",
-        updatedAt: now,
+        updatedAt: jobNow,
         delivery: normalizeSessionDeliveryState({
           context: { channel: "discord", to: "channel-1", accountId: "default" },
         }),
@@ -155,7 +155,7 @@ describe("cron service timer seam coverage", () => {
     const state = createCronServiceState({
       scheduler: createTestGatewayScheduler(),
       storePath,
-      nowMs: () => now,
+      nowMs: () => jobNow,
       defaultAgentId: "main-pr-router",
       resolveSessionStorePath: () => sessionStorePath,
       enqueueSystemEvent,
@@ -187,7 +187,7 @@ describe("cron service timer seam coverage", () => {
 
   it("defers isolated agent jobs when the dispatch pressure guard reports unsafe cgroup memory", async () => {
     const { storePath } = await makeStorePath();
-    const now = Date.parse("2026-03-23T12:00:00.000Z");
+    const jobNow = Date.parse("2026-03-23T12:00:00.000Z");
     const runIsolatedAgentJob = vi.fn(async () => ({ status: "ok" as const }));
     const dispatchPressureGuard = vi.fn(() => ({
       status: "defer" as const,
@@ -205,14 +205,14 @@ describe("cron service timer seam coverage", () => {
     const state = createCronServiceState({
       storePath,
       scheduler: createTestGatewayScheduler(),
-      nowMs: () => now,
+      nowMs: () => jobNow,
       enqueueSystemEvent: vi.fn(),
       requestHeartbeat: vi.fn(),
       runIsolatedAgentJob,
       dispatchPressureGuard,
     });
 
-    const result = await executeJobCore(state, createDueIsolatedAgentJob({ now }));
+    const result = await executeJobCore(state, createDueIsolatedAgentJob({ now: jobNow }));
 
     expect(result.status).toBe("skipped");
     expect(result.error).toBe(
@@ -231,7 +231,7 @@ describe("cron service timer seam coverage", () => {
 
   it("runs isolated agent jobs when the dispatch pressure guard override is Chris-approved", async () => {
     const { storePath } = await makeStorePath();
-    const now = Date.parse("2026-03-23T12:00:00.000Z");
+    const jobNow = Date.parse("2026-03-23T12:00:00.000Z");
     const runIsolatedAgentJob = vi.fn(async () => ({ status: "ok" as const, summary: "done" }));
     const dispatchPressureGuard = vi.fn(() => ({
       status: "override" as const,
@@ -241,16 +241,21 @@ describe("cron service timer seam coverage", () => {
     const state = createCronServiceState({
       storePath,
       scheduler: createTestGatewayScheduler(),
-      nowMs: () => now,
+      nowMs: () => jobNow,
       enqueueSystemEvent: vi.fn(),
       requestHeartbeat: vi.fn(),
       runIsolatedAgentJob,
       dispatchPressureGuard,
     });
 
-    const result = await executeJobCore(state, createDueIsolatedAgentJob({ now }), undefined, {
-      dispatchPressureOverride: { approvedBy: "Chris", reason: "urgent operator recovery" },
-    });
+    const result = await executeJobCore(
+      state,
+      createDueIsolatedAgentJob({ now: jobNow }),
+      undefined,
+      {
+        dispatchPressureOverride: { approvedBy: "Chris", reason: "urgent operator recovery" },
+      },
+    );
 
     expect(result).toMatchObject({ status: "ok", summary: "done" });
     expect(runIsolatedAgentJob).toHaveBeenCalledTimes(1);
