@@ -1650,39 +1650,7 @@
     "./plugin-sdk/llm": {
       "default": "./dist/plugin-sdk/llm.js"
     },
-    "./cli-entry": "./openclaw.mjs",
-    "./plugin-sdk/infra-runtime": {
-      "types": "./dist/plugin-sdk/infra-runtime.d.ts",
-      "default": "./dist/plugin-sdk/infra-runtime.js"
-    },
-    "./plugin-sdk/config-runtime": {
-      "types": "./dist/plugin-sdk/config-runtime.d.ts",
-      "default": "./dist/plugin-sdk/config-runtime.js"
-    },
-    "./plugin-sdk/channel-lifecycle": {
-      "types": "./dist/plugin-sdk/channel-lifecycle.d.ts",
-      "default": "./dist/plugin-sdk/channel-lifecycle.js"
-    },
-    "./plugin-sdk/telegram-account": {
-      "types": "./dist/plugin-sdk/telegram-account.d.ts",
-      "default": "./dist/plugin-sdk/telegram-account.js"
-    },
-    "./plugin-sdk/discord": {
-      "types": "./dist/plugin-sdk/discord.d.ts",
-      "default": "./dist/plugin-sdk/discord.js"
-    },
-    "./plugin-sdk/channel-reply-pipeline": {
-      "types": "./dist/plugin-sdk/channel-reply-pipeline.d.ts",
-      "default": "./dist/plugin-sdk/channel-reply-pipeline.js"
-    },
-    "./plugin-sdk/channel-message": {
-      "types": "./dist/plugin-sdk/channel-message.d.ts",
-      "default": "./dist/plugin-sdk/channel-message.js"
-    },
-    "./plugin-sdk/command-auth": {
-      "types": "./dist/plugin-sdk/command-auth.d.ts",
-      "default": "./dist/plugin-sdk/command-auth.js"
-    }
+    "./cli-entry": "./openclaw.mjs"
   },
   "scripts": {
     "android:assemble": "node --import ./scripts/tsx.mjs scripts/run-android-gradle.mts :app:assemblePlayDebug :wear:assembleDebug :wear-shared:assembleDebug",
