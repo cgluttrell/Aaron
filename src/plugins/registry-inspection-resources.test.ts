@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { readFile } from "node:fs/promises";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { AsyncWorkScope } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { acquirePluginRegistryForInspection, loadPluginRegistryHandle } from "./loader.js";
@@ -387,9 +387,18 @@ describe("owned plugin inspections", () => {
         ]);
         await failed.state.disposed.promise;
         expect(failed.connection().database.isOpen).toBe(false);
-        expect(successful.connection().database.prepare("SELECT 42 AS value").get()).toEqual({
-          value: 42,
-        });
+        const invocations = getPluginRegistryInspectionResources(
+          inspection.registry,
+        )!.createInvocationScope(inspection.registry);
+        try {
+          expect(
+            invocations.run(() =>
+              successful.connection().database.prepare("SELECT 42 AS value").get(),
+            ),
+          ).toEqual({ value: 42 });
+        } finally {
+          invocations.release();
+        }
         await expect(inspection.release()).rejects.toMatchObject({
           errors: [
             expect.objectContaining({
@@ -776,7 +785,8 @@ describe("owned plugin inspections", () => {
         cfg: fixture.config,
         doctorFixCommand: "openclaw doctor --fix",
       });
-      await vi.waitFor(() => expect(fixture.state.connections).toHaveLength(1));
+      await Promise.race([fixture.state.disposalStarted.promise, warnings]);
+      expect(fixture.state.connections).toHaveLength(1);
       let completed = false;
       void warnings.then(() => {
         completed = true;

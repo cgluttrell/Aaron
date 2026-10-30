@@ -60,6 +60,10 @@ export function dispatchUiCommandToRequester({
         ? { ...commandParams.command, sessionKey: canonicalSessionKey }
         : commandParams.command,
   };
+  const requiredCommandCapability =
+    normalizedParams.command.kind === "agent-github-settings"
+      ? GATEWAY_CLIENT_CAPS.UI_AGENT_GITHUB_SETTINGS
+      : undefined;
   const target = participant
     ? participant.gatewayUiCommandTarget
     : runtimeIdentity
@@ -76,7 +80,9 @@ export function dispatchUiCommandToRequester({
         !recipient.connectionSignal?.aborted &&
         (!target.profileId || recipient.authenticatedUserProfile?.profileId === target.profileId) &&
         recipient.connect.client.id === GATEWAY_CLIENT_IDS.CONTROL_UI &&
-        hasGatewayClientCap(recipient.connect.caps, GATEWAY_CLIENT_CAPS.UI_COMMANDS),
+        hasGatewayClientCap(recipient.connect.caps, GATEWAY_CLIENT_CAPS.UI_COMMANDS) &&
+        (!requiredCommandCapability ||
+          hasGatewayClientCap(recipient.connect.caps, requiredCommandCapability)),
     ) ?? new Set<string>();
   if (connIds.size === 0) {
     return {
@@ -96,8 +102,10 @@ export function dispatchUiCommandToRequester({
 }
 
 export const uiCommandHandlers: GatewayRequestHandlers = {
-  "ui.command": defineValidatedGatewayMethod("ui.command", validateUiCommandParams, (options) => {
-    try {
+  "ui.command": defineValidatedGatewayMethod(
+    "ui.command",
+    validateUiCommandParams,
+    (options) => {
       assertActiveAgentRuntimeAuthority(options.client, options.context);
       const result = dispatchUiCommandToRequester(options);
       if (result.ok) {
@@ -105,15 +113,11 @@ export const uiCommandHandlers: GatewayRequestHandlers = {
       } else {
         options.respond(false, undefined, result.error);
       }
-    } catch (error) {
-      options.respond(
-        false,
-        undefined,
-        errorShape(
-          ErrorCodes.INVALID_REQUEST,
-          error instanceof Error ? error.message : String(error),
-        ),
-      );
-    }
-  }),
+    },
+    (error) =>
+      errorShape(
+        ErrorCodes.INVALID_REQUEST,
+        error instanceof Error ? error.message : String(error),
+      ),
+  ),
 };

@@ -59,7 +59,7 @@ media captions are sent as text/card chunks before the attachment.
 
 ### Streaming
 
-Feishu/Lark supports streaming replies via interactive cards (Card Kit streaming API). When enabled, the bot updates the card in real time as it generates text.
+Feishu/Lark supports streaming replies via interactive cards (Card Kit streaming API). When enabled, the bot updates the card in real time as it generates text. Text written before a tool call remains in the same card when the assistant continues afterward.
 
 ```json5
 {
@@ -156,7 +156,6 @@ Feishu/Lark supports ACP for DMs and group thread messages. Feishu/Lark ACP is t
   agents: {
     entries: {
       codex: {
-        default: true,
         runtime: {
           type: "acp",
           acp: {
@@ -210,8 +209,13 @@ Use `bindings` to route Feishu/Lark DMs or groups to different agents.
 ```json5
 {
   agents: {
+    ownership: "explicit",
+    defaults: {
+      heartbeat: { agentId: "main" },
+      systemAgent: { agentId: "main" },
+    },
     entries: {
-      main: { default: true },
+      main: { workspace: "~/.openclaw/workspace" },
       "agent-a": { workspace: "/home/user/agent-a" },
       "agent-b": { workspace: "/home/user/agent-b" },
     },
@@ -231,7 +235,9 @@ Use `bindings` to route Feishu/Lark DMs or groups to different agents.
         peer: { kind: "group", id: "oc_zzz" },
       },
     },
+    { agentId: "main", match: { channel: "feishu", accountId: "*" } },
   ],
+  talk: { agentId: "main" },
 }
 ```
 

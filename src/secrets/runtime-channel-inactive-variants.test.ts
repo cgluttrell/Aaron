@@ -14,6 +14,121 @@ function envRef(id: string) {
 }
 
 describe("secrets runtime snapshot channel inactive variants", () => {
+  it.each([
+    {
+      mode: "socket",
+      credentials: { botToken: envRef("SLACK_BOT"), appToken: envRef("SLACK_APP") },
+      resolved: { botToken: "xoxb-default", appToken: "xapp-default" },
+    },
+    {
+      mode: "http",
+      credentials: { botToken: envRef("SLACK_BOT"), signingSecret: envRef("SLACK_SIGNING") },
+      resolved: { botToken: "xoxb-default", signingSecret: "signing-default" },
+    },
+    {
+      mode: "relay",
+      credentials: {
+        botToken: envRef("SLACK_BOT"),
+        relay: {
+          url: "https://relay.example.invalid",
+          gatewayId: "fixture",
+          authToken: envRef("SLACK_RELAY"),
+        },
+      },
+      resolved: { botToken: "xoxb-default", relay: { authToken: "relay-default" } },
+    },
+    {
+      mode: "socket",
+      credentials: {
+        postAs: "user",
+        userToken: envRef("SLACK_USER"),
+        appToken: envRef("SLACK_APP"),
+      },
+      resolved: { userToken: "xoxp-default", appToken: "xapp-default" },
+    },
+  ])(
+    "resolves the implicit Slack default's credentials in $mode mode",
+    async ({ mode, credentials, resolved }) => {
+      const snapshot = await prepareSecretsRuntimeSnapshot({
+        config: asConfig({
+          channels: {
+            slack: {
+              mode,
+              ...credentials,
+              accounts: {
+                work: {
+                  mode: "socket",
+                  botToken: "xoxb-work",
+                  appToken: "xapp-work",
+                  userToken: "xoxp-work",
+                  signingSecret: "signing-work",
+                  relay: { authToken: "relay-work" },
+                },
+              },
+            },
+          },
+        }),
+        env: {
+          SLACK_BOT: "xoxb-default",
+          SLACK_APP: "xapp-default",
+          SLACK_USER: "xoxp-default",
+          SLACK_SIGNING: "signing-default",
+          SLACK_RELAY: "relay-default",
+        },
+        agentDirs: ["/tmp/openclaw-agent-main"],
+        loadAuthStore: () => loadAuthStoreWithProfiles({}),
+      });
+
+      expect(snapshot.config.channels?.slack).toMatchObject(resolved);
+      expect(snapshot.warnings).toEqual([]);
+    },
+  );
+
+  it.each([
+    { name: "explicit default", enabled: true, appToken: "xapp-default", accountId: "default" },
+    {
+      name: "case-insensitive default",
+      enabled: true,
+      appToken: "xapp-default",
+      accountId: "Default",
+    },
+    { name: "normalized default", enabled: true, appToken: "xapp-default", accountId: " default " },
+    { name: "disabled channel", enabled: false, appToken: "xapp-default", accountId: "work" },
+    {
+      name: "incomplete socket credentials",
+      enabled: true,
+      appToken: undefined,
+      accountId: "work",
+    },
+  ])(
+    "keeps unused Slack root refs inactive with $name",
+    async ({ enabled, appToken, accountId }) => {
+      const snapshot = await prepareSecretsRuntimeSnapshot({
+        config: asConfig({
+          channels: {
+            slack: {
+              enabled,
+              botToken: envRef("MISSING_SLACK_BOT"),
+              appToken,
+              accounts: { [accountId]: { botToken: "xoxb-work", appToken: "xapp-work" } },
+            },
+          },
+        }),
+        env: {},
+        agentDirs: ["/tmp/openclaw-agent-main"],
+        loadAuthStore: () => loadAuthStoreWithProfiles({}),
+      });
+
+      expect(snapshot.config.channels?.slack?.botToken).toEqual(envRef("MISSING_SLACK_BOT"));
+      expect(snapshot.warnings).toContainEqual(
+        expect.objectContaining({
+          code: "SECRETS_REF_IGNORED_INACTIVE_SURFACE",
+          path: "channels.slack.botToken",
+        }),
+      );
+    },
+  );
+
   it("treats IRC account nickserv password refs as inactive when nickserv is disabled", async () => {
     const snapshot = await prepareSecretsRuntimeSnapshot({
       config: asConfig({
@@ -129,23 +244,112 @@ describe("secrets runtime snapshot channel inactive variants", () => {
     expect(warningPaths).toContain("channels.slack.accounts.work.appToken");
   });
 
-  it("treats top-level Google Chat serviceAccount as inactive when enabled accounts override it", async () => {
+  it.each([
+    {
+      channel: "googlechat",
+      root: { serviceAccount: envRef("GOOGLECHAT_DEFAULT") },
+      work: { serviceAccount: "work-service-account-json" },
+      resolved: { serviceAccount: "default-service-account-json" },
+    },
+    {
+      channel: "mattermost",
+      root: {
+        baseUrl: "https://mattermost.example.invalid",
+        botToken: envRef("MATTERMOST_DEFAULT"),
+      },
+      work: { baseUrl: "https://work.example.invalid", botToken: "work-bot-token" },
+      resolved: { botToken: "default-bot-token" },
+    },
+    {
+      channel: "x",
+      root: {
+        clientId: "fixture-client",
+        clientSecret: envRef("X_CLIENT_SECRET"),
+        refreshToken: envRef("X_REFRESH_TOKEN"),
+      },
+      work: {
+        clientSecret: "work-secret",
+        refreshToken: "work-refresh",
+        bearerToken: "work-bearer",
+      },
+      resolved: { clientSecret: "default-client-secret", refreshToken: "default-refresh-token" },
+    },
+  ])(
+    "resolves the implicit $channel default's credentials when named accounts override them",
+    async ({ channel, root, work, resolved }) => {
+      const snapshot = await prepareSecretsRuntimeSnapshot({
+        config: asConfig({
+          channels: { [channel]: { ...root, accounts: { work: { enabled: true, ...work } } } },
+        }),
+        env: {
+          GOOGLECHAT_DEFAULT: "default-service-account-json",
+          MATTERMOST_DEFAULT: "default-bot-token",
+          X_CLIENT_SECRET: "default-client-secret",
+          X_REFRESH_TOKEN: "default-refresh-token",
+        },
+        agentDirs: ["/tmp/openclaw-agent-main"],
+        loadAuthStore: () => loadAuthStoreWithProfiles({}),
+      });
+
+      expect((snapshot.config.channels as Record<string, unknown>)[channel]).toMatchObject(
+        resolved,
+      );
+      expect(snapshot.warnings).toEqual([]);
+    },
+  );
+
+  it.each([
+    {
+      name: "an explicit default override",
+      accountId: "default",
+      baseUrl: "https://mattermost.example.invalid",
+    },
+    { name: "no root base URL", accountId: "work", baseUrl: undefined },
+  ])("keeps unused Mattermost root refs inactive with $name", async ({ accountId, baseUrl }) => {
+    const botToken = envRef("MISSING_MATTERMOST_DEFAULT");
+    const snapshot = await prepareSecretsRuntimeSnapshot({
+      config: asConfig({
+        channels: {
+          mattermost: {
+            baseUrl,
+            botToken,
+            accounts: {
+              [accountId]: { baseUrl: "https://work.example.invalid", botToken: "work-bot-token" },
+            },
+          },
+        },
+      }),
+      env: {},
+      agentDirs: ["/tmp/openclaw-agent-main"],
+      loadAuthStore: () => loadAuthStoreWithProfiles({}),
+    });
+
+    expect(snapshot.config.channels?.mattermost?.botToken).toEqual(botToken);
+    expect(snapshot.warnings).toContainEqual(
+      expect.objectContaining({
+        code: "SECRETS_REF_IGNORED_INACTIVE_SURFACE",
+        path: "channels.mattermost.botToken",
+      }),
+    );
+  });
+
+  it("keeps top-level Google Chat serviceAccount inactive when an explicit default overrides it", async () => {
     const snapshot = await prepareSecretsRuntimeSnapshot({
       config: asConfig({
         channels: {
           googlechat: {
             serviceAccount: envRef("MISSING_GOOGLECHAT_BASE_SERVICE_ACCOUNT"),
             accounts: {
-              work: {
+              default: {
                 enabled: true,
-                serviceAccount: envRef("GOOGLECHAT_WORK_SERVICE_ACCOUNT"),
+                serviceAccount: envRef("GOOGLECHAT_DEFAULT_SERVICE_ACCOUNT"),
               },
             },
           },
         },
       }),
       env: {
-        GOOGLECHAT_WORK_SERVICE_ACCOUNT: "work-service-account-json",
+        GOOGLECHAT_DEFAULT_SERVICE_ACCOUNT: "default-service-account-json",
       },
       agentDirs: ["/tmp/openclaw-agent-main"],
       loadAuthStore: () => loadAuthStoreWithProfiles({}),
@@ -154,8 +358,8 @@ describe("secrets runtime snapshot channel inactive variants", () => {
     expect(snapshot.config.channels?.googlechat?.serviceAccount).toEqual(
       envRef("MISSING_GOOGLECHAT_BASE_SERVICE_ACCOUNT"),
     );
-    expect(snapshot.config.channels?.googlechat?.accounts?.work?.serviceAccount).toBe(
-      "work-service-account-json",
+    expect(snapshot.config.channels?.googlechat?.accounts?.default?.serviceAccount).toBe(
+      "default-service-account-json",
     );
     expect(snapshot.warnings.map((warning) => warning.path)).toContain(
       "channels.googlechat.serviceAccount",

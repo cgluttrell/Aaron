@@ -45,6 +45,7 @@ import type {
   ProviderReplayPolicy,
   ProviderReplayPolicyContext,
   ProviderSanitizeReplayHistoryContext,
+  ProviderSanitizeReplayHistoryContextV2,
   ProviderValidateReplayTurnsContext,
   ProviderNormalizeToolSchemasContext,
   ProviderToolSchemaDiagnostic,
@@ -237,6 +238,7 @@ export type ProviderPlugin = {
    */
   buildReplayPolicy?: (ctx: ProviderReplayPolicyContext) => ProviderReplayPolicy | null | undefined;
   /**
+   * @deprecated Use sanitizeReplayHistoryAsync; removed at the next Plugin SDK major.
    * Provider-owned replay-history sanitization.
    *
    * Runs after OpenClaw performs generic transcript cleanup. Use this for
@@ -245,6 +247,10 @@ export type ProviderPlugin = {
    */
   sanitizeReplayHistory?: (
     ctx: ProviderSanitizeReplayHistoryContext,
+  ) => Promise<AgentMessage[] | null | undefined> | AgentMessage[] | null | undefined;
+  /** Replay hook with worker-backed persistence; preferred over the legacy hook when both exist. */
+  sanitizeReplayHistoryAsync?: (
+    ctx: ProviderSanitizeReplayHistoryContextV2,
   ) => Promise<AgentMessage[] | null | undefined> | AgentMessage[] | null | undefined;
   /**
    * Provider-owned final replay-turn validation.
@@ -486,6 +492,8 @@ export type ProviderPlugin = {
   ) => ProviderThinkingProfile | null | undefined;
   /** Whether Fast can affect this selected request; undefined retains existing unknown behavior. */
   resolveFastModeSupport?: (ctx: ProviderFastModePolicyContext) => boolean | undefined;
+  /** Known model/route service tiers; undefined retains account discovery and route defaults. */
+  resolveServiceTiers?: (ctx: ProviderFastModePolicyContext) => readonly string[] | undefined;
   /**
    * Provider-owned system-prompt contribution.
    *
@@ -591,9 +599,10 @@ export type ProviderPlugin = {
    * OpenClaw calls this before falling back to the shared `shared model runtime` OAuth
    * refreshers. Use it when the provider has a custom refresh endpoint, or when
    * the provider needs custom refresh-failure behavior that should stay out of
-   * core auth-profile code.
+   * core auth-profile code. The optional second argument is the caller's
+   * effective config; prefer it over reading global runtime config.
    */
-  refreshOAuth?: (cred: OAuthCredential) => Promise<OAuthCredential>;
+  refreshOAuth?: (cred: OAuthCredential, config?: OpenClawConfig) => Promise<OAuthCredential>;
   /**
    * Provider-owned auth-doctor hint.
    *

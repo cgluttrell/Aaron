@@ -15,7 +15,10 @@ import {
 import { ensureMemoryRecallMetadataSchema } from "./memory-schema-recall.js";
 import {
   assertSqliteSchemaContains,
+  canReuseSqliteSchemaInTransaction,
+  createSqliteTableContractReader,
   runSqliteImmediateTransactionSync,
+  type SqliteTableContractReader,
 } from "./openclaw-runtime-sqlite.js";
 
 // Frozen pre-binary contract, including the older non-STRICT spelling below.
@@ -66,7 +69,12 @@ const INLINE_RECALL_COLUMNS = [
 
 type StorageShape = "absent" | "legacy" | "binary";
 
-function storageShape(db: DatabaseSync, table: string, chunks: boolean): StorageShape {
+function storageShape(
+  db: DatabaseSync,
+  table: string,
+  chunks: boolean,
+  readTable?: SqliteTableContractReader,
+): StorageShape {
   const tableColumns = columns(db, table);
   if (tableColumns.size === 0) {
     return "absent";
@@ -117,20 +125,26 @@ function storageShape(db: DatabaseSync, table: string, chunks: boolean): Storage
   schema += indexes
     .map((index) => `CREATE INDEX ${index.name} ON ${table}(${index.columns});`)
     .join("\n");
-  assertSqliteSchemaContains(db, `memory storage ${table}`, schema, {
-    // Current tables are not rebuilt; preserve the agent owner's compatible
-    // nullable additions while refusing every extra column on conversion input.
-    allowCompatibleAdditiveColumns: shape === "binary",
-    allowedMissingIndexes: indexes.map((index) => index.name),
-    optionalCanonicalTriggerGroups: chunks
-      ? [
-          { tableName: table, triggers: CHUNK_REVISION_TRIGGERS },
-          ...(shape === "binary"
-            ? [{ tableName: table, triggers: MEMORY_CHUNK_FTS_TRIGGER_DEFINITIONS }]
-            : []),
-        ]
-      : [],
-  });
+  assertSqliteSchemaContains(
+    db,
+    `memory storage ${table}`,
+    schema,
+    {
+      // Current tables are not rebuilt; preserve the agent owner's compatible
+      // nullable additions while refusing every extra column on conversion input.
+      allowCompatibleAdditiveColumns: shape === "binary",
+      allowedMissingIndexes: indexes.map((index) => index.name),
+      optionalCanonicalTriggerGroups: chunks
+        ? [
+            { tableName: table, triggers: CHUNK_REVISION_TRIGGERS },
+            ...(shape === "binary"
+              ? [{ tableName: table, triggers: MEMORY_CHUNK_FTS_TRIGGER_DEFINITIONS }]
+              : []),
+          ]
+        : [],
+    },
+    readTable,
+  );
   if (shape === "legacy") {
     assertKnownRebuildDependents(
       db,
@@ -191,21 +205,69 @@ function assertKnownRebuildDependents(
 }
 
 function storageShapes(db: DatabaseSync, cacheTable: string) {
+  // Both checks are read-only; a later migration stage takes a new catalog snapshot.
+  const readTable = canReuseSqliteSchemaInTransaction(db)
+    ? createSqliteTableContractReader(db)
+    : undefined;
   return {
-    chunks: storageShape(db, "memory_index_chunks", true),
-    cache: storageShape(db, cacheTable, false),
+    chunks: storageShape(db, "memory_index_chunks", true, readTable),
+    cache: storageShape(db, cacheTable, false, readTable),
   };
 }
 
 function assertBinaryEmbeddings(db: DatabaseSync, table: string): void {
-  if (
-    db
-      .prepare(
-        `SELECT 1 FROM ${table} WHERE openclaw_memory_embedding_blob_valid(embedding) = 0 LIMIT 1`,
-      )
-      .get()
-  ) {
-    throw new Error(`Memory storage migration found invalid binary embeddings in ${table}`);
+  const rows = db.prepare(
+    `SELECT openclaw_memory_embedding_blob_valid(embedding) AS valid FROM ${table}`,
+  );
+  for (const row of rows.iterate()) {
+    if (row.valid === 0) {
+      throw new Error(`Memory storage migration found invalid binary embeddings in ${table}`);
+    }
+  }
+}
+
+function copyMemoryStorageRows(db: DatabaseSync, table: string, sql: string): void {
+  const rows = db.prepare(`SELECT rowid AS storage_rowid FROM ${table}`);
+  rows.setReadBigInts(true);
+  const copy = db.prepare(sql);
+  copy.setReadBigInts(true);
+  // node:sqlite retains UDF argument handles until its native call returns.
+  // Copy one row per call, keeping other persisted fields inside SQLite.
+  for (const row of rows.iterate()) {
+    if (typeof row.storage_rowid !== "bigint") {
+      throw new Error("Invalid memory storage identity during migration");
+    }
+    copy.run(row.storage_rowid);
+  }
+}
+
+function markInvalidMemoryEmbeddings(db: DatabaseSync, sql: string): void {
+  const rows = db.prepare(sql);
+  rows.setReadBigInts(true);
+  const dirtySource = db.prepare(`
+    UPDATE main.memory_index_sources SET hash = ''
+    WHERE (path, source) IN (
+      SELECT path, source FROM main.memory_index_chunks WHERE rowid = ?
+    )`);
+  dirtySource.setReadBigInts(true);
+  let invalid = false;
+  // Project validity instead of filtering on the UDF: each native step must
+  // return even when every embedding is valid.
+  for (const row of rows.iterate()) {
+    if (row.valid === 0) {
+      if (typeof row.storage_rowid !== "bigint") {
+        throw new Error("Invalid memory storage identity during migration");
+      }
+      dirtySource.run(row.storage_rowid);
+      invalid = true;
+    }
+  }
+  if (invalid) {
+    db.exec(`
+      INSERT INTO main.memory_index_meta (key, value)
+      VALUES ('memory_vector_rebuild_v1', '1')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+    `);
   }
 }
 
@@ -321,24 +383,31 @@ function existingStorageObjects(db: DatabaseSync, table: string): string[] {
     .map((row) => String(row.sql));
 }
 
+function replaceStorageTable(db: DatabaseSync, table: string, objects: string[]): void {
+  db.exec(`
+    DROP TABLE ${table};
+    ALTER TABLE ${table}_storage_migration RENAME TO ${table};
+  `);
+  for (const sql of objects) {
+    db.exec(sql);
+  }
+}
+
 /** Record regeneration debt after a legacy import has verified its canonical copy. */
 export function markInvalidImportedMemoryEmbeddings(db: DatabaseSync, schema: string): void {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(schema)) {
     throw new Error("Invalid legacy memory schema identifier");
   }
-  const invalidChunks = `
-    SELECT chunk.path, chunk.source
+  markInvalidMemoryEmbeddings(
+    db,
+    `
+    SELECT chunk.rowid AS storage_rowid,
+           openclaw_memory_embedding_json_valid(legacy.embedding) AS valid
     FROM ${schema}.chunks AS legacy
     JOIN main.memory_index_chunks AS chunk ON chunk.id = legacy.id
-    WHERE openclaw_memory_embedding_json_valid(legacy.embedding) = 0
-      AND length(chunk.embedding) = 0`;
-  db.exec(`
-    UPDATE main.memory_index_sources SET hash = ''
-    WHERE (path, source) IN (${invalidChunks});
-    INSERT INTO main.memory_index_meta (key, value)
-    SELECT 'memory_vector_rebuild_v1', '1' WHERE EXISTS (${invalidChunks})
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-  `);
+    WHERE length(chunk.embedding) = 0
+  `,
+  );
 }
 
 function columns(db: DatabaseSync, table: string): Map<string, string> {
@@ -400,20 +469,14 @@ export function migrateMemoryIndexStorage(
         ensureMemoryRecallMetadataSchema(db);
         // Keep text and provenance searchable, but never invent a vector from
         // malformed legacy JSON. Source sync owns regeneration of these rows.
-        db.exec(`
-          UPDATE memory_index_sources SET hash = ''
-          WHERE (path, source) IN (
-            SELECT path, source FROM memory_index_chunks
-            WHERE openclaw_memory_embedding_json_valid(embedding) = 0
-          );
-          INSERT INTO memory_index_meta (key, value)
-          SELECT 'memory_vector_rebuild_v1', '1'
-          WHERE EXISTS (
-            SELECT 1 FROM memory_index_chunks
-            WHERE openclaw_memory_embedding_json_valid(embedding) = 0
-          )
-          ON CONFLICT(key) DO UPDATE SET value = excluded.value;
-        `);
+        markInvalidMemoryEmbeddings(
+          db,
+          `
+          SELECT rowid AS storage_rowid,
+                 openclaw_memory_embedding_json_valid(embedding) AS valid
+          FROM memory_index_chunks
+        `,
+        );
         dropMemoryChunkFtsTriggers(db);
         db.exec(
           MEMORY_INDEX_CHUNKS_SCHEMA_SQL.replace(
@@ -421,19 +484,19 @@ export function migrateMemoryIndexStorage(
             "CREATE TABLE",
           ).replace("memory_index_chunks", "memory_index_chunks_storage_migration"),
         );
-        db.exec(`
+        copyMemoryStorageRows(
+          db,
+          "memory_index_chunks",
+          `
           INSERT INTO memory_index_chunks_storage_migration (
             chunk_rowid, id, path, source, start_line, end_line, hash, model, text, embedding, updated_at
           )
           SELECT rowid, id, path, source, start_line, end_line, hash, model, text,
                  openclaw_memory_embedding_from_json(embedding), updated_at
-          FROM memory_index_chunks;
-          DROP TABLE memory_index_chunks;
-          ALTER TABLE memory_index_chunks_storage_migration RENAME TO memory_index_chunks;
-        `);
-        for (const sql of chunkObjects) {
-          db.exec(sql);
-        }
+          FROM memory_index_chunks WHERE rowid = ?
+        `,
+        );
+        replaceStorageTable(db, "memory_index_chunks", chunkObjects);
         if (
           db
             .prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?")
@@ -452,13 +515,7 @@ export function migrateMemoryIndexStorage(
           ),
         );
         cacheWarning = copyLegacyMemoryEmbeddingCache(db, cacheTable, replacement, renewAuthority);
-        db.exec(`
-          DROP TABLE ${cacheTable};
-          ALTER TABLE ${replacement} RENAME TO ${cacheTable};
-        `);
-        for (const sql of cacheObjects) {
-          db.exec(sql);
-        }
+        replaceStorageTable(db, cacheTable, cacheObjects);
       }
       if (migrateChunks) {
         for (const table of [

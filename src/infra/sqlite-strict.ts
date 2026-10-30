@@ -62,10 +62,15 @@ const DEFAULT_STRICT_MIGRATION_BUSY_TIMEOUT_MS = 5_000;
 const STRICT_MIGRATION_TABLE_PREFIX = "__openclaw_strict_migration_";
 const SQLITE_ROWID_ALIASES = ["_rowid_", "rowid", "oid"] as const;
 
-function readMainTableList(db: DatabaseSync): Array<TableListRow & { name: string }> {
+export function readMainTableList(
+  db: DatabaseSync,
+  options: { includeInternal?: boolean } = {},
+): Array<TableListRow & { name: string }> {
   return (db.prepare("PRAGMA table_list").all() as TableListRow[]).filter(
     (row): row is TableListRow & { name: string } =>
-      row.schema === "main" && typeof row.name === "string" && !row.name.startsWith("sqlite_"),
+      row.schema === "main" &&
+      typeof row.name === "string" &&
+      (options.includeInternal === true || !row.name.startsWith("sqlite_")),
   );
 }
 
@@ -298,14 +303,11 @@ export function migrateSqliteSchemaToStrictInTransaction(
   const preservedObjects = readPreservedSchemaObjects(db, names);
   // SQLite reparses every trigger and view during ALTER TABLE. Temporarily
   // remove them so a referenced table can be absent between DROP and RENAME.
-  for (const object of preservedObjects) {
-    if (object.type === "trigger") {
-      db.exec(`DROP TRIGGER ${quoteSqliteIdentifier(object.name)};`);
-    }
-  }
-  for (const object of preservedObjects) {
-    if (object.type === "view") {
-      db.exec(`DROP VIEW ${quoteSqliteIdentifier(object.name)};`);
+  for (const type of ["trigger", "view"] as const) {
+    for (const object of preservedObjects) {
+      if (object.type === type) {
+        db.exec(`DROP ${type.toUpperCase()} ${quoteSqliteIdentifier(object.name)};`);
+      }
     }
   }
   for (const [index, table] of tablesToMigrate.entries()) {

@@ -25,7 +25,10 @@ import { log as embeddedAgentLog } from "../src/agents/embedded-agent-runner/log
 import { runAgentHarnessBeforeMessageWriteHook } from "../src/agents/harness/hook-helpers.js";
 import { createAgentHarnessHostCapabilities } from "../src/agents/harness/host-capability.js";
 import { listRegisteredAgentHarnesses } from "../src/agents/harness/registry.js";
-import { withGatewayToolCallerIdentity } from "../src/agents/tools/gateway-caller-context.js";
+import {
+  createAdmittedGatewayToolCallerIdentity,
+  withGatewayToolCallerIdentity,
+} from "../src/agents/tools/gateway-caller-context.js";
 import {
   listSessionEntriesCore,
   loadSessionEntry,
@@ -75,7 +78,7 @@ import {
   listSessionStateEventsSince,
   registerSessionStateWatch,
 } from "../src/sessions/session-state-events.js";
-import { readSessionUpstreamLink } from "../src/sessions/session-upstream-links.js";
+import { readSessionUpstreamLinkInDatabase } from "../src/sessions/session-upstream-links.kernel.js";
 import { runSessionUpstreamMonitorTick } from "../src/sessions/session-upstream-monitor.test-support.js";
 import {
   buildRunUserTurnIdempotencyKey,
@@ -187,7 +190,7 @@ async function withFixture(
       agents: {
         ownership: "explicit",
         defaults: { model: { primary: "openai/gpt-5.5" } },
-        list: [{ id: "main", agentDir: state.agentDir(), workspace: state.workspaceDir }],
+        entries: { main: { agentDir: state.agentDir(), workspace: state.workspaceDir } },
       },
       tools: { web: { search: { enabled: false } } },
       ...(options.mcpResolver
@@ -265,21 +268,21 @@ async function withFixture(
             ownerEpoch: 7,
           });
           let placement = await placements.startDispatch(target);
-          placement = placements.transition({
+          placement = await placements.transition({
             sessionId,
             from: "requested",
             to: "provisioning",
             expectedGeneration: placement.generation,
             patch: { environmentId: "policy-worker" },
           });
-          placement = placements.transition({
+          placement = await placements.transition({
             sessionId,
             from: "provisioning",
             to: "syncing",
             expectedGeneration: placement.generation,
             patch: { workerBundleHash: "a".repeat(64) },
           });
-          placement = placements.transition({
+          placement = await placements.transition({
             sessionId,
             from: "syncing",
             to: "starting",
@@ -289,7 +292,7 @@ async function withFixture(
               remoteWorkspaceDir: "/workspace/policy",
             },
           });
-          placements.transition({
+          await placements.transition({
             sessionId,
             from: "starting",
             to: "active",
@@ -304,7 +307,9 @@ async function withFixture(
           });
         }
         const capturedWorkerClaim = workerClaim;
-        const host = await withGatewayToolCallerIdentity(
+        // Production dispatch (withPreparedEmbeddedGatewayTools) keeps the admitted
+        // caller ambient for the whole attempt; plugin tools take invocation authority from it.
+        const callerIdentity =
           capturedWorkerClaim && placements
             ? {
                 agentId: "main",
@@ -313,30 +318,36 @@ async function withFixture(
                 workerTurnClaim: capturedWorkerClaim,
                 receiptAuthority: () => placements.validateTurnClaim(capturedWorkerClaim),
               }
-            : undefined,
-          () =>
-            createAgentHarnessHostCapabilities({
-              pluginId: "codex",
-              attempt: {
-                agentId: "main",
-                sessionId,
-                sessionKey,
-                runId,
-                config,
-                cwd: state.workspaceDir,
-                workspaceDir: state.workspaceDir,
+            : createAdmittedGatewayToolCallerIdentity({
                 admittedRunContext,
-                abortSignal: abortController.signal,
-                userTurnTranscriptRecorder: recorder,
-                sessionTarget: target,
-                senderIsOwner,
-                senderId,
-                githubPublicationAvailable: false,
-              },
-            }),
+                agentId: "main",
+                sessionKey,
+              });
+        const host = await withGatewayToolCallerIdentity(callerIdentity, () =>
+          createAgentHarnessHostCapabilities({
+            pluginId: "codex",
+            attempt: {
+              agentId: "main",
+              sessionId,
+              sessionKey,
+              runId,
+              config,
+              cwd: state.workspaceDir,
+              workspaceDir: state.workspaceDir,
+              admittedRunContext,
+              abortSignal: abortController.signal,
+              userTurnTranscriptRecorder: recorder,
+              sessionTarget: target,
+              senderIsOwner,
+              senderId,
+              githubPublicationAvailable: false,
+            },
+          }),
         );
         return {
           ...host,
+          runWithScope: (run) =>
+            withGatewayToolCallerIdentity(callerIdentity, () => host.runWithScope(run)),
           abortController,
           invalidate: async (reason) => {
             if (reason === "claim") {
@@ -1177,13 +1188,26 @@ describe("canonical descendant lifecycle through real owners", () => {
       );
       const child = expectDefined(fixture.native.threads.get(binding.threadId), "native child");
       expect(child.thread.turns).toHaveLength(12);
-      registerSessionStateWatch({ watcherSessionKey: "agent:main:main", targetSessionKey: key });
-      const events = () => listSessionStateEventsSince(key, "main", 0).events;
-      const before = events();
+      await registerSessionStateWatch({
+        watcherSessionKey: "agent:main:main",
+        targetSessionKey: key,
+      });
+      const events = async () => (await listSessionStateEventsSince(key, "main", 0)).events;
+      const before = await events();
       await runSessionUpstreamMonitorTick({ providers: [fixture.catalog] });
-      expect(events()).toEqual(before);
-      const link = expectDefined(readSessionUpstreamLink(key, "main"), "child link");
-      const root = expectDefined(readSessionUpstreamLink(source.sessionKey, "main"), "root link");
+      expect(await events()).toEqual(before);
+      const link = expectDefined(
+        readSessionUpstreamLinkInDatabase(openOpenClawStateDatabase().db, key, "main"),
+        "child link",
+      );
+      const root = expectDefined(
+        readSessionUpstreamLinkInDatabase(
+          openOpenClawStateDatabase().db,
+          source.sessionKey,
+          "main",
+        ),
+        "root link",
+      );
       expect(link).toMatchObject({
         threadId: root.threadId,
         upstreamRef: root.upstreamRef,
@@ -1197,11 +1221,11 @@ describe("canonical descendant lifecycle through real owners", () => {
         });
       });
       await runSessionUpstreamMonitorTick({ providers: [fixture.catalog] });
-      expect(events().slice(before.length)).toEqual([
+      expect((await events()).slice(before.length)).toEqual([
         expect.objectContaining({ kind: "human_direct_message" }),
       ]);
       await runSessionUpstreamMonitorTick({ providers: [fixture.catalog] });
-      expect(events()).toHaveLength(before.length + 1);
+      expect(await events()).toHaveLength(before.length + 1);
     });
   }, 180_000);
 
@@ -1311,8 +1335,14 @@ describe("canonical descendant lifecycle through real owners", () => {
               key.endsWith(`:${firstBinding.threadId}`),
             ),
           ).toBe(false);
-          const link = readSessionUpstreamLink(source.sessionKey, "main");
-          expect(readSessionUpstreamLink(firstKey, "main")).toMatchObject({
+          const link = readSessionUpstreamLinkInDatabase(
+            openOpenClawStateDatabase().db,
+            source.sessionKey,
+            "main",
+          );
+          expect(
+            readSessionUpstreamLinkInDatabase(openOpenClawStateDatabase().db, firstKey, "main"),
+          ).toMatchObject({
             threadId: link?.threadId,
             marker: { turnId: null, userMessageCount: 0 },
           });
@@ -1326,25 +1356,26 @@ describe("canonical descendant lifecycle through real owners", () => {
             ),
           ).toBe(true);
           const inherited = structuredClone(nativeFirst.dynamicTools);
-          const unavailable = async ({
+          const expectOwnerDenied = async ({
             bridge,
           }: Parameters<
             NonNullable<NonNullable<Parameters<typeof fixture.turn>[2]>["inspectTools"]>
           >[0]) => {
             expect(bridge.specs).toEqual(inherited);
-            expect(bridge.availableTools.some((tool) => tool.name === "codex_threads")).toBe(false);
+            expect(bridge.availableTools.some((tool) => tool.name === "codex_threads")).toBe(true);
             const calls = fixture.native.calls.length;
             const result = await bridge.handleToolCall({
               threadId: firstBinding.threadId,
               turnId: "current",
-              callId: "unavailable-owner",
+              callId: "nonowner-denied",
               namespace: null,
               tool: "codex_threads",
               arguments: { action: "list" },
             });
             expect(result.success).toBe(false);
-            expect(result.executionStarted, JSON.stringify(result.contentItems)).toBe(false);
-            expect(JSON.stringify(result.contentItems)).toContain("not available for this turn");
+            // The declared executor rejects nonowners before sending any native request.
+            expect(result.executionStarted, JSON.stringify(result.contentItems)).toBe(true);
+            expect(JSON.stringify(result.contentItems)).toContain("owner-authorized sender");
             expect(fixture.native.calls).toHaveLength(calls);
           };
           await fixture.native.restart();
@@ -1353,7 +1384,7 @@ describe("canonical descendant lifecycle through real owners", () => {
             (
               await fixture.turn(firstKey, "first nonowner turn", {
                 senderIsOwner: false,
-                inspectTools: unavailable,
+                inspectTools: expectOwnerDenied,
               })
             ).threadId,
           ).toBe(firstBinding.threadId);
@@ -1469,7 +1500,7 @@ describe("canonical descendant lifecycle through real owners", () => {
             (
               await fixture.turn(laterKey, "descendant turn", {
                 senderIsOwner: false,
-                inspectTools: unavailable,
+                inspectTools: expectOwnerDenied,
               })
             ).threadId,
           ).toBe(laterBinding.threadId);

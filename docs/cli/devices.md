@@ -64,6 +64,10 @@ Approval behavior:
 
 Reject a pending device pairing request.
 
+A connected waiting Control UI browser shows **Access request declined** and
+stops retrying automatically. It can submit a new request with **Request again**;
+reloading the page can also request again. Rejection does not persist a device ban.
+
 ```bash
 openclaw devices reject <requestId>
 ```
@@ -71,9 +75,11 @@ openclaw devices reject <requestId>
 ### `openclaw devices join-code`
 
 Mint a single-use node onboarding URL with administrator access to the
-Gateway. Paste the printed `npx openclaw connect <url>` command on the machine
-to enroll. This join URL is not a mobile app setup code; for Android/iOS use
-[`openclaw qr`](/cli/qr) instead.
+Gateway. Paste the printed `npx -y openclaw connect <url> --service --session-host`
+command on the machine to enroll it as a background service that can run agent
+sessions. Use only trusted shared infrastructure; for a command-only node,
+omit `--session-host`. This join URL is not a mobile app setup code; for
+Android/iOS use [`openclaw qr`](/cli/qr) instead.
 
 ```bash
 openclaw devices join-code

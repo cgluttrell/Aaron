@@ -3,14 +3,17 @@ import type { WebSocket } from "ws";
 import { createDeferred } from "../../test/helpers/promise.js";
 import { resolveAgentDir } from "../agents/agent-scope.js";
 import { setRuntimeAuthProfileStoreSnapshot } from "../agents/auth-profiles/runtime-snapshots.js";
+import { saveAuthProfileStore } from "../agents/auth-profiles/store-runtime.js";
 import {
   getPreparedModelRuntimeBorrowedSnapshot,
   getPreparedModelRuntimePluginGeneration,
 } from "../agents/prepared-model-runtime-generation-scope.js";
 import {
+  beginPreparedModelRuntimePluginDrain,
   loadPublishedGatewayReplyDispatchRuntime,
   registerPreparedModelRuntimePublicationListener,
 } from "../agents/prepared-model-runtime.js";
+import { createSqliteReadOnlyWorkerScope } from "../infra/sqlite-readonly-worker.js";
 import {
   getActiveGatewayRootWorkCount,
   getActiveGatewayRootWorkHolders,
@@ -99,7 +102,7 @@ function agentCommandCallsFor(runId: string) {
 
 async function prepareAuthDispatchAgents(affectedAgentId: string) {
   testState.agentsConfig = {
-    list: [{ id: "main", default: true }, { id: affectedAgentId }],
+    entries: { main: {}, [affectedAgentId]: {} },
   };
   agentDiscoveryMock.enabled = true;
   agentDiscoveryMock.models = [{ id: "claude-opus-4-6", provider: "anthropic", input: ["text"] }];
@@ -126,6 +129,57 @@ describe("gateway agent auth refresh dispatch", () => {
       expect(outcomes.flat().every((outcome) => outcome.status === "fulfilled")).toBe(true);
     } finally {
       testState.agentsConfig = undefined;
+    }
+  });
+
+  test("keeps queued auth publication readable after startup readers close", async () => {
+    const agentId = "auth-startup";
+    const before = await prepareAuthDispatchAgents(agentId);
+    // A persisted store makes publication read the real SQLite catalog.
+    saveAuthProfileStore({ version: 1, profiles: {} }, before.agentDir);
+    await prepareGatewayReplyRuntimeForTest({ force: true });
+    const readers = createSqliteReadOnlyWorkerScope();
+    const drain = beginPreparedModelRuntimePluginDrain();
+    const settled = createDeferred<{ phase: string; error?: unknown }>();
+    const unregister = registerPreparedModelRuntimePublicationListener((event) => {
+      if (event.phase === "published" || event.phase === "failed") {
+        settled.resolve(event);
+      }
+    });
+    try {
+      readers.run(() =>
+        setRuntimeAuthProfileStoreSnapshot(
+          {
+            version: 1,
+            profiles: {
+              "anthropic:default": {
+                type: "api_key",
+                provider: "anthropic",
+                key: "synthetic-startup-key",
+              },
+            },
+          },
+          before.agentDir,
+        ),
+      );
+      await readers.close();
+      // Recovery ends before the independently queued publication can run.
+      drain.release();
+      expect(await settled.promise).toEqual({ phase: "published" });
+      expect(await rpcReq(gatewaySuite.ws, "models.list", { agentId })).toMatchObject({ ok: true });
+      expect(await rpcReq(gatewaySuite.ws, "sessions.list", {})).toMatchObject({ ok: true });
+      const runId = "idem-agent-auth-startup";
+      const rpc = sendAgentRpc(gatewaySuite.ws, { agentId, runId });
+      await expect(rpc.response).resolves.toMatchObject({
+        ok: true,
+        payload: { status: "accepted" },
+      });
+      await expect(rpc.final).resolves.toMatchObject({ ok: true, payload: { status: "ok" } });
+      expect(agentCommandCallsFor(runId)).toHaveLength(1);
+    } finally {
+      unregister();
+      drain.release();
+      await readers.close();
     }
   });
 
@@ -272,10 +326,20 @@ describe("gateway agent auth refresh dispatch", () => {
     const subsequentRunId = "idem-agent-auth-subsequent";
     const before = await prepareAuthDispatchAgents(affectedAgentId);
     const activeWorkBefore = getActiveGatewayRootWorkCount();
-    const siblingExecution = await observeGatewayRunExecution({
-      method: "agent",
-      runId: siblingRunId,
-    });
+    const runExecution = await observeGatewayRunExecution();
+    const preparedRuntime = await import("../agents/prepared-model-runtime.js");
+    const loadRuntime = preparedRuntime.loadPublishedGatewayReplyDispatchRuntime;
+    const waitersEntered = createDeferred();
+    let waiterCount = 0;
+    const runtimeSpy = vi
+      .spyOn(preparedRuntime, "loadPublishedGatewayReplyDispatchRuntime")
+      .mockImplementation((params) => {
+        const pending = loadRuntime(params);
+        if (params.agentId === affectedAgentId && params.abortSignal && ++waiterCount === 2) {
+          waitersEntered.resolve();
+        }
+        return pending;
+      });
     const publicationGate = createDeferred<{ agentDir: string; wrote: false }>();
     const modelsConfig = await import("../agents/models-config.js");
     const ensureOpenClawModelsJson = modelsConfig.ensureOpenClawModelsJson;
@@ -317,6 +381,15 @@ describe("gateway agent auth refresh dispatch", () => {
         before.agentDir,
       );
 
+      const sibling = sendAgentRpc(gatewaySuite.ws, { agentId: "main", runId: siblingRunId });
+      await expect(sibling.response).resolves.toMatchObject({
+        ok: true,
+        payload: { status: "accepted" },
+      });
+      await expect(sibling.final).resolves.toMatchObject({ ok: true, payload: { status: "ok" } });
+      await runExecution.waitForCompletion(siblingRunId);
+      expect(participantRecorded).toBe(true);
+      expect(agentCommandCallsFor(siblingRunId)).toHaveLength(1);
       const aborted = sendAgentRpc(gatewaySuite.ws, {
         agentId: affectedAgentId,
         runId: abortedRunId,
@@ -325,15 +398,9 @@ describe("gateway agent auth refresh dispatch", () => {
         agentId: affectedAgentId,
         runId: waitingRunId,
       });
-      const sibling = sendAgentRpc(gatewaySuite.ws, { agentId: "main", runId: siblingRunId });
-      await expect(sibling.response).resolves.toMatchObject({
-        ok: true,
-        payload: { status: "accepted" },
-      });
-      await expect(sibling.final).resolves.toMatchObject({ ok: true, payload: { status: "ok" } });
-      await siblingExecution.waitForCompletion();
-      expect(participantRecorded).toBe(true);
-      expect(agentCommandCallsFor(siblingRunId)).toHaveLength(1);
+      await expect(
+        Promise.race([waitersEntered.promise, aborted.response, waiting.response]),
+      ).resolves.toBeUndefined();
       expect(agentCommandCallsFor(abortedRunId)).toHaveLength(0);
       expect(agentCommandCallsFor(waitingRunId)).toHaveLength(0);
       expect(getActiveGatewayRootWorkCount(), getActiveGatewayRootWorkHolders().join(", ")).toBe(
@@ -348,7 +415,6 @@ describe("gateway agent auth refresh dispatch", () => {
         ok: true,
         payload: { aborted: true, runIds: [abortedRunId] },
       });
-      await vi.waitFor(() => expect(getActiveGatewayRootWorkCount()).toBe(activeWorkBefore + 1));
       await expect(aborted.response).resolves.toMatchObject({
         ok: true,
         payload: {
@@ -358,6 +424,10 @@ describe("gateway agent auth refresh dispatch", () => {
           providerStarted: false,
         },
       });
+      await runExecution.waitForCompletion(abortedRunId);
+      expect(getActiveGatewayRootWorkCount(), getActiveGatewayRootWorkHolders().join(", ")).toBe(
+        activeWorkBefore + 1,
+      );
       expect(waiting.hasResponse()).toBe(false);
 
       publicationGate.resolve({ agentDir: before.agentDir, wrote: false });
@@ -396,8 +466,9 @@ describe("gateway agent auth refresh dispatch", () => {
       unregister();
       ensureSpy.mockRestore();
       try {
-        await siblingExecution.restore();
+        await runExecution.restore();
       } finally {
+        runtimeSpy.mockRestore();
         unsubscribeParticipant();
       }
     }

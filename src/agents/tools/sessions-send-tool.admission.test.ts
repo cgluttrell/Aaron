@@ -41,8 +41,9 @@ import "../test-helpers/fast-openclaw-tools-sessions.js";
 import { withGatewayToolCallerIdentity } from "./gateway-caller-context.js";
 import * as inProcessGateway from "./in-process-gateway.js";
 import type { AgentToolGatewayRequestCaller } from "./in-process-gateway.js";
-import * as sessionsSendFollowup from "./sessions-send-followup.js";
+import * as sessionsSendFollowup from "./sessions-send-followup-custody.js";
 import { runSessionsSendA2AFlow } from "./sessions-send-tool.a2a.js";
+import * as sessionsSendDelivery from "./sessions-send-tool.delivery.js";
 import { createSessionsSendTool } from "./sessions-send-tool.js";
 
 vi.mock("./sessions-send-tool.a2a.js", () => ({
@@ -82,7 +83,7 @@ describe("sessions_send dispatch admission", () => {
     setRuntimeConfigSnapshot(config);
     setActivePluginRegistry(createSessionConversationTestRegistry());
     resetGatewayWorkAdmission();
-    vi.mocked(runSessionsSendA2AFlow).mockClear();
+    vi.mocked(runSessionsSendA2AFlow).mockReset();
     registerWatch = vi.spyOn(sessionStateEvents, "registerSessionStateWatch");
     for (const [sessionKey, sessionId] of [
       [requesterSessionKey, "requester-session"],
@@ -177,13 +178,10 @@ describe("sessions_send dispatch admission", () => {
               scopes: owner.connect.scopes ?? [],
             },
             async () => {
-              const keyOnly = sourceKey !== requesterSessionKey;
-              const participants = keyOnly
-                ? createReplyTurnParticipants({
-                    operatorAuthority:
-                      getPluginRuntimeGatewayRequestScope()?.client?.internal?.operatorRunAuthority,
-                  })
-                : undefined;
+              const participants = createReplyTurnParticipants({
+                operatorAuthority:
+                  getPluginRuntimeGatewayRequestScope()?.client?.internal?.operatorRunAuthority,
+              });
               try {
                 return await withGatewayToolCallerIdentity(
                   {
@@ -194,7 +192,7 @@ describe("sessions_send dispatch admission", () => {
                     receiptAuthority: () => true,
                   },
                   () => {
-                    invocationStarted = keyOnly;
+                    invocationStarted = true;
                     return createSessionsSendTool({
                       agentSessionKey: sourceKey,
                       config,
@@ -210,20 +208,18 @@ describe("sessions_send dispatch admission", () => {
                 );
               } finally {
                 returned = true;
-                participants?.close();
+                participants.close();
               }
             },
           ),
       );
-      if (sourceKey !== requesterSessionKey) {
-        await capturing.promise;
-        vi.useFakeTimers();
-        await vi.advanceTimersByTimeAsync(0);
-        vi.useRealTimers();
-        expect(returned).toBe(false);
-        expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
-        allowCapture.resolve();
-      }
+      await capturing.promise;
+      vi.useFakeTimers();
+      await vi.advanceTimersByTimeAsync(0);
+      vi.useRealTimers();
+      expect(returned).toBe(false);
+      expect(runSessionsSendA2AFlow).not.toHaveBeenCalled();
+      allowCapture.resolve();
       const result = await pending;
       expect(result.details).toMatchObject({
         status: "accepted",
@@ -320,6 +316,9 @@ describe("sessions_send dispatch admission", () => {
       const gateway = vi
         .spyOn(inProcessGateway, "callAgentToolGatewayRequest")
         .mockImplementation(callGateway);
+      const mutation = vi
+        .spyOn(sessionsSendDelivery, "callSessionsSendGateway")
+        .mockImplementation(callGateway);
       // This routing fixture supplies a run-scoped Gateway, not a native task
       // receipt. Keep its real A2A/route assertions at that explicit boundary;
       // retained core authority and custody have separate owner/integration proof.
@@ -374,6 +373,7 @@ describe("sessions_send dispatch admission", () => {
       } finally {
         prepareFollowup.mockRestore();
         gateway.mockRestore();
+        mutation.mockRestore();
       }
     },
   );
@@ -427,6 +427,9 @@ describe("sessions_send dispatch admission", () => {
     const gateway = vi
       .spyOn(inProcessGateway, "callAgentToolGatewayRequest")
       .mockImplementation(callGateway);
+    const mutation = vi
+      .spyOn(sessionsSendDelivery, "callSessionsSendGateway")
+      .mockImplementation(callGateway);
     try {
       const tool = createOpenClawTools({
         agentSessionKey: sessionKey,
@@ -479,6 +482,7 @@ describe("sessions_send dispatch admission", () => {
       expect(sendParams).not.toHaveProperty("sessionGeneration");
     } finally {
       gateway.mockRestore();
+      mutation.mockRestore();
     }
   });
 

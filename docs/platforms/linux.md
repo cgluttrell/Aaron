@@ -20,9 +20,9 @@ Gateways. It:
 
 - walks new users through choosing a local Gateway, a discovered remote Gateway,
   a manually entered Gateway URL, or an SSH tunnel
-- installs the OpenClaw CLI and Node in a private managed runtime when local
-  setup needs them, rather than requiring a global CLI install; release builds
-  install the stable channel automatically, while development builds ask for
+- installs the OpenClaw CLI and runs fresh local installations on the bundled
+  OpenClaw Bun fork, without requiring a global CLI install; release builds
+  install their matching stable version, while development builds ask for
   the channel first
 - attaches to a healthy Gateway before attempting service changes
 - delegates install, start, stop, and restart operations to the CLI-managed systemd user service
@@ -62,7 +62,7 @@ endpoint.
 The app prepares the local Chrome native helper at startup and after CLI
 installation. Release builds reuse a matching CLI or install a version-matched
 browser runtime under their own app-data directory. This download does not
-create, probe, refresh, or restart a Gateway service, replace its runtime, or
+create, check, refresh, or restart a Gateway service, replace its runtime, or
 change the selected remote connection. It requires an internet connection.
 
 Choose **Set Up Chrome Extension…** in the tray to retry setup and open the
@@ -79,6 +79,14 @@ runtime installer. See [Chrome extension](/tools/chrome-extension) for approval,
 disconnection, and manual recovery.
 
 ### Desktop compatibility
+
+The Linux companion shares one Bun fork pin with the native macOS app and CI.
+Runtime admission, SQLite safety checks, and the fork's disabled implicit package
+auto-install remain enabled. macOS Tauri test builds keep their existing runtime
+behavior; the native macOS app owns its separate bundled runtime. Windows Tauri
+test builds retain their existing runtime until a signed Windows fork is
+available; an unsigned dry-run is not shippable. See
+[Bun compatibility](/install/bun-compatibility).
 
 Published AMD64 AppImages are built on Ubuntu 22.04 and require glibc 2.35 or
 newer plus a `libstdc++` that provides `GLIBCXX_3.4.30`. Ubuntu 22.04 and
@@ -127,7 +135,10 @@ Changing it requires the separate **Set as Primary** confirmation on a saved
 token-authenticated connection. Other Gateway windows retain their own targets.
 The companion remembers successful explicit selections, returns to Primary when
 that saved connection is removed, and keeps credentials in the operating
-system's credential store. Linux requires an unlocked Secret Service, such as
+system's credential store. Each saved Gateway keeps its own dashboard storage, so
+an approved device pairing survives restarts. Removing the Gateway retires that
+storage: saving it again pairs a new dashboard session, and the old storage is
+deleted at the next launch. Linux requires an unlocked Secret Service, such as
 GNOME Keyring or KWallet's Secret Service support.
 
 An unavailable credential store shows a dismissible notice without blocking the
@@ -140,6 +151,44 @@ after the new dashboard loads successfully.
 
 The macOS Tauri build is named **OpenClaw-Tauri** and keeps its saved connections
 separate from the native **OpenClaw** app.
+
+<a id="adopt-the-bundled-runtime" />
+
+### Use the bundled runtime
+
+On Linux, fresh local setup installs the Gateway on the bundled OpenClaw Bun
+fork through the canonical CLI. The install guard requires the service to still
+be absent. A service that appears during setup blocks that installation. The app's
+runtime marker is informational and never authorizes automatic service changes.
+
+For any existing Gateway that uses another runtime, choose **Use bundled
+runtime…** in the tray menu. This includes Node, an older bundled Bun after an
+app update, and an operator-selected runtime. The confirmation shows the current
+runtime. The CLI install checks that the service definition and runtime pin still
+match what you confirmed before switching to the current bundled Bun. If either
+changed, the action refuses. A paused or stopped Gateway stays stopped; choose
+**Start Gateway** before switching runtimes.
+
+The app checks Gateway health after installation. On failure it shows the error
+and a CLI command to return to the previous runtime. It does not automatically
+restore a runtime. To return to Node, install a
+[supported Node version](/install/node-compatibility) if needed, then run:
+
+```sh
+openclaw gateway install --force --runtime node
+```
+
+To return to a particular previous executable, use
+`openclaw gateway install --force --runtime-path /absolute/path/to/node-or-bun`.
+The CLI owns service installation. Switching an existing Gateway's runtime
+leaves its CLI launcher unchanged.
+
+Startup and app updates never change an existing Gateway service or runtime pin.
+After an app update, the current service keeps its existing runtime until you
+choose **Use bundled runtime…** again. Immutable app runtime directories are
+retained, so updates never remove a runtime referenced by a service. These actions
+are Linux-only; macOS Tauri keeps its existing behavior, separate from the
+[native macOS app](/platforms/mac/bundled-gateway).
 
 ### Desktop sharing
 
@@ -287,7 +336,7 @@ either Linux bundle, install the packages and inspection tool explicitly:
 
 ```bash
 sudo apt update && sudo apt install gstreamer1.0-libav gstreamer1.0-plugins-good \
-  gstreamer1.0-plugins-bad gstreamer1.0-tools patchelf xdg-utils
+  gstreamer1.0-plugins-bad gstreamer1.0-tools patchelf xdg-utils unzip
 ```
 
 The packaging script stages only that media capability set before Tauri invokes
@@ -379,7 +428,7 @@ and its reply.
 The CLI remains the simplest option for a headless server or VPS. Use a manual
 SSH tunnel when connecting without the Linux desktop companion:
 
-1. Install Node 26 (recommended), or another supported release: Node 24.16+ or Node 26.1+.
+1. Install Node 26 (recommended), or another supported release: Node 24.22.1+ or Node 26.12.1+.
 2. On npm 12 or npm 11.16+, run `npm i -g openclaw@latest --allow-scripts=openclaw`. On npm 11.15 and earlier, omit `--allow-scripts=openclaw`.
 3. `openclaw onboard --install-daemon`
 4. From your laptop: `ssh -N -L 18789:127.0.0.1:18789 <user>@<host>`
@@ -452,7 +501,7 @@ On Linux hosts without a supported service manager, run the Gateway in the
 foreground or through your own supervisor, such as rc.d. `openclaw gateway status
 --deep` reports **no supported service manager detected** and identifies a
 remaining service unit as stale. That recorded unit does not select the status
-probe's configuration or port. Updates continue with a service warning; restart
+check's configuration or port. Updates continue with a service warning; restart
 your manually launched Gateway after the update. An unavailable user session bus
 on a systemd host remains a separate service-access diagnostic.
 

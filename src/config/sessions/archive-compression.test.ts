@@ -9,7 +9,6 @@ import {
   materializeSessionArchiveForRead,
   readSessionArchiveContentSync,
   SESSION_ARCHIVE_ZSTD_SUFFIX,
-  stripSessionArchiveCompressionSuffix,
 } from "./archive-compression.js";
 import {
   parseSessionArchiveTimestamp,
@@ -96,7 +95,6 @@ describe("archive compression", () => {
     const plain = "sess.jsonl.deleted.2026-07-11T00-00-00.000Z";
     const compressed = `${plain}${SESSION_ARCHIVE_ZSTD_SUFFIX}`;
 
-    expect(stripSessionArchiveCompressionSuffix(compressed)).toBe(plain);
     expect(parseSessionArchiveTimestamp(compressed, "deleted")).toBe(
       parseSessionArchiveTimestamp(plain, "deleted"),
     );

@@ -1,5 +1,10 @@
 import { resolveGlobalSingleton } from "../shared/global-singleton.js";
 
+/** A failed dependency link never constitutes a prepared plugin capture. */
+export class PluginDependencyLinkError extends Error {
+  override name = "PluginDependencyLinkError";
+}
+
 /** A retired instance cannot admit a fresh invocation. */
 export class PluginInstanceUnavailableError extends Error {
   constructor(pluginId?: string) {
@@ -46,3 +51,18 @@ export const PluginInstanceDrainTimeoutError = resolveGlobalSingleton(
 );
 
 export type PluginInstanceDrainTimeoutError = InstanceType<typeof PluginInstanceDrainTimeoutError>;
+
+/** Forced retirement leaves resource cleanup pending; `settled` reports its eventual outcome. */
+export function forcedRetirementError(
+  pluginId: string,
+  timeoutMs: number,
+  fact: { activeCallCount: number; retainedConsumerCount: number },
+  settled: Promise<void>,
+): PluginInstanceDrainTimeoutError {
+  return new PluginInstanceDrainTimeoutError(
+    `Plugin ${pluginId} forced retirement after ${timeoutMs}ms: ${fact.activeCallCount} still-running call(s), ${fact.retainedConsumerCount} retained consumer(s); resource cleanup remains pending.`,
+    settled,
+    {},
+    fact,
+  );
+}

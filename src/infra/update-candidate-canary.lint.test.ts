@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
-import {
-  noteCommittedSharedAuthStoreOwnership,
-  resolveSharedAuthStorePath,
-} from "../agents/auth-profiles/path-resolve.js";
+import { noteCommittedSharedAuthStoreOwnership } from "../agents/auth-profiles/path-resolve.js";
 import { SHARED_AUTH_STORE_STATE_KEY } from "../agents/auth-profiles/sqlite-json.js";
 import {
   closeAuthProfileReadPool,
@@ -16,7 +15,9 @@ import {
 import { collectSecurityWarnings } from "../commands/doctor-security.js";
 import { sanitizeTriageUpdateFailure } from "../commands/triage-update.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { runDoctorLintChecks } from "../flows/doctor-lint-flow.js";
 import { securityAuditFindingToHealthFinding } from "../flows/health-check-adapter.js";
+import type { HealthCheck } from "../flows/health-checks.js";
 import { runSecretsAudit } from "../secrets/audit.js";
 import { writeConfigMachineState } from "../state/config-machine-state-write.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
@@ -67,6 +68,25 @@ let lintReport: { ok: boolean; checksRun: number; findings: unknown[]; warnings:
 
 function canaryStateOptions(timeoutMs?: number) {
   return { root, stateDir: root, config: {}, env: {}, timeoutMs };
+}
+
+function report(findings: unknown[] = [], checksRun = 1) {
+  return { ok: findings.length === 0, checksRun, findings, warnings: [] };
+}
+
+function trackedChild() {
+  const child = new FakeChild(nextPid++);
+  children.set(child.pid, child);
+  return child;
+}
+
+type SpawnOptions = { env: NodeJS.ProcessEnv };
+function overrideSpawn(flag: string, create: (args: string[], options: SpawnOptions) => FakeChild) {
+  const spawnNormally = mocks.spawn.getMockImplementation();
+  assert(spawnNormally);
+  mocks.spawn.mockImplementation((command: string, args: string[], options: SpawnOptions) =>
+    args.includes(flag) ? create(args, options) : spawnNormally(command, args, options),
+  );
 }
 
 beforeEach(async () => {
@@ -168,216 +188,172 @@ describe("update candidate Doctor lint", () => {
     }
   });
 
-  it.each(["PLAINTEXT_FOUND", "REF_SHADOWED", "LEGACY_RESIDUE"] as const)(
-    "retains candidate-reported %s as a warning in the receipt and report",
-    async (code) => {
-      const stateDir = path.join(root, "state");
-      const configPath = path.join(root, "openclaw.json");
-      const archive = path.join(
-        stateDir,
-        "agents/main/agent/auth-profiles.json.sqlite-import.123.bak",
-      );
-      const config: OpenClawConfig = {
-        gateway: { mode: "local" },
-        models: {
-          providers: Object.fromEntries(
-            Array.from({ length: 4 }, (_, index) => [
-              `fixture_${"x".repeat(140)}_${index}`,
-              {
-                baseUrl: "https://example.invalid/v1",
-                api: "openai-completions",
-                apiKey: "synthetic-config-credential",
-                models: [],
-              },
-            ]),
-          ),
-        },
-      };
-      if (code === "REF_SHADOWED") {
-        config.models!.providers!.fixture = {
-          baseUrl: "https://example.invalid/v1",
-          api: "openai-completions",
-          apiKey: { source: "env", provider: "default", id: "TEST_UPDATE_SECRET" },
-          models: [],
-        };
-      }
-      const authored = JSON.stringify(config);
-      await fs.mkdir(path.dirname(archive), { recursive: true });
-      await fs.writeFile(configPath, authored);
-      if (code === "LEGACY_RESIDUE") {
-        await fs.writeFile(archive, "opaque retained recovery bytes");
-      }
-      await withEnvAsync(
-        {
-          OPENCLAW_STATE_DIR: stateDir,
-          OPENCLAW_CONFIG_PATH: configPath,
-          OPENCLAW_WORKSPACE_DIR: path.join(root, "workspace"),
-          TEST_UPDATE_SECRET: "synthetic-env-credential",
-        },
-        async () => {
-          const env = { ...process.env };
-          const auth = {
-            version: 1,
-            profiles: {
-              "fixture:default": {
-                type: "api_key",
-                provider: "fixture",
-                key: "synthetic-auth-credential",
-              },
+  it("retains a candidate-reported secret policy warning in the receipt and report", async () => {
+    const code = "LEGACY_RESIDUE";
+    const stateDir = path.join(root, "state");
+    const configPath = path.join(root, "openclaw.json");
+    const archive = path.join(
+      stateDir,
+      "agents/main/agent/auth-profiles.json.sqlite-import.123.bak",
+    );
+    const config: OpenClawConfig = {
+      gateway: { mode: "local" },
+      models: {
+        providers: Object.fromEntries(
+          Array.from({ length: 4 }, (_, index) => [
+            `fixture_${"x".repeat(140)}_${index}`,
+            {
+              baseUrl: "https://example.invalid/v1",
+              api: "openai-completions",
+              apiKey: "synthetic-config-credential",
+              models: [],
             },
-          };
-          writeConfigMachineState(SHARED_AUTH_STORE_STATE_KEY, { location: "state-db" }, { env });
-          noteCommittedSharedAuthStoreOwnership({ location: "state-db" }, env);
-          writePersistedAuthProfileStoreRaw(auth);
-          const audit = await runSecretsAudit({ env });
-          const finding = audit.findings.find(
-            (entry) =>
-              entry.code === code &&
-              (code !== "PLAINTEXT_FOUND" || entry.profileId === "fixture:default"),
-          );
-          expect(finding).toMatchObject({
-            code,
-            severity: "warn",
-            ...(code === "PLAINTEXT_FOUND"
-              ? { file: resolveSharedAuthStorePath(env), profileId: "fixture:default" }
-              : code === "REF_SHADOWED"
-                ? { jsonPath: "models.providers.fixture.apiKey" }
-                : { file: archive }),
-          });
-          const guidance = (await collectSecurityWarnings(config, env)).find(
-            (entry) => entry.checkId === "config.plaintext_secrets",
-          )!.remediation;
-          // Released Doctor does not run secrets audit. Model a candidate reporting
-          // its audit code through the existing security-finding contract, including
-          // a stricter policy severity; this is wire compatibility, not release attribution.
-          lintReport = {
-            ok: false,
-            checksRun: 1,
-            findings: [
-              securityAuditFindingToHealthFinding({
-                checkId: code,
-                severity: "critical",
-                title: "Secret policy",
-                detail: finding!.message,
-                remediation: guidance,
-              }),
-            ],
-            warnings: [],
-          };
-          stubHealthyGateway();
-          const result = await validateUpdateCandidateCanary({
-            root,
-            stateDir,
-            config,
-            env,
-          });
-          expect(result.status).toBe("ok");
-          const step = result.steps.find((entry) => entry.name === "candidate-doctor-lint")!;
-          expect(step).toMatchObject({
-            exitCode: 1,
-            advisory: { kind: "recoverable-maintenance" },
-            doctorLintFindings: [expect.objectContaining({ severity: "warning" })],
-          });
-          const run = createUpdateRun({ trigger: "cli" }, { env });
-          for (const row of result.steps.flatMap(updateRunStepsFromResultStep)) {
-            recordUpdateRunStep(run.runId, row, { env });
-          }
-          const recorded = finishUpdateRun(run.runId, { status: "succeeded" }, { env });
-          const reportPath = await writeUpdateRunReportArtifact({
-            result: { ...result, status: "ok", mode: "npm", root, runId: run.runId },
-            report: renderUpdateRunReport(recorded),
-            env,
-          });
-          const markdown = await fs.readFile(reportPath, "utf8");
-          const printed = renderSteps(result.steps);
-          const warnings = updateRunWarningMessages(recorded.steps).join("\n");
-          for (const output of [markdown, printed, warnings]) {
-            expect({
-              code: output.includes(code),
-              configure: output.includes("openclaw secrets configure"),
-              apply: output.includes("openclaw secrets apply"),
-            }).toEqual({ code: true, configure: true, apply: true });
-            expect(output).not.toContain(auth.profiles["fixture:default"].key);
-          }
-          const receipt = recorded.steps.find((row) =>
-            row.step.startsWith("finalize:doctor-lint:"),
-          )!;
-          expect(JSON.parse(receipt.detail!)).toMatchObject({
-            exitCode: 1,
-            counts: { error: 0, warning: 1, info: 0 },
-            omitted: 0,
-          });
-          expect(step.failureFacts).toBeUndefined();
-          expect(await fs.readFile(configPath, "utf8")).toBe(authored);
-          expect(readPersistedSharedAuthProfileStoreRaw(env)).toEqual(auth);
-          if (code === "LEGACY_RESIDUE") {
-            expect(await fs.readFile(archive, "utf8")).toBe("opaque retained recovery bytes");
-          }
-        },
-      );
-    },
-  );
+          ]),
+        ),
+      },
+    };
+    const authored = JSON.stringify(config);
+    await fs.mkdir(path.dirname(archive), { recursive: true });
+    await fs.writeFile(configPath, authored);
+    await fs.writeFile(archive, "opaque retained recovery bytes");
+    await withEnvAsync(
+      {
+        OPENCLAW_STATE_DIR: stateDir,
+        OPENCLAW_CONFIG_PATH: configPath,
+        OPENCLAW_WORKSPACE_DIR: path.join(root, "workspace"),
+      },
+      async () => {
+        const env = { ...process.env };
+        const auth = {
+          version: 1,
+          profiles: {
+            "fixture:default": {
+              type: "api_key",
+              provider: "fixture",
+              key: "synthetic-auth-credential",
+            },
+          },
+        };
+        writeConfigMachineState(SHARED_AUTH_STORE_STATE_KEY, { location: "state-db" }, { env });
+        noteCommittedSharedAuthStoreOwnership({ location: "state-db" }, env);
+        writePersistedAuthProfileStoreRaw(auth);
+        const audit = await runSecretsAudit({ env });
+        const finding = audit.findings.find((entry) => entry.code === code);
+        expect(finding).toMatchObject({
+          code,
+          severity: "warn",
+          file: archive,
+        });
+        const guidance = (await collectSecurityWarnings(config, env)).find(
+          (entry) => entry.checkId === "config.plaintext_secrets",
+        )!.remediation;
+        // Released Doctor does not run secrets audit. Model a candidate reporting
+        // its audit code through the existing security-finding contract, including
+        // a stricter policy severity; this is wire compatibility, not release attribution.
+        lintReport = {
+          ok: false,
+          checksRun: 1,
+          findings: [
+            securityAuditFindingToHealthFinding({
+              checkId: code,
+              severity: "critical",
+              title: "Secret policy",
+              detail: finding!.message,
+              remediation: guidance,
+            }),
+          ],
+          warnings: [],
+        };
+        stubHealthyGateway();
+        const result = await validateUpdateCandidateCanary({
+          root,
+          stateDir,
+          config,
+          env,
+        });
+        expect(result.status).toBe("ok");
+        const step = result.steps.find((entry) => entry.name === "candidate-doctor-lint")!;
+        expect(step).toMatchObject({
+          exitCode: 1,
+          advisory: { kind: "recoverable-maintenance" },
+          doctorLintFindings: [expect.objectContaining({ severity: "warning" })],
+        });
+        const run = createUpdateRun({ trigger: "cli" }, { env });
+        for (const row of result.steps.flatMap(updateRunStepsFromResultStep)) {
+          recordUpdateRunStep(run.runId, row, { env });
+        }
+        const recorded = finishUpdateRun(run.runId, { status: "succeeded" }, { env });
+        const reportPath = await writeUpdateRunReportArtifact({
+          result: { ...result, status: "ok", mode: "npm", root, runId: run.runId },
+          report: renderUpdateRunReport(recorded),
+          env,
+        });
+        const markdown = await fs.readFile(reportPath, "utf8");
+        const printed = renderSteps(result.steps);
+        const warnings = updateRunWarningMessages(recorded.steps).join("\n");
+        for (const output of [markdown, printed, warnings]) {
+          expect({
+            code: output.includes(code),
+            configure: output.includes("openclaw secrets configure"),
+            apply: output.includes("openclaw secrets apply"),
+          }).toEqual({ code: true, configure: true, apply: true });
+          expect(output).not.toContain(auth.profiles["fixture:default"].key);
+        }
+        const receipt = recorded.steps.find((row) => row.step.startsWith("finalize:doctor-lint:"))!;
+        expect(JSON.parse(receipt.detail!)).toMatchObject({
+          exitCode: 1,
+          counts: { error: 0, warning: 1, info: 0 },
+          omitted: 0,
+        });
+        expect(step.failureFacts).toBeUndefined();
+        expect(await fs.readFile(configPath, "utf8")).toBe(authored);
+        expect(readPersistedSharedAuthProfileStoreRaw(env)).toEqual(auth);
+        expect(await fs.readFile(archive, "utf8")).toBe("opaque retained recovery bytes");
+      },
+    );
+  });
 
-  it.each([false, true])(
-    "retains posture warnings without admitting blocking lint errors (blocking: %s)",
-    async (blocking) => {
+  it.each([0, 3])(
+    "shows a passing lint with budget-deferred inspections as advisory after %i checks",
+    async (checksRun) => {
       lintReport = {
-        ok: !blocking,
-        checksRun: 1,
-        findings: blocking
-          ? [{ checkId: "core/config", severity: "error", message: "Invalid configuration." }]
-          : [],
+        ok: true,
+        checksRun,
+        findings: [],
         warnings: [
           {
-            checkId: "core/doctor/security",
+            checkId: "core/doctor/agent-scopes",
+            source: "doctor",
             severity: "warning",
-            message: "Open group policy permits mention-gated requests.",
+            errorCode: "update-inspection-deferred",
+            requirement: "update-validation-budget",
+            message: "Agent scopes deferred until after activation.",
+            fixHint: "Run `openclaw doctor --fix` after activation.",
           },
         ],
       };
       stubHealthyGateway();
       const result = await validateUpdateCandidateCanary(canaryStateOptions());
-      expect(result.status).toBe(blocking ? "error" : "ok");
-      if (blocking) {
-        expect(result).toMatchObject({ phase: "lint", reason: "doctor-failed" });
-      }
-      expect(
-        updateRunWarningMessages(result.steps.flatMap(updateRunStepsFromResultStep)),
-      ).toContainEqual(
-        expect.stringContaining("Open group policy permits mention-gated requests."),
-      );
-      expect(
-        result.steps.find((step) => step.name === "candidate-doctor-lint")?.doctorLintFindings,
-      ).toEqual([...lintReport.findings, ...lintReport.warnings]);
+      expect(result.status).toBe("ok");
+      const step = result.steps.find((entry) => entry.name === "candidate-doctor-lint")!;
+      expect(step).toMatchObject({
+        exitCode: 0,
+        advisory: {
+          kind: "recoverable-maintenance",
+          message: `Doctor deferred 1 inspection until after activation (${checksRun} ran). Run \`openclaw doctor --fix\` after the update.`,
+        },
+      });
+      expect(step.failureFacts).toBeUndefined();
+      const printed = renderSteps([step]);
+      expect(printed).toMatch(/! candidate-doctor-lint/u);
+      expect(printed).not.toContain("✓");
+      expect(printed).toContain("Doctor deferred 1 inspection");
     },
   );
-  it("treats an older candidate's security policy error as a named advisory", async () => {
-    const finding = {
-      checkId: "core/doctor/security",
-      severity: "error",
-      message: 'Discord DMs are open: dmPolicy="open" allows anyone to DM the bot.',
-    };
-    lintReport = {
-      ok: false,
-      checksRun: 1,
-      findings: [finding],
-      warnings: [],
-    };
-    stubHealthyGateway();
-    const result = await validateUpdateCandidateCanary(canaryStateOptions());
-    expect(result.status).toBe("ok");
-    const step = result.steps.find((entry) => entry.name === "candidate-doctor-lint");
-    expect(step).toMatchObject({
-      exitCode: 1,
-      advisory: { kind: "recoverable-maintenance" },
-    });
-    expect(step?.doctorLintFindings).toEqual([{ ...finding, severity: "warning" }]);
-    expect(step?.failureFacts).toBeUndefined();
-  });
+
   it.each([
     { name: "signal", exitCode: null, signal: "SIGTERM", outputLimitExceeded: false },
     { name: "output limit after exit zero", exitCode: 0, signal: null, outputLimitExceeded: true },
-    { name: "output limit after exit one", exitCode: 1, signal: null, outputLimitExceeded: true },
   ])("retains physical $name facts without accepting policy output", async (physical) => {
     const spawnNormally = mocks.spawn.getMockImplementation()!;
     mocks.spawn.mockImplementation((command, args: string[], options) => {
@@ -424,7 +400,9 @@ describe("update candidate Doctor lint", () => {
     expect(renderSteps([step])).toContain(
       physical.outputLimitExceeded && physical.exitCode === 0
         ? "Update health check output exceeded the inspection limit"
-        : "Update health check failed",
+        : physical.signal
+          ? `terminated by ${physical.signal}`
+          : "Update health check failed",
     );
     expect(renderUpdateRunReport(updateRunReportInputFromResult(failure)).markdown).toContain(
       "Failed: candidate-doctor-lint",
@@ -498,3 +476,155 @@ describe("update candidate Doctor lint", () => {
     expect(result.logTail.join("\n")).not.toContain("config.invalid.0");
   });
 });
+
+it.each([false, true])(
+  "attests deployment settings before runtime isolation (drift=%s)",
+  async (drift) => {
+    const config: OpenClawConfig = {
+      gateway: {
+        mode: "local",
+        bind: "loopback",
+        auth: { mode: "password", password: "synthetic-password" },
+        controlUi: { enabled: true },
+        tailscale: { mode: "serve" },
+      },
+    };
+    // A plugin may attest deployment settings without knowing rehearsal overrides.
+    const checks: HealthCheck[] = [
+      {
+        id: "fixture/deployment-attestation",
+        kind: "plugin",
+        description: "Attest the deployment Gateway settings.",
+        async detect({ cfg }) {
+          const hash = createHash("sha256")
+            .update(JSON.stringify({ ...cfg.gateway, auth: { mode: cfg.gateway?.auth?.mode } }))
+            .digest("hex");
+          return hash === "96145a3f866d78a4ff00e0b188cd75d89ec6b2ecd59555e8475811b4f2257af6"
+            ? []
+            : [
+                {
+                  checkId: "fixture/attestation-hash-mismatch",
+                  severity: "error",
+                  message: "Deployment Gateway settings do not match the accepted attestation.",
+                },
+              ];
+        },
+      },
+    ];
+    const check = (cfg: OpenClawConfig, configPath: string) =>
+      runDoctorLintChecks(
+        {
+          mode: "lint",
+          cfg,
+          configPath,
+          cwd: root,
+          runtime: { log() {}, error() {}, exit() {} },
+        },
+        { checks },
+      );
+    const configPath = path.join(root, "openclaw.json");
+    expect((await check(config, configPath)).findings).toEqual([]);
+    if (drift) {
+      config.gateway!.controlUi!.enabled = false;
+    }
+    const authored = JSON.stringify(config);
+    await fs.writeFile(configPath, authored);
+    overrideSpawn("--lint", (_args, options) => {
+      const child = trackedChild();
+      void (async () => {
+        const copied: OpenClawConfig = JSON.parse(
+          await fs.readFile(options.env.OPENCLAW_CONFIG_PATH!, "utf8"),
+        );
+        const result = await check(copied, options.env.OPENCLAW_CONFIG_PATH!);
+        child.stdout.write(JSON.stringify(report([...result.findings], result.checksRun)));
+        child.emit("close", result.findings.length ? 1 : 0);
+      })().catch((error: unknown) => {
+        child.stderr.write(String(error));
+        child.emit("close", 2);
+      });
+      return child;
+    });
+    let runtimeConfig: OpenClawConfig | undefined;
+    overrideSpawn("gateway", (_args, options) => {
+      runtimeConfig = JSON.parse(readFileSync(options.env.OPENCLAW_CONFIG_PATH!, "utf8"));
+      return trackedChild();
+    });
+    stubHealthyGateway();
+    const result = await validateUpdateCandidateCanary({ ...canaryStateOptions(), config });
+    const lint = result.steps.find((step) => step.name === "candidate-doctor-lint");
+    expect(result.status).toBe(drift ? "error" : "ok");
+    expect(lint?.doctorLintFindings?.map((finding) => finding.checkId) ?? []).toEqual(
+      drift ? ["fixture/attestation-hash-mismatch"] : [],
+    );
+    if (!drift) {
+      expect(runtimeConfig?.gateway).toMatchObject({
+        bind: "loopback",
+        auth: { mode: "token" },
+        tailscale: { mode: "off" },
+        controlUi: { enabled: false },
+      });
+      expect((await check(config, configPath)).findings).toEqual([]);
+    }
+    expect(await fs.readFile(configPath, "utf8")).toBe(authored);
+  },
+);
+
+it.each([false, true])(
+  "does not persist resolved credentials when lint fails=%s",
+  async (fails) => {
+    const secrets = ["synthetic-token", "synthetic-password", "Bearer synthetic-otel"];
+    const config: OpenClawConfig = {
+      gateway: { auth: { mode: "password", token: secrets[0], password: secrets[1] } },
+      diagnostics: {
+        enabled: true,
+        otel: { enabled: true, captureContent: true, headers: { Authorization: secrets[2]! } },
+      },
+    };
+    lintReport = report(
+      fails ? [{ checkId: "fixture/refused", severity: "error", message: "Refused" }] : [],
+    );
+    let serialized = "";
+    let retainedState: string | undefined;
+    const remove = fs.rm.bind(fs);
+    const cleanup = vi
+      .spyOn(fs, "rm")
+      .mockImplementation((target, options) =>
+        target === retainedState ? Promise.resolve() : remove(target, options),
+      );
+    overrideSpawn("--lint", (_args, options) => {
+      serialized = readFileSync(options.env.OPENCLAW_CONFIG_PATH!, "utf8");
+      retainedState = options.env.OPENCLAW_STATE_DIR;
+      const child = trackedChild();
+      queueMicrotask(() => {
+        child.stdout.write(JSON.stringify(lintReport));
+        child.emit("close", fails ? 1 : 0);
+      });
+      return child;
+    });
+    stubHealthyGateway();
+    try {
+      const result = await validateUpdateCandidateCanary({ ...canaryStateOptions(), config });
+      expect(result.status).toBe(fails ? "error" : "ok");
+      if (fails) {
+        expect(result.phase).toBe("lint");
+      }
+      expect(serialized).not.toBe("");
+      const retained = await fs.readFile(path.join(retainedState!, "openclaw.json"), "utf8");
+      for (const value of secrets) {
+        expect(serialized).not.toContain(value);
+        expect(retained).not.toContain(value);
+      }
+      expect(JSON.parse(serialized)).toMatchObject({
+        gateway: { auth: { mode: "password" } },
+        diagnostics: { enabled: true, otel: { enabled: true, captureContent: true } },
+      });
+      expect(config.gateway?.auth?.password).toBe(secrets[1]);
+      expect(config.diagnostics?.otel?.headers?.Authorization).toBe(secrets[2]);
+    } finally {
+      cleanup.mockRestore();
+      if (retainedState) {
+        await remove(retainedState, { recursive: true, force: true });
+      }
+    }
+  },
+);

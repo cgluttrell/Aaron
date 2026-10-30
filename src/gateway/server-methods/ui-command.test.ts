@@ -65,6 +65,37 @@ describe("ui.command gateway method", () => {
     expect(result.broadcastToConnIds).not.toHaveBeenCalled();
   });
 
+  it("requires action-level support for GitHub identity settings", async () => {
+    const requester = client("older-ui");
+    const unsupported = await call(
+      { command: { kind: "agent-github-settings" } },
+      [requester],
+      requester,
+    );
+    expect(unsupported.respond).toHaveBeenCalledWith(
+      false,
+      undefined,
+      expect.objectContaining({ code: "UNAVAILABLE" }),
+    );
+    expect(unsupported.broadcastToConnIds).not.toHaveBeenCalled();
+
+    const capable = client("current-ui", GATEWAY_CLIENT_IDS.CONTROL_UI, [
+      GATEWAY_CLIENT_CAPS.UI_COMMANDS,
+      GATEWAY_CLIENT_CAPS.UI_AGENT_GITHUB_SETTINGS,
+    ]);
+    const supported = await call(
+      { command: { kind: "agent-github-settings" } },
+      [capable],
+      capable,
+    );
+    expect(supported.respond).toHaveBeenCalledWith(true, { ok: true });
+    expect(supported.broadcastToConnIds).toHaveBeenCalledExactlyOnceWith(
+      "ui.command",
+      { command: { kind: "agent-github-settings" } },
+      new Set(["current-ui"]),
+    );
+  });
+
   it("navigates only the requester, even when another user and another tab share the session", async () => {
     const params = {
       command: { kind: "navigate", sessionKey: "agent:main:other" },
@@ -93,6 +124,27 @@ describe("ui.command gateway method", () => {
       new Set(["alice-tab-one"]),
     );
     expect(result.respond).toHaveBeenCalledWith(true, { ok: true });
+  });
+
+  it("delivers plugin panel commands only to the requester", async () => {
+    const requester = client("requester");
+    const params = {
+      sessionKey: "agent:main:main",
+      command: {
+        kind: "panel",
+        panel: "plugin",
+        pluginId: "review",
+        panelId: "document",
+        open: true,
+      },
+    };
+    const result = await call(params, [requester, client("bystander")], requester);
+    expect(result.respond).toHaveBeenCalledWith(true, { ok: true });
+    expect(result.broadcastToConnIds).toHaveBeenCalledExactlyOnceWith(
+      "ui.command",
+      { ...params, agentId: "main" },
+      new Set(["requester"]),
+    );
   });
 
   it("keeps the agent screen tool bound to its requesting browser across async execution", async () => {

@@ -5,6 +5,7 @@ import {
   GATEWAY_CLIENT_CAPS,
   GATEWAY_CLIENT_MODES,
   hasGatewayClientCap,
+  isNativeAppUiClient,
 } from "../../../../packages/gateway-protocol/src/client-info.js";
 import { ConnectErrorDetailCodes } from "../../../../packages/gateway-protocol/src/connect-error-details.js";
 import {
@@ -30,7 +31,6 @@ import {
   isOperatorUiClient,
 } from "../../../utils/message-channel.js";
 import { isGatewayAuthPolicyCurrent } from "../../auth-policy.js";
-import { gitHubPublicApi } from "../../github-public-api.js";
 import { resolveIdentityOperatorScopes } from "../../operator-identity-scopes.js";
 import type { OperatorScope } from "../../operator-scopes.js";
 import { checkGatewayWsBrowserOrigin, normalizeChromeExtensionOrigin } from "../../origin-check.js";
@@ -38,7 +38,6 @@ import { parseGatewayRole } from "../../role-policy.js";
 import { authenticatedProfileUnavailableError } from "../../server-methods/gateway-client-identity.js";
 import { formatForLog } from "../../ws-log.js";
 import { truncateCloseReason } from "../close-reason.js";
-import { isNativeAppUiClient } from "./handshake-auth-helpers.js";
 import type {
   AuthenticatedGatewayConnect,
   GatewayConnectPhaseContext,
@@ -99,12 +98,7 @@ export async function rejectUnavailableProfileConnect(
 ): Promise<void> {
   // Role admission needs a verified profile; an empty-scope hello hides the
   // verification outage behind unrelated permission errors on every request.
-  const failure = authenticatedProfileUnavailableError(
-    error instanceof gitHubPublicApi.ControlUiGitHubError && error.statusCode === 429
-      ? "GitHub is rate limiting profile verification. Retry shortly; if this continues, ask a gateway administrator to check the GitHub API credential."
-      : undefined,
-    error instanceof gitHubPublicApi.ControlUiGitHubError ? error.retryAfterMs : undefined,
-  );
+  const failure = authenticatedProfileUnavailableError(error);
   context.markHandshakeFailure("authenticated-profile-unavailable");
   context.sendHandshakeErrorResponse(ErrorCodes.UNAVAILABLE, failure.message, failure);
   await context.releasePendingNodePairingCleanup();

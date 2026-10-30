@@ -25,7 +25,7 @@ type NodeWorkerContainerExpectedOwner = {
   launchId: string;
 };
 
-const DEFAULT_NODE_WORKER_CONTAINER_IMAGE = "node:24.21.0-slim";
+const DEFAULT_NODE_WORKER_CONTAINER_IMAGE = "node:24.22.1-slim";
 // Burst launches can delay a healthy daemon's identity response; keep revalidation
 // fail-closed without treating temporary daemon contention as an unavailable engine.
 const CONTAINER_REVALIDATION_TIMEOUT_MS = 30_000;
@@ -354,13 +354,6 @@ export async function createNodeWorkerContainer(
     throw new Error("node worker container engine returned an invalid container identity");
   }
   return { engine: engine.id, containerId, engineTarget: engine.target };
-}
-
-export function buildNodeWorkerContainerStartArgv(
-  engine: NodeWorkerContainerEngine,
-  containerId: string,
-): string[] {
-  return [engine.command, "start", "--attach", "--interactive", containerId];
 }
 
 /** Inspect the container rather than its disposable Docker client process. */

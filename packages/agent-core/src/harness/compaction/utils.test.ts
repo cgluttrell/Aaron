@@ -12,8 +12,8 @@ import {
   computeFileLists,
   createFileOps,
   extractFileOpsFromMessage,
+  formatCompactionUserLabel,
   formatFileOperations,
-  formatPersistedSenderSuffix,
   getCompactionContent,
   MAX_FILE_OPS_SECTION_CHARS,
   mergeSummaryFileOperations,
@@ -192,6 +192,26 @@ describe("getCompactionContent", () => {
 });
 
 describe("serializeConversation", () => {
+  it.each([
+    { name: "canonical", marker: { runtimeContext: {} } },
+    { name: "shipped", marker: { runtimeContextCarrier: true } },
+  ])("excludes mixed-media $name runtime carriers from summaries", ({ marker }) => {
+    const serialized = serializeConversation([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "private legacy runtime context" },
+          { type: "image", data: "AA==", mimeType: "image/png" },
+        ],
+        timestamp: 1,
+        ...marker,
+      },
+      { role: "user", content: "visible user text", timestamp: 2 },
+    ]);
+
+    expect(serialized).toBe("[User]: visible user text");
+  });
+
   it("sends independent tool-result blocks to the summarizer with their boundaries intact", async () => {
     const model: Model = {
       id: "summary-model",
@@ -443,7 +463,8 @@ describe("serializeConversation", () => {
     expect(estimateTokens(attributed)).toBe(
       Math.ceil(
         (estimateStringChars(content) +
-          estimateStringChars(formatPersistedSenderSuffix(attributed))) /
+          estimateStringChars(formatCompactionUserLabel(attributed)) -
+          "User".length) /
           CHARS_PER_TOKEN_ESTIMATE,
       ),
     );

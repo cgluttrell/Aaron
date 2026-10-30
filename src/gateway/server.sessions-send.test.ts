@@ -69,7 +69,10 @@ function expectSessionsSendDetails(
   result: { details?: unknown },
   expected: { reply: string; sessionKey: string },
 ): void {
-  expect(result.details).toMatchObject({ status: "ok", ...expected });
+  expect(result.details, JSON.stringify(result.details)).toMatchObject({
+    status: "ok",
+    ...expected,
+  });
 }
 
 async function writeConfig(config: OpenClawConfig) {
@@ -183,8 +186,9 @@ beforeAll(async () => {
   } finally {
     captureKernel.mockRestore();
   }
-  // Prepare the real history handler before the RPC deadline starts.
+  // Prepare real handlers before RPC deadlines; cold module loading is fixture setup.
   await import("./server-methods/chat.js");
+  await import("./server-methods/sessions-create.js");
 });
 
 beforeEach(async () => {
@@ -363,6 +367,23 @@ describe("sessions_send agent targeting", () => {
   it.each([
     { name: "default cross-agent access", tools: undefined },
     {
+      name: "send-only edge with agent-scoped reads",
+      tools: { sessions: { visibility: "agent" } },
+      send: ["orion"],
+    },
+    {
+      name: "empty send list with otherwise broad access",
+      tools: { sessions: { visibility: "all" } },
+      send: [],
+      error: "tools.agentToAgent.send",
+    },
+    {
+      name: "unlisted send destination",
+      tools: { sessions: { visibility: "all" } },
+      send: ["different-agent"],
+      error: "tools.agentToAgent.send",
+    },
+    {
       name: "disabled agent-to-agent access",
       tools: { agentToAgent: { enabled: false } },
       error: "Agent-to-agent messaging is disabled",
@@ -372,14 +393,27 @@ describe("sessions_send agent targeting", () => {
       tools: { agentToAgent: { allow: ["main"] } },
       error: "denied by tools.agentToAgent.allow",
     },
-  ] satisfies Array<{ name: string; tools: OpenClawConfig["tools"]; error?: string }>)(
+  ] satisfies Array<{
+    name: string;
+    tools: OpenClawConfig["tools"];
+    send?: string[];
+    error?: string;
+  }>)(
     "enforces $name when targeting a configured agent main session by agentId",
-    async ({ tools, error }) => {
+    async ({ tools, error, send }) => {
       const dir = tempDirs.make("openclaw-sessions-send-agent-");
       const config: OpenClawConfig = {
         ...(tools ? { tools } : {}),
         agents: {
-          list: [{ id: "main", default: true }, { id: "orion" }],
+          ownership: "explicit",
+          defaults: {
+            systemAgent: { agentId: "main" },
+            sessionStore: { agentId: "main" },
+          },
+          entries: {
+            main: send ? { tools: { agentToAgent: { send } } } : {},
+            orion: {},
+          },
         },
       };
 
@@ -402,18 +436,7 @@ describe("sessions_send agent targeting", () => {
           emitLifecycleAssistantReply({
             opts,
             defaultSessionId: "orion-created",
-            // The detached announce flow keeps stepping this same mock after the
-            // awaited reply; skipping both follow-up steps ends the tail instead of
-            // running five ping-pong turns no row asserts on.
-            resolveText: (extraSystemPrompt) => {
-              if (extraSystemPrompt?.includes("Agent-to-agent reply step")) {
-                return "REPLY_SKIP";
-              }
-              if (extraSystemPrompt?.includes("Agent-to-agent announce step")) {
-                return "ANNOUNCE_SKIP";
-              }
-              return "orion response";
-            },
+            resolveText: () => "orion response",
           }),
         );
         spy.mockClear();

@@ -41,12 +41,9 @@ function proxyConfig(
   };
 }
 
-function sharedGeneration(config: OpenClawConfig, authModeOverride?: "trusted-proxy") {
+function sharedGeneration(config: OpenClawConfig) {
   return resolveSharedGatewaySessionGeneration(
-    resolveGatewayAuthForConfig({
-      config,
-      authOverride: authModeOverride ? { mode: authModeOverride } : undefined,
-    }),
+    resolveGatewayAuthForConfig({ config }),
     config.gateway?.trustedProxies,
   );
 }
@@ -54,15 +51,13 @@ function sharedGeneration(config: OpenClawConfig, authModeOverride?: "trusted-pr
 function proxyClient(
   config: OpenClawConfig,
   identity = "retained@example.test",
-  authModeOverride?: "trusted-proxy",
 ): SharedGatewayAuthClient {
   return {
     usesSharedGatewayAuth: true,
-    sharedGatewaySessionGeneration: sharedGeneration(config, authModeOverride),
+    sharedGatewaySessionGeneration: sharedGeneration(config),
     authPolicy: captureGatewayAuthPolicy(config, {
       role: "operator",
       authMethod: "trusted-proxy",
-      authModeOverride,
       verifiedIdentity: identity,
     }),
     socket: { close: vi.fn() },
@@ -205,210 +200,116 @@ describe("shared gateway generation publication", () => {
     release();
   });
 
-  it("uses the fixed startup auth mode when fencing proxy policy edits", () => {
-    const initial = proxyConfig();
-    initial.gateway!.auth!.mode = "token";
-    const next = proxyConfig({ requiredHeaders: ["x-authenticated"] });
-    next.gateway!.auth!.mode = "token";
-    const initialGeneration = sharedGeneration(initial, "trusted-proxy");
-    const nextGeneration = sharedGeneration(next, "trusted-proxy");
-    const client: SharedGatewayAuthClient = {
+  it("revokes a rotated local proxy password without revoking the proxy identity", () => {
+    const proxy = proxyConfig();
+    const initial: OpenClawConfig = {
+      ...proxy,
+      gateway: {
+        ...proxy.gateway,
+        auth: { ...proxy.gateway?.auth, password: "old-local-fallback" },
+      },
+    };
+    const next: OpenClawConfig = {
+      ...initial,
+      gateway: {
+        ...initial.gateway,
+        auth: { ...initial.gateway?.auth, password: "new-local-fallback" },
+      },
+    };
+    const retained = proxyClient(initial);
+    const fallback: SharedGatewayAuthClient = {
       usesSharedGatewayAuth: true,
-      sharedGatewaySessionGeneration: initialGeneration,
-      authPolicy: captureGatewayAuthPolicy(initial, {
-        role: "operator",
-        authMethod: "trusted-proxy",
-        authModeOverride: "trusted-proxy",
-        verifiedIdentity: "retained@example.test",
-      }),
+      sharedGatewaySessionGeneration: sharedGeneration(initial),
+      authPolicy: captureGatewayAuthPolicy(initial, { role: "operator", authMethod: "password" }),
       socket: { close: vi.fn() },
     };
-    const source = new AbortController();
-    const state = new SharedGatewaySessionGenerationState({
-      current: initialGeneration,
-      required: null,
-      authModeOverride: "trusted-proxy",
-    });
-    const release = state.onInvalidated(initialGeneration, () => source.abort(), client.authPolicy);
+    const generation = sharedGeneration(next);
+    expect(generation).toBe(fallback.sharedGatewaySessionGeneration);
+    const state = new SharedGatewaySessionGenerationState({ current: generation, required: null });
+    const retainedSource = new AbortController();
+    const detachedFallbackSource = new AbortController();
+    const releaseRetained = state.onInvalidated(
+      generation,
+      () => retainedSource.abort(),
+      retained.authPolicy,
+    );
+    const releaseFallback = state.onInvalidated(
+      generation,
+      () => detachedFallbackSource.abort(),
+      fallback.authPolicy,
+    );
+    const fallbackInvalidated = vi.fn();
+    const releaseClient = onGatewayPolicyClientInvalidated(fallback, fallbackInvalidated);
+    const transition = { previous: initial, next };
 
+    expect(state.finalize(claimGeneration(state, generation), transition)).toBe(true);
+    expect(detachedFallbackSource.signal.aborted).toBe(true);
     enforceSharedGatewaySessionGenerationForConfigWrite({
       state,
       nextConfig: next,
-      resolveRuntimeSnapshotGeneration: () => nextGeneration,
-      clients: [client],
-      transition: { previous: initial, next },
+      resolveRuntimeSnapshotGeneration: () => generation,
+      clients: [retained, fallback],
+      transition,
     });
-
-    expect(client.socket.close).toHaveBeenCalledWith(4001, "gateway auth changed");
-    expect(client.sourceInvalidated).toBeFalsy();
-    expect(source.signal.aborted).toBe(false);
-    release();
+    expect(fallback.sourceInvalidated).toBe(true);
+    expect(fallback.socket.close).toHaveBeenCalledWith(4001, "gateway auth changed");
+    expect(fallbackInvalidated).toHaveBeenCalledOnce();
+    expect(retained.socket.close).not.toHaveBeenCalled();
+    expect(retained.sourceInvalidated).toBeFalsy();
+    expect(retainedSource.signal.aborted).toBe(false);
+    releaseClient();
+    releaseFallback();
+    releaseRetained();
   });
 
   it.each([
+    { name: "same-generation refresh", claimed: "generation-a", newer: null, refresh: true },
+    { name: "credential rotation", claimed: "generation-b", newer: null, refresh: false },
     {
-      label: "configured proxy mode",
-      configuredMode: "trusted-proxy",
-      authModeOverride: undefined,
+      name: "newer same-generation write",
+      claimed: "generation-a",
+      newer: "generation-a",
+      refresh: false,
     },
     {
-      label: "fixed startup proxy mode",
-      configuredMode: "token",
-      authModeOverride: "trusted-proxy",
+      name: "newer rotated generation",
+      claimed: "generation-a",
+      newer: "generation-b",
+      refresh: false,
     },
-  ] as const)(
-    "revokes a rotated local proxy password in $label",
-    ({ configuredMode, authModeOverride }) => {
-      const proxy = proxyConfig();
-      proxy.gateway!.auth!.mode = configuredMode;
-      const initial: OpenClawConfig = {
-        ...proxy,
-        gateway: {
-          ...proxy.gateway,
-          auth: { ...proxy.gateway?.auth, password: "old-local-fallback" },
-        },
+  ])("finalizes only the current owner after $name", ({ claimed, newer, refresh }) => {
+    const state = new SharedGatewaySessionGenerationState({
+      current: "generation-a",
+      required: "generation-a",
+    });
+    const ownership = claimGeneration(state, claimed);
+    if (refresh) {
+      const snapshot = {
+        sourceConfig: {},
+        config: {},
+        authStores: [],
+        authStoreCredentialsRevision: getRuntimeAuthProfileStoreCredentialsRevision(),
+        authStoreSnapshotsRevision: getRuntimeAuthProfileStoreSnapshotsRevision(),
+        warnings: [],
+        webTools: createEmptyRuntimeWebToolsMetadata(),
       };
-      const next: OpenClawConfig = {
-        ...initial,
-        gateway: {
-          ...initial.gateway,
-          auth: { ...initial.gateway?.auth, password: "new-local-fallback" },
-        },
-      };
-      const retained = proxyClient(initial, "retained@example.test", authModeOverride);
-      const fallback: SharedGatewayAuthClient = {
-        usesSharedGatewayAuth: true,
-        sharedGatewaySessionGeneration: sharedGeneration(initial, authModeOverride),
-        authPolicy: captureGatewayAuthPolicy(initial, {
-          role: "operator",
-          authMethod: "password",
-          authModeOverride,
-        }),
-        socket: { close: vi.fn() },
-      };
-      const generation = sharedGeneration(next, authModeOverride);
-      expect(generation).toBe(fallback.sharedGatewaySessionGeneration);
-      const state = new SharedGatewaySessionGenerationState({
-        current: generation,
-        required: null,
-        authModeOverride,
-      });
-      const retainedSource = new AbortController();
-      const detachedFallbackSource = new AbortController();
-      const releaseRetained = state.onInvalidated(
-        generation,
-        () => retainedSource.abort(),
-        retained.authPolicy,
-      );
-      const releaseFallback = state.onInvalidated(
-        generation,
-        () => detachedFallbackSource.abort(),
-        fallback.authPolicy,
-      );
-      const fallbackInvalidated = vi.fn();
-      const releaseClient = onGatewayPolicyClientInvalidated(fallback, fallbackInvalidated);
-      const transition = { previous: initial, next };
-
-      expect(state.finalize(claimGeneration(state, generation), transition)).toBe(true);
-      expect(detachedFallbackSource.signal.aborted).toBe(true);
+      activateSecretsRuntimeSnapshot(snapshot);
+      const publishedRevision = getActiveSecretsRuntimeSnapshotRevision();
+      activateSecretsRuntimeSnapshot(snapshot);
+      expect(getActiveSecretsRuntimeSnapshotRevision()).toBeGreaterThan(publishedRevision);
+    }
+    if (newer) {
       enforceSharedGatewaySessionGenerationForConfigWrite({
         state,
-        nextConfig: next,
-        resolveRuntimeSnapshotGeneration: () => generation,
-        clients: [retained, fallback],
-        transition,
+        nextConfig: { gateway: { reload: { mode: "off" } } },
+        resolveRuntimeSnapshotGeneration: () => newer,
+        clients: [],
       });
-      expect(fallback.sourceInvalidated).toBe(true);
-      expect(fallback.socket.close).toHaveBeenCalledWith(4001, "gateway auth changed");
-      expect(fallbackInvalidated).toHaveBeenCalledOnce();
-      expect(retained.socket.close).not.toHaveBeenCalled();
-      expect(retained.sourceInvalidated).toBeFalsy();
-      expect(retainedSource.signal.aborted).toBe(false);
-      releaseClient();
-      releaseFallback();
-      releaseRetained();
-    },
-  );
-
-  it("normalizes a matching required marker after a same-generation refresh", () => {
-    const state = new SharedGatewaySessionGenerationState({
-      current: "generation-a",
-      required: "generation-a",
-    });
-    const ownership = claimGeneration(state, "generation-a");
-    const snapshot = {
-      sourceConfig: {},
-      config: {},
-      authStores: [],
-      authStoreCredentialsRevision: getRuntimeAuthProfileStoreCredentialsRevision(),
-      authStoreSnapshotsRevision: getRuntimeAuthProfileStoreSnapshotsRevision(),
-      warnings: [],
-      webTools: createEmptyRuntimeWebToolsMetadata(),
-    };
-    activateSecretsRuntimeSnapshot(snapshot);
-    const publishedRevision = getActiveSecretsRuntimeSnapshotRevision();
-    activateSecretsRuntimeSnapshot(snapshot);
-
-    expect(getActiveSecretsRuntimeSnapshotRevision()).toBeGreaterThan(publishedRevision);
-
-    expect(state.finalize(ownership)).toBe(true);
+    }
+    expect(state.finalize(ownership)).toBe(newer === null);
     expect({ current: state.current, required: state.required }).toEqual({
-      current: "generation-a",
-      required: null,
-    });
-  });
-
-  it("does not clear a same-generation required marker owned by a newer config write", () => {
-    const state = new SharedGatewaySessionGenerationState({
-      current: "generation-a",
-      required: "generation-a",
-    });
-    const ownership = claimGeneration(state, "generation-a");
-    enforceSharedGatewaySessionGenerationForConfigWrite({
-      state,
-      nextConfig: { gateway: { reload: { mode: "off" } } },
-      resolveRuntimeSnapshotGeneration: () => "generation-a",
-      clients: [],
-    });
-
-    expect(state.finalize(ownership)).toBe(false);
-    expect({ current: state.current, required: state.required }).toEqual({
-      current: "generation-a",
-      required: "generation-a",
-    });
-  });
-
-  it("clears the previous required generation after a credential rotation commits", () => {
-    const state = new SharedGatewaySessionGenerationState({
-      current: "generation-a",
-      required: "generation-a",
-    });
-    const ownership = claimGeneration(state, "generation-b");
-
-    expect(state.finalize(ownership)).toBe(true);
-    expect({ current: state.current, required: state.required }).toEqual({
-      current: "generation-b",
-      required: null,
-    });
-  });
-
-  it("does not overwrite a newer published generation", () => {
-    const state = new SharedGatewaySessionGenerationState({
-      current: "generation-a",
-      required: "generation-a",
-    });
-    const ownership = claimGeneration(state, "generation-a");
-    enforceSharedGatewaySessionGenerationForConfigWrite({
-      state,
-      nextConfig: { gateway: { reload: { mode: "off" } } },
-      resolveRuntimeSnapshotGeneration: () => "generation-b",
-      clients: [],
-    });
-
-    expect(state.finalize(ownership)).toBe(false);
-    expect({ current: state.current, required: state.required }).toEqual({
-      current: "generation-b",
-      required: "generation-b",
+      current: newer ?? claimed,
+      required: newer,
     });
   });
 

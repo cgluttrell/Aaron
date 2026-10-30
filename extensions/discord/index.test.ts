@@ -1,8 +1,10 @@
 import { expect, it, vi } from "vitest";
 
+// mock-isolation: Import failure proves inspection never loads the activity runtime.
 vi.mock("./activities-api.js", () => {
   throw new Error("activity runtime must not load during account inspection");
 });
+// mock-isolation: Import failure proves inspection never loads the voice runtime.
 vi.mock("./transcripts-source-api.js", () => {
   throw new Error("voice runtime must not load during account inspection");
 });

@@ -186,8 +186,12 @@ describe("Gateway isolated task quota recovery", () => {
         expect(JSON.parse(captured.body), evidence()).toMatchObject({
           rate_limit: { allowed: true, limit_reached: false },
         });
+        // Codex account checks run on their own schedule; the due quota read is the contract.
         expect(
-          provider.requests.slice(beforePending).map((request) => request.authorization),
+          provider.requests
+            .slice(beforePending)
+            .filter((request) => request.path.endsWith("/usage"))
+            .map((request) => request.authorization),
           evidence(),
         ).toEqual([`Bearer ${access}`]);
 

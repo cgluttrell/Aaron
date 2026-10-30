@@ -1,3 +1,5 @@
+import { resolveCollapsedSessionAuthPinSource } from "../../config/sessions/auth-profile-override-provenance.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { PluginMetadataSnapshot } from "../../plugins/plugin-metadata-snapshot.types.js";
 import { resolveAuthProfileOrder } from "../auth-profiles/order.js";
@@ -10,6 +12,28 @@ type HarnessAuthProfileSelection = {
   authProfileProvider: string;
   authProfileMode?: string;
 };
+
+/**
+ * An explicit session choice owns the conversation. Otherwise the profile bound
+ * to the configured model replaces a stale automatic session choice.
+ */
+export function resolveSelectedSessionAuthProfile(
+  sessionEntry: SessionEntry | undefined,
+  configuredAuthProfileId: string | undefined,
+): { id: string; source: "auto" | "user" | undefined } | undefined {
+  const sessionAuthProfileId = sessionEntry?.authProfileOverride?.trim();
+  const sessionAuthProfileSource = resolveCollapsedSessionAuthPinSource(sessionEntry);
+  if (sessionAuthProfileId && sessionAuthProfileSource !== "auto") {
+    return { id: sessionAuthProfileId, source: sessionAuthProfileSource };
+  }
+  const configured = configuredAuthProfileId?.trim();
+  if (configured) {
+    return { id: configured, source: "user" };
+  }
+  return sessionAuthProfileId
+    ? { id: sessionAuthProfileId, source: sessionAuthProfileSource }
+    : undefined;
+}
 
 export function resolveHarnessAuthProfileSelection(params: {
   config: OpenClawConfig;

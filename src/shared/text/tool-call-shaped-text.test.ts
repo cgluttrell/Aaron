@@ -40,4 +40,23 @@ describe("detectToolCallShapedText", () => {
     expect(detectToolCallShapedText("Use tool_call tags only in examples.")).toBeNull();
     expect(detectToolCallShapedText("Use <tool_call> to invoke tools.")).toBeNull();
   });
+
+  it("names the tool in a legacy bracketed call", () => {
+    const legacy = '[TOOL_CALL]{tool => "read", args => {"path":"proof.txt"}}[/TOOL_CALL]';
+    expect(detectToolCallShapedText(`note ${legacy}`)).toEqual({
+      kind: "bracketed_tool_call",
+      toolName: "read",
+    });
+    expect(detectToolCallShapedText('[TOOL_CALL]{tool => "read"}')).toBeNull();
+  });
+
+  // Each reply shape below took seconds on the former single-regex checks.
+  it.each([
+    ["repeated legacy openers", `{${'[TOOL_CALL]{TOOL=>"G"'.repeat(950)}a`],
+    ["an Action line before blank lines", `Action: x${"\n".repeat(2_000)}y`],
+  ])("returns promptly for %s", (_label, text) => {
+    const started = performance.now();
+    expect(detectToolCallShapedText(text)).toBeNull();
+    expect(performance.now() - started).toBeLessThan(500);
+  });
 });

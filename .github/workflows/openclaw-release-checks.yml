@@ -152,7 +152,7 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-  NODE_VERSION: "24.21.0"
+  NODE_VERSION: "24.22.1"
   OPENCLAW_CI_OPENAI_MODEL: ${{ vars.OPENCLAW_CI_OPENAI_MODEL || 'openai/gpt-5.6-luna' }}
 
 jobs:
@@ -204,6 +204,9 @@ jobs:
       package_acceptance_scheduled: ${{ steps.inputs.outputs.package_acceptance_scheduled }}
       qa_parity_scheduled: ${{ steps.inputs.outputs.qa_parity_scheduled }}
     steps:
+      - name: Report release runner routing
+        if: vars.OPENCLAW_CI_RUNNER_BACKEND == 'github'
+        run: echo "::notice title=Release runner routing::OPENCLAW_CI_RUNNER_BACKEND=github moves hosted-proven release lanes to ubuntu-24.04; QA Lab runtime-pair stays pinned to Blacksmith and queues during an outage."
       - name: Require trusted workflow ref for release checks
         env:
           RELEASE_REF: ${{ inputs.ref }}
@@ -284,7 +287,7 @@ jobs:
 
       - name: Setup admission Node.js
         env:
-          REQUESTED_NODE_VERSION: "24.x"
+          REQUESTED_NODE_VERSION: "24.22.1"
         run: |
           set -euo pipefail
           source workflow/.github/actions/setup-pnpm-store-cache/ensure-node.sh
@@ -938,7 +941,7 @@ jobs:
     needs: [resolve_target]
     if: needs.resolve_target.outputs.package_required == 'true'
     runs-on: ${{ vars.OPENCLAW_RELEASE_RUNNER_GROUP != '' && fromJSON(format('{{"group":{0},"labels":{1}}}', toJSON(vars.OPENCLAW_RELEASE_RUNNER_GROUP), toJSON('ubuntu-24.04'))) || ('ubuntu-24.04') }}
-    timeout-minutes: 15
+    timeout-minutes: 35
     permissions:
       actions: read
       contents: read
@@ -1273,7 +1276,7 @@ jobs:
           import { execFileSync } from "node:child_process";
           import { appendFileSync, readFileSync } from "node:fs";
           import { compareReleaseVersions, parseReleaseVersion } from "./scripts/lib/release-version.mjs";
-          import { parseUpgradeSurvivorScenarios } from "./scripts/lib/upgrade-survivor-policy.mjs";
+          import { isPackageRecoveryScenario, parseUpgradeSurvivorScenarios } from "./scripts/lib/upgrade-survivor-policy.mjs";
 
           const candidate = parseReleaseVersion(process.env.CANDIDATE_VERSION);
           const workflow = parseReleaseVersion(JSON.parse(readFileSync("package.json", "utf8")).version);
@@ -1289,6 +1292,7 @@ jobs:
             compareReleaseVersions(candidate.baseVersion, workflow.baseVersion) >= 0;
           let supportsOperatorScenario = false;
           let supportsSiblingScenario = false;
+          let supportsPackageRecovery = false;
           if (currentLine) {
             const sha = process.env.CANDIDATE_SOURCE_SHA;
             assert(/^[a-f0-9]{40}$/u.test(sha || ""), "Candidate source SHA is required.");
@@ -1300,6 +1304,7 @@ jobs:
               "Candidate survivor directory metadata was invalid.");
             supportsOperatorScenario = names.includes("legacy-operator-state.mjs");
             supportsSiblingScenario = names.includes("custom-plugin-siblings.mjs");
+            supportsPackageRecovery = names.includes("package-activation-recovery.mjs");
           }
           const frozenBaselines = process.env.QUALIFICATION_BASELINES_JSON ?
             JSON.parse(process.env.QUALIFICATION_BASELINES_JSON).upgradeSurvivorBaselines.join(" ") : "";
@@ -1313,6 +1318,7 @@ jobs:
           const scenarios = (soak
             ? parseUpgradeSurvivorScenarios("reported-issues")
             : ["base", "legacy-operator-state", "custom-plugin-siblings"])
+            .filter((scenario) => !isPackageRecoveryScenario(scenario) || supportsPackageRecovery)
             .filter((scenario) => scenario !== "legacy-operator-state" || legacyOperator)
             .filter((scenario) => scenario !== "custom-plugin-siblings" || supportsSiblingScenario)
             .join(" ");
@@ -1965,7 +1971,9 @@ jobs:
     name: Run QA Lab runtime-pair lane (${{ matrix.lane }})
     needs: [resolve_target]
     if: needs.resolve_target.outputs.qa_parity_scheduled == 'true'
-    runs-on: ${{ vars.OPENCLAW_RELEASE_RUNNER_GROUP != '' && fromJSON(format('{{"group":{0},"labels":{1}}}', toJSON(vars.OPENCLAW_RELEASE_RUNNER_GROUP), toJSON(vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' && 'ubuntu-24.04' || 'blacksmith-8vcpu-ubuntu-2404'))) || (vars.OPENCLAW_CI_RUNNER_BACKEND == 'github' && 'ubuntu-24.04' || 'blacksmith-8vcpu-ubuntu-2404') }}
+    # Pinned: hosted ubuntu-24.04 failed the core lane in both runs after a backend flip
+    # (36639549086, 36639978260). An outage queues this lane instead of failing it.
+    runs-on: ${{ vars.OPENCLAW_RELEASE_RUNNER_GROUP != '' && fromJSON(format('{{"group":{0},"labels":{1}}}', toJSON(vars.OPENCLAW_RELEASE_RUNNER_GROUP), toJSON('blacksmith-8vcpu-ubuntu-2404'))) || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 45
     strategy:
       fail-fast: false

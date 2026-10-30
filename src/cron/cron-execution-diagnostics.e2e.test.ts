@@ -183,13 +183,15 @@ describe("cron execution diagnostics", { concurrent: false }, () => {
         status: "skipped",
         provider: "ollama",
         model: "diagnostic-model",
-        error: expect.stringContaining("unavailable"),
+        error: expect.stringContaining(
+          "Start the local provider or correct its configured endpoint",
+        ),
         diagnostics: {
           entries: expect.arrayContaining([
             expect.objectContaining({
               source: "model-preflight",
               severity: "warn",
-              message: expect.stringContaining("unavailable"),
+              message: expect.stringContaining("the local provider preflight failed"),
             }),
           ]),
         },
@@ -331,6 +333,48 @@ describe("cron execution diagnostics", { concurrent: false }, () => {
               message: "SYSTEM_RUN_DENIED: approval required",
             }),
           ]),
+        },
+      });
+    }
+  });
+
+  it("persists an unresolved exec warning when the scheduled agent recovers with a reply", async () => {
+    const modelRef = { provider: "openai", model: "gpt-5.4" };
+    resolveConfiguredModelRefMock.mockReturnValue(modelRef);
+    mockRunCronFallbackPassthrough();
+    runEmbeddedAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "RESULT: the command did not run" }],
+      meta: {
+        agentMeta: {},
+        toolSummary: {
+          calls: 1,
+          tools: ["exec"],
+          failures: 1,
+          unresolvedError: { toolName: "exec" },
+        },
+      },
+    });
+
+    const { finished, history, lastError } = await runPersistedDiagnosticCase({
+      cfg: configFor(modelRef),
+      modelRef,
+      name: "invalid exec arguments",
+    });
+
+    expect(lastError).toBeUndefined();
+    for (const outcome of [finished, history]) {
+      expect(outcome).toMatchObject({
+        status: "ok",
+        diagnostics: {
+          summary: "exec tool failed",
+          entries: [
+            expect.objectContaining({
+              source: "exec",
+              severity: "warn",
+              message: "exec tool failed",
+              toolName: "exec",
+            }),
+          ],
         },
       });
     }

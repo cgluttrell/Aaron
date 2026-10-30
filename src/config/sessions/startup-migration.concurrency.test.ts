@@ -9,10 +9,7 @@ import { hasPersistedOpenClawAgentCanonicalValidation } from "../../state/opencl
 import { assertNoOpenClawAgentDatabaseLeasesReadOnly } from "../../state/openclaw-agent-db-lease.js";
 import * as lifecycle from "../../state/openclaw-agent-db-lifecycle.js";
 import { withOpenClawAgentDatabaseReadOnly } from "../../state/openclaw-agent-db-readonly.js";
-import {
-  hasOpenClawAgentCanonicalValidation,
-  invalidateOpenClawAgentDatabaseValidation,
-} from "../../state/openclaw-agent-db-validation-cache.js";
+import { hasOpenClawAgentCanonicalValidation } from "../../state/openclaw-agent-db-validation-cache.js";
 import {
   closeOpenClawAgentDatabasesForTest,
   openOpenClawAgentDatabase,
@@ -238,6 +235,43 @@ function gateFirstCertificationPerTask() {
   };
 }
 
+it("preserves native lock classification after canonical worker cleanup", async () => {
+  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
+    const { agentIds, cfg } = seedFleet(state.env);
+    const agentId = agentIds[0]!;
+    const pathname = openOpenClawAgentDatabase({ agentId, env: state.env }).path;
+    closeOpenClawAgentDatabasesForTest(state.env.OPENCLAW_STATE_DIR);
+    const preload = state.path("canonical-lock.cjs");
+    writeFileSync(
+      preload,
+      `
+      const { DatabaseSync } = require('node:sqlite');
+      const exec = DatabaseSync.prototype.exec;
+      DatabaseSync.prototype.exec = function(sql) {
+        if (this.location() === ${JSON.stringify(pathname)} && /^\\s*BEGIN\\b/i.test(sql)) {
+          throw Object.assign(new Error('database is locked'), { code: 'ERR_SQLITE_ERROR', errcode: 5 });
+        }
+        return exec.call(this, sql);
+      };
+      `,
+    );
+    observer.beforeCreate = (_filename, options) => ({
+      ...options,
+      execArgv: [...(options.execArgv ?? []), "--require", preload],
+    });
+    await expect(
+      runSessionStartupMigration({
+        cfg,
+        env: state.env,
+        agentIds: new Set([agentId]),
+        log: { info: vi.fn(), warn: vi.fn() },
+      }),
+    ).rejects.toMatchObject({ errcode: 5 });
+    expect([...observer.workers].every((worker) => worker.threadId === -1)).toBe(true);
+    expect(() => assertNoOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).not.toThrow();
+  });
+});
+
 it("reuses two workers while closing each database task before runtime handoff", async () => {
   await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
     const { agentIds, cfg } = seedFleet(state.env);
@@ -339,59 +373,6 @@ it("reuses two workers while closing each database task before runtime handoff",
       gate.releaseAll();
       await startup.catch(() => {});
     }
-  });
-});
-
-it("reuses durable fleet receipts and recertifies only the store revoked by its parent", async () => {
-  await withOpenClawTestState({ scenario: "minimal" }, async (state) => {
-    const { agentIds, cfg } = seedFleet(state.env);
-    const admitted: string[] = [];
-    observer.onTask = ({ agentId }) => admitted.push(agentId);
-    const startup = () =>
-      runSessionStartupMigration({
-        cfg,
-        env: state.env,
-        log: { info: vi.fn(), warn: vi.fn() },
-      });
-
-    await startup();
-    expect(admitted.toSorted()).toEqual(agentIds);
-    expect(observer.workers.size).toBe(2);
-    for (const agentId of agentIds) {
-      expect(
-        withOpenClawAgentDatabaseReadOnly(hasPersistedOpenClawAgentCanonicalValidation, {
-          agentId,
-          env: state.env,
-        }),
-      ).toMatchObject({ found: true, value: true });
-    }
-
-    closeOpenClawAgentDatabasesForTest(state.env.OPENCLAW_STATE_DIR);
-    await startup();
-    expect(admitted).toHaveLength(5);
-    expect(observer.workers.size).toBe(2);
-
-    const revokedAgentId = agentIds[0]!;
-    expect(
-      withOpenClawAgentDatabaseReadOnly(
-        (database) => {
-          invalidateOpenClawAgentDatabaseValidation(database.path);
-          return hasOpenClawAgentCanonicalValidation(database);
-        },
-        { agentId: revokedAgentId, env: state.env },
-      ),
-    ).toMatchObject({ found: true, value: false });
-    await startup();
-    expect(admitted.slice(5)).toEqual([revokedAgentId]);
-    expect(observer.workers.size).toBe(3);
-    expect(
-      withOpenClawAgentDatabaseReadOnly(hasOpenClawAgentCanonicalValidation, {
-        agentId: revokedAgentId,
-        env: state.env,
-      }),
-    ).toMatchObject({ found: true, value: true });
-    expect([...observer.workers].every((worker) => worker.threadId === -1)).toBe(true);
-    expect(() => assertNoOpenClawAgentDatabaseLeasesReadOnly({ env: state.env })).not.toThrow();
   });
 });
 

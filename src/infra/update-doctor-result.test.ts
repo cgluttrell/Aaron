@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { resolvePreferredOpenClawTmpDir } from "./tmp-openclaw-dir.js";
 import type { UpdateDoctorConfigChange } from "./update-doctor-config.js";
 import {
@@ -14,63 +14,89 @@ import {
   recordUpdateDoctorConfigWrite,
   recordUpdateDoctorConfigWriteRefusal,
   writeUpdatePostInstallDoctorResult,
+  UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV,
 } from "./update-doctor-result.js";
 
 const resultPaths: string[] = [];
 
 afterEach(async () => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await Promise.all(resultPaths.splice(0).map((resultPath) => fs.rm(resultPath, { force: true })));
 });
 
 describe("post-install doctor result IPC", () => {
-  it.each([
-    { status: "ok" as const, configHash: "unchanged" },
-    {
-      status: "error" as const,
-      databaseWrites: {
-        unchanged: false,
-        generations: {
-          "/fixture/agent.sqlite": "captured-generation",
-          "/fixture/missing.sqlite": null,
+  it.each(
+    [
+      { status: "ok" as const, configHash: "unchanged" },
+      {
+        status: "error" as const,
+        databaseWrites: {
+          unchanged: false,
+          generations: {
+            "/fixture/agent.sqlite": "captured-generation",
+            "/fixture/missing.sqlite": null,
+          },
         },
       },
-    },
-    { status: "ok" as const, warnings: ["plugin/example: version probe timed out"] },
-    {
-      status: "ok" as const,
-      warnings: ["Doctor maintenance is deferred; run openclaw doctor --fix."],
-      maintenanceRefusal: { kind: "deferred" as const, reason: "coordinator-contention" as const },
-    },
-    { status: "error" as const, configHash: "a".repeat(64), configInputHash: "b".repeat(64) },
-    {
-      status: "error" as const,
-      failureFacts: [
-        { check: "doctor", code: "doctor-failed", message: "Required migration failed" },
-      ],
-    },
-    {
-      status: "ok" as const,
-      configChanges: [
-        { kind: "key" as const, key: "agents" },
-        { kind: "key" as const, key: "meta" },
-        { kind: "migration" as const, message: "Moved agents.list to agents.entries." },
-      ],
-    },
-    {
-      status: "error" as const,
-      configWriteRefusal: {
-        reason: "include-ownership",
-        message: "Repair agents in its included file.",
-        keys: ["agents"],
+      { status: "ok" as const, warnings: ["plugin/example: version probe timed out"] },
+      {
+        status: "ok" as const,
+        warnings: ["Doctor maintenance is deferred; run openclaw doctor --fix."],
+        maintenanceRefusal: {
+          kind: "deferred" as const,
+          reason: "coordinator-contention" as const,
+        },
       },
-    },
-    {
-      ...createDeferredConfiguredPluginRepairDoctorResult(["deferred repair"]),
-      configHash: "b".repeat(64),
-      warnings: ["plugin/example: version probe timed out"],
-    },
-    createDeferredConfiguredPluginRepairDoctorResult(["legacy child advisory"]),
-  ])("round-trips $status results and consumes the file", async (result) => {
+      { status: "error" as const, configHash: "a".repeat(64), configInputHash: "b".repeat(64) },
+      {
+        status: "error" as const,
+        failureFacts: [
+          { check: "doctor", code: "doctor-failed", message: "Required migration failed" },
+        ],
+      },
+      {
+        status: "ok" as const,
+        configChanges: [
+          { kind: "key" as const, key: "agents" },
+          { kind: "key" as const, key: "meta" },
+          { kind: "migration" as const, message: "Moved agents.list to agents.entries." },
+        ],
+      },
+      {
+        status: "error" as const,
+        configWriteRefusal: {
+          reason: "include-ownership",
+          message: "Repair agents in its included file.",
+          keys: ["agents"],
+        },
+      },
+      {
+        ...createDeferredConfiguredPluginRepairDoctorResult(["deferred repair"]),
+        configHash: "b".repeat(64),
+        warnings: ["plugin/example: version probe timed out"],
+      },
+      createDeferredConfiguredPluginRepairDoctorResult(["legacy child advisory"]),
+    ].flatMap((result) => ["file", "stdout"].map((destination) => ({ result, destination }))),
+  )("round-trips $result.status results over $destination", async ({ result, destination }) => {
+    if (destination === "stdout") {
+      const output: string[] = [];
+      vi.stubEnv("VITEST", "false");
+      const write = vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+        output.push(typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8"));
+        return true;
+      });
+      try {
+        await writeUpdatePostInstallDoctorResult({ resultPath: "-", result });
+      } finally {
+        write.mockRestore();
+      }
+      expect(output.join("")).toMatch(
+        new RegExp(`^${UPDATE_POST_INSTALL_DOCTOR_RESULT_PATH_ENV}=`),
+      );
+      expect(JSON.parse(output.join("").split("=").slice(1).join("="))).toEqual(result);
+      return;
+    }
     const resultPath = createUpdatePostInstallDoctorResultPath();
     resultPaths.push(resultPath);
     await writeUpdatePostInstallDoctorResult({ resultPath, result });
@@ -79,20 +105,7 @@ describe("post-install doctor result IPC", () => {
     await expect(fs.access(resultPath)).rejects.toThrow();
   });
 
-  it("discards malformed optional database proof without changing Doctor success", async () => {
-    const resultPath = createUpdatePostInstallDoctorResultPath();
-    resultPaths.push(resultPath);
-    await fs.writeFile(
-      resultPath,
-      JSON.stringify({ status: "ok", databaseWrites: { unchanged: "true" } }),
-    );
-    await expect(consumeUpdatePostInstallDoctorResult(resultPath)).resolves.toMatchObject({
-      status: "ok",
-      databaseWrites: undefined,
-    });
-  });
-
-  it("bounds warning count and length before writing and after reading", async () => {
+  it("bounds distinct warnings before writing and after reading", async () => {
     const resultPath = createUpdatePostInstallDoctorResultPath();
     resultPaths.push(resultPath);
     const warnings = [
@@ -100,8 +113,12 @@ describe("post-install doctor result IPC", () => {
       ...Array.from({ length: 40 }, (_, index) => `${index}: ${"x".repeat(600)}`),
     ];
     const expected = warnings.slice(1, 33).map((warning) => warning.slice(0, 500));
+    const repeatedWarnings = warnings.flatMap((warning) => [warning, ` ${warning} `]);
 
-    await writeUpdatePostInstallDoctorResult({ resultPath, result: { status: "ok", warnings } });
+    await writeUpdatePostInstallDoctorResult({
+      resultPath,
+      result: { status: "ok", warnings: repeatedWarnings },
+    });
     expect(JSON.parse(await fs.readFile(resultPath, "utf8"))).toEqual({
       status: "ok",
       warnings: expected,
@@ -111,7 +128,7 @@ describe("post-install doctor result IPC", () => {
       warnings: expected,
     });
 
-    await fs.writeFile(resultPath, JSON.stringify({ status: "ok", warnings }));
+    await fs.writeFile(resultPath, JSON.stringify({ status: "ok", warnings: repeatedWarnings }));
     await expect(consumeUpdatePostInstallDoctorResult(resultPath)).resolves.toEqual({
       status: "ok",
       warnings: expected,

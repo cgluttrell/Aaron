@@ -15,6 +15,7 @@ import {
 import { createOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
 import { closeOpenClawStateDatabaseForTest } from "../state/openclaw-state-db.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { observeMainThreadSql } from "../test-utils/main-thread-sql-spies.test-support.js";
 import * as nodeSqlite from "./node-sqlite.js";
 import { requireNodeSqlite } from "./node-sqlite.js";
 import * as integrityWorker from "./sqlite-integrity-worker.js";
@@ -194,6 +195,10 @@ describe("legacy media persistence doctor migration", () => {
     });
     const { DatabaseSync } = requireNodeSqlite();
     const trajectoryDatabase = new DatabaseSync(databasePath);
+    // Individually safe timestamps must not overflow an aggregate migration fingerprint.
+    trajectoryDatabase
+      .prepare("UPDATE transcript_events SET created_at = ?")
+      .run(Math.floor(Number.MAX_SAFE_INTEGER / 2) + 100);
     trajectoryDatabase
       .prepare(
         "INSERT INTO trajectory_runtime_events(session_id,seq,run_id,event_json,created_at) VALUES(?,?,?,?,?)",
@@ -265,7 +270,26 @@ describe("legacy media persistence doctor migration", () => {
     writeArchive(compressedArchive, [conflict], true);
 
     const before = readDatabaseSnapshot(databasePath);
-    const result = await migrateLegacyMediaPersistence({ env });
+    const sql = observeMainThreadSql();
+    let result: Awaited<ReturnType<typeof migrateLegacyMediaPersistence>>;
+    try {
+      result = await migrateLegacyMediaPersistence({ env });
+      const statements = sql.calls.flatMap((call) =>
+        call.mock.calls.map(([statement]) => statement),
+      );
+      expect(statements).toContain("PRAGMA data_version");
+      expect(
+        statements.filter(
+          (statement) =>
+            typeof statement === "string" &&
+            /\bsum\s*\(/iu.test(statement) &&
+            /\b(?:transcript_events|trajectory_runtime_events)\b/iu.test(statement) &&
+            !/\bwhere\b/iu.test(statement),
+        ),
+      ).toEqual([]);
+    } finally {
+      sql.restore();
+    }
     expect(result.warnings).toEqual([]);
     expect(result.changes).toHaveLength(4);
     expect(result.changes).toEqual(
@@ -354,50 +378,13 @@ describe("legacy media persistence doctor migration", () => {
 
     expect(openOpenClawAgentDatabase({ agentId: "main", env }).db.isOpen).toBe(true);
     closeOpenClawAgentDatabasesForTest();
-    expect(await migrateLegacyMediaPersistence({ env })).toEqual({ changes: [], warnings: [] });
-  });
-
-  it("migrates when valid transcript created_at rows have an unsafe aggregate", async () => {
-    const stateDir = makeTempDir(tempDirs, "media-persistence-large-created-at-");
-    const env = { OPENCLAW_STATE_DIR: stateDir };
-    const legacyMediaPaths = ["/media/a.png", "/media/b.png"];
-    const databasePath = createLegacyDatabaseFixture({
-      env,
-      eventsBySession: {
-        unsafe: legacyMediaPaths.map((mediaPath, index) =>
-          createEvent({
-            id: `event-${index + 1}`,
-            parentId: index === 0 ? null : "event-1",
-            timestamp: (index + 1) * 1000,
-            message: { role: "user", content: `message ${index + 1}`, MediaPath: mediaPath },
-          }),
-        ),
-      },
-    });
-    const largeCreatedAt = Math.floor(Number.MAX_SAFE_INTEGER / 2) + 100;
-    expect(largeCreatedAt * 2).toBeGreaterThan(Number.MAX_SAFE_INTEGER);
-    const { DatabaseSync } = requireNodeSqlite();
-    const database = new DatabaseSync(databasePath);
-    database
-      .prepare("UPDATE transcript_events SET created_at = ? WHERE session_id = ?")
-      .run(largeCreatedAt, "unsafe");
-    database.close();
-
-    expect((await migrateLegacyMediaPersistence({ env })).warnings).toEqual([]);
-
-    const snapshot = readDatabaseSnapshot(databasePath);
-    expect(snapshot.version.user_version).toBe(OPENCLAW_AGENT_SCHEMA_VERSION);
-    expect(snapshot.rows.map((row) => row.created_at)).toEqual([largeCreatedAt, largeCreatedAt]);
-    const messages = snapshot.rows.map(
-      (row) => (JSON.parse(row.event_json) as FixtureEvent).message,
-    );
-    expect(messages).toEqual(
-      legacyMediaPaths.map((mediaPath) =>
-        expect.objectContaining({
-          __openclaw: { media: [expect.objectContaining({ path: mediaPath })] },
-        }),
-      ),
-    );
+    const checks = vi.spyOn(integrityWorker, "assertSqliteIntegrityInWorker");
+    try {
+      expect(await migrateLegacyMediaPersistence({ env })).toEqual({ changes: [], warnings: [] });
+      expect(checks.mock.calls.filter(([pathname]) => pathname === databasePath)).toHaveLength(1);
+    } finally {
+      checks.mockRestore();
+    }
   });
 
   it.each([OPENCLAW_AGENT_SCHEMA_VERSION])(
@@ -563,6 +550,7 @@ describe("legacy media persistence doctor migration", () => {
       env,
       eventsBySession: { drift: [event] },
     });
+    let afterForeignCommit: ReturnType<typeof readDatabaseSnapshot> | undefined;
     const transcriptDrift = await migrateLegacyMediaPersistence({
       env,
       hooks: {
@@ -577,10 +565,15 @@ describe("legacy media persistence doctor migration", () => {
             )
             .run("drift");
           writer.close();
+          afterForeignCommit = readDatabaseSnapshot(databasePath);
         },
       },
     });
-    expect(transcriptDrift.warnings.join("\n")).toContain("source changed");
+    expect(transcriptDrift.warnings.join("\n")).toContain(
+      "source changed before migration transaction",
+    );
+    expect(transcriptDrift.changes).toEqual([]);
+    expect(readDatabaseSnapshot(databasePath)).toEqual(afterForeignCommit);
     expect(readDatabaseSnapshot(databasePath).version.user_version).toBe(PREVIOUS_VERSION);
 
     const trajectoryWriter = new DatabaseSync(databasePath);
@@ -610,15 +603,21 @@ describe("legacy media persistence doctor migration", () => {
             )
             .run(
               JSON.stringify({
-                data: { messagesSnapshot: [{ role: "user", MediaPath: "/changed.png" }] },
+                // A same-length replacement leaves the retired fingerprints unchanged.
+                data: { messagesSnapshot: [{ role: "user", MediaPath: "/new.png" }] },
               }),
               "drift",
             );
           writer.close();
+          afterForeignCommit = readDatabaseSnapshot(databasePath);
         },
       },
     });
-    expect(trajectoryDrift.warnings.join("\n")).toContain("trajectory source changed");
+    expect(trajectoryDrift.warnings.join("\n")).toContain(
+      "source changed before migration transaction",
+    );
+    expect(trajectoryDrift.changes).toEqual([]);
+    expect(readDatabaseSnapshot(databasePath)).toEqual(afterForeignCommit);
     expect(readDatabaseSnapshot(databasePath).version.user_version).toBe(PREVIOUS_VERSION);
 
     const archivePath = path.join(

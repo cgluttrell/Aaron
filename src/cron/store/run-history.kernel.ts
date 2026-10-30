@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
+import { sql } from "kysely";
 import { executeSqliteQuerySync, getNodeSqliteKysely } from "../../infra/kysely-sync.js";
 import { normalizeSqliteNumber } from "../../infra/sqlite-number.js";
 import type { DB } from "../../state/openclaw-state-db.generated.js";
 import {
+  compareCronRunRecordsNewestFirst,
   cronRunRecordStoreKey,
   cronRunRecordToRunLogEntry,
   parseCronRunDetailJson,
@@ -53,7 +55,13 @@ function normalizeCronRunTimestamps(record: CronRunRecord): CronRunRecord {
 }
 
 /** Reads only Cron facts from the admitted released table, without restoring Tasks. */
-export function readCronRunRecordsInDatabase(db: DatabaseSync, jobId?: string): CronRunRecord[] {
+export function readCronRunRecordsInDatabase(
+  db: DatabaseSync,
+  jobId?: string,
+  runId?: string,
+  options?: { planningOnly?: boolean; taskIds?: readonly string[] },
+): CronRunRecord[] {
+  const planningOnly = options?.planningOnly === true;
   let select = query(db)
     .selectFrom("task_runs")
     .select([
@@ -73,14 +81,31 @@ export function readCronRunRecordsInDatabase(db: DatabaseSync, jobId?: string): 
       "notify_policy",
       "terminal_outcome",
       "error",
-      "terminal_summary",
-      "detail_json",
+      planningOnly
+        ? /* kysely-allow-raw: Maintenance never reads the summary; preserve the decoded row shape. */ sql<
+            string | null
+          >`NULL`.as("terminal_summary")
+        : "terminal_summary",
+      planningOnly
+        ? /* kysely-allow-raw: Project only the two JSON members used for maintenance planning. */ sql<
+            string | null
+          >`CASE WHEN json_valid(detail_json) THEN json_object(
+            'storeKey', json_extract(detail_json, '$.storeKey'),
+            'kind', json_extract(detail_json, '$.kind')
+          ) END`.as("detail_json")
+        : "detail_json",
     ])
     .where("runtime", "=", "cron")
     .orderBy("created_at", "asc")
     .orderBy("task_id", "asc");
   if (jobId !== undefined) {
     select = select.where("source_id", "=", jobId);
+  }
+  if (runId !== undefined) {
+    select = select.where("run_id", "=", runId);
+  }
+  if (options?.taskIds !== undefined) {
+    select = select.where("task_id", "in", [...options.taskIds]);
   }
   return executeSqliteQuerySync(db, select).rows.map((row) => {
     // These released columns remain part of row admission even when Cron does not expose them.
@@ -133,7 +158,7 @@ export function readCronRunRecordsInDatabase(db: DatabaseSync, jobId?: string): 
 
 /** Caller owns the exact transaction. History never authorizes execution or receipt adoption. */
 export function recordCronRunInDatabase(db: DatabaseSync, input: CronRunHistoryWrite): void {
-  const existing = readCronRunRecordsInDatabase(db, input.jobId).find(
+  const existing = readCronRunRecordsInDatabase(db, input.jobId, input.runId).find(
     (row) =>
       row.runId === input.runId &&
       (cronRunRecordStoreKey(row) === input.storeKey ||
@@ -228,12 +253,7 @@ function collectExpiredCronRunIds(records: readonly CronRunRecord[], now: number
     partitions.set(key, partition);
   }
   for (const rows of partitions.values()) {
-    rows.sort(
-      (a, b) =>
-        resolveCronRunRecordTimestamp(b) - resolveCronRunRecordTimestamp(a) ||
-        b.createdAt - a.createdAt ||
-        b.id.localeCompare(a.id),
-    );
+    rows.sort(compareCronRunRecordsNewestFirst);
     for (const row of rows.slice(CRON_HISTORY_KEEP_PER_JOB)) {
       expired.add(row.id);
     }

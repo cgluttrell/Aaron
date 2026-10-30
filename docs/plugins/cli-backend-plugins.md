@@ -113,6 +113,7 @@ runtime behavior. Runtime behavior starts when the plugin entry calls
     function buildAcmeCliBackend(): Parameters<OpenClawPluginApi["registerCliBackend"]>[0] {
       return {
         id: "acme-cli",
+        modelProvider: "acme-cli",
         liveTest: {
           defaultModelRef: "acme-cli/acme-large",
           defaultImageProbe: false,
@@ -169,6 +170,13 @@ runtime behavior. Runtime behavior starts when the plugin entry calls
     The backend id must match the manifest `cliBackends` entry. The registered
     adapter is authoritative plugin code; OpenClaw config selects the backend
     but does not rewrite its command contract.
+
+    Set `modelProvider` to the canonical model provider whose models the CLI
+    executes. It can match the backend id, as above, or a separate provider id.
+    Omitting it or supplying a blank value emits a warning during runtime or
+    setup-only registration: direct CLI references still work, but no
+    provider-to-runtime binding is created. OpenClaw does not infer this field
+    from `id`.
 
   </Step>
 </Steps>
@@ -351,20 +359,6 @@ Declare how the backend enforces that contract:
 Runtime caps such as cron `toolsAllow` are normalized and group-expanded by
 OpenClaw before this contract is built. Native tools are disabled, and a
 backend without a complete declared enforcement path fails before execution.
-
-Rooted runs such as [Skill Workshop reviews](/tools/skill-workshop) also require
-`isolatesInstructionsWithExactTools: true` on the backend registration. Declare
-this optional capability only when exact-tool execution suppresses ambient
-instruction files, skills, hooks, and plugins for both fresh and resumed runs.
-The host-prepared instruction snapshot must remain authoritative. OpenClaw
-rejects rooted runs when this declaration is absent, even if the backend can
-enforce exact tools. Existing non-rooted runs do not require this field.
-
-The bundled Claude CLI backend declares this capability. Rooted execution
-disables its native tools and serves the selected OpenClaw tools through the
-host-owned MCP grant, which retains the root, filesystem policy, and configured
-sandbox. The declaration does not grant filesystem or approval authority to
-the backend.
 
 A backend whose native tools are model-callable may declare
 `projectNativeToolAuthority(nativeTools)` so that automations created from its

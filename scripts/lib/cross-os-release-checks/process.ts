@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import {
+  appendFileSync,
   createReadStream,
   createWriteStream,
   mkdirSync,
@@ -29,6 +30,7 @@ import type {
 import {
   CROSS_OS_COMMAND_CAPTURE_TAIL_BYTES,
   CROSS_OS_COMMAND_HEARTBEAT_SECONDS,
+  CROSS_OS_GATEWAY_STATUS_COMMAND_TIMEOUT_MS,
   CROSS_OS_PROCESS_TREE_KILL_AFTER_MS,
 } from "./config.ts";
 import { readLogTextSince } from "./logs.ts";
@@ -159,9 +161,10 @@ export function captureGatewayProcess(
   return { child, closeLog, ...log, waitForClose: () => childClosePromise };
 }
 
-export async function waitForGatewayWithStartupMigrationRestart(params: {
+export async function waitForGatewayWithStartupRecovery(params: {
+  gatewayPort: number;
   gatewayHolder: { current: GatewayHandle | null };
-  restartGateway: () => Promise<GatewayHandle>;
+  restartGateway: (reason: "migration" | "port-busy") => Promise<GatewayHandle>;
   waitUntilReady: (gateway: GatewayHandle) => Promise<void>;
 }) {
   let gateway = params.gatewayHolder.current;
@@ -180,12 +183,50 @@ export async function waitForGatewayWithStartupMigrationRestart(params: {
       await gateway.waitForClose();
       await gateway.closeLog();
       const startupLog = readLogTextSince(gateway.logPath, gateway.launchLogOffset);
-      if (attempt > 0 || !startupLog.includes(STARTUP_MIGRATION_RESTART_PREFIX)) {
+      const reason = startupLog.includes(STARTUP_MIGRATION_RESTART_PREFIX)
+        ? "migration"
+        : startupLog.includes(
+              `Port ${params.gatewayPort} is busy but no listener PID could be determined.`,
+            ) ||
+            startupLog.includes(
+              `port ${params.gatewayPort} is still busy after --force, but no listener PID could be determined`,
+            )
+          ? "port-busy"
+          : undefined;
+      if (attempt > 0 || !reason) {
         throw error;
       }
-      gateway = await params.restartGateway();
+      gateway = await params.restartGateway(reason);
       params.gatewayHolder.current = gateway;
     }
+  }
+}
+
+// Persist a fresh lane port before relaunching so status, dashboard, and agent
+// checks that read the lane configuration target the same Gateway.
+export async function configureReplacementGatewayPort(params: {
+  lane: LaneState;
+  logPath: string;
+  run: (args: string[], timeoutMs: number) => Promise<CommandResult>;
+}) {
+  const previousPort = params.lane.gatewayPort;
+  const reservation = await reserveGatewayPortForLane(params.lane);
+  try {
+    const configured = await params.run(
+      ["config", "set", "gateway.port", String(reservation.port), "--strict-json"],
+      CROSS_OS_GATEWAY_STATUS_COMMAND_TIMEOUT_MS,
+    );
+    if (configured.exitCode !== 0) {
+      throw new Error(
+        `Failed to configure replacement Gateway port ${reservation.port} (${configured.exitCode}).`,
+      );
+    }
+    appendFileSync(
+      params.logPath,
+      `[release-checks] Gateway refused port ${previousPort}; retrying once on port ${reservation.port}.\n`,
+    );
+  } finally {
+    await reservation.release();
   }
 }
 
@@ -259,9 +300,7 @@ async function waitForChildExit(child: ChildProcess, timeoutMs: number) {
         return;
       }
       settled = true;
-      if (timer) {
-        clearTimeout(timer);
-      }
+      clearTimeout(timer);
       child.off("exit", onExit);
       child.off("close", onClose);
       child.off("error", onError);
@@ -270,12 +309,7 @@ async function waitForChildExit(child: ChildProcess, timeoutMs: number) {
     const onExit = () => finish(true);
     const onClose = () => finish(true);
     const onError = () => finish(true);
-    const timer =
-      timeoutMs > 0
-        ? setTimeout(() => {
-            finish(false);
-          }, timeoutMs)
-        : null;
+    const timer = setTimeout(() => finish(false), timeoutMs);
 
     child.once("exit", onExit);
     child.once("close", onClose);
@@ -314,8 +348,8 @@ function decodeBoundedUtf8Tail(buffer: Buffer, maxBytes: number): string {
   return tail.subarray(start).toString("utf8");
 }
 
-function appendBoundedCommandOutput(current: string, chunk: Uint8Array | string, maxBytes: number) {
-  const chunkBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+function appendBoundedCommandOutput(current: string, chunk: string, maxBytes: number) {
+  const chunkBuffer = Buffer.from(chunk);
   if (chunkBuffer.byteLength >= maxBytes) {
     return decodeBoundedUtf8Tail(chunkBuffer, maxBytes);
   }
@@ -604,11 +638,7 @@ export async function startStaticFileServer(params: {
               return;
             }
             if (closeLogError) {
-              rejectPromise(
-                closeLogError instanceof Error
-                  ? closeLogError
-                  : new Error(formatError(closeLogError)),
-              );
+              rejectPromise(closeLogError);
               return;
             }
             resolvePromise();

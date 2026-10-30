@@ -11,7 +11,6 @@ export const uiNodeDrivenBrowserTestFiles = [
   "ui/src/pages/chat/components/chat-swarm-progress.browser.test.ts",
   "ui/src/components/form-controls.browser.test.ts",
   "ui/src/components/sidebar-footer-layout.browser.test.ts",
-  "ui/src/pages/sessions/view.browser.test.ts",
   "ui/src/styles/corner-shape.browser.test.ts",
   "ui/src/styles/cursor-policy.browser.test.ts",
   "ui/src/styles/chat-file-link-presentation.browser.test.ts",
@@ -59,6 +58,8 @@ export function isUiTestTarget(relative) {
 }
 
 export const uiE2eRealGatewayTestFiles = [
+  "ui/src/e2e/background-work.real-gateway.e2e.test.ts",
+  "ui/src/e2e/activity-run-inspector.real-gateway.e2e.test.ts",
   "ui/src/e2e/session-roster-request-rate.real-gateway.e2e.test.ts",
   "ui/src/e2e/quota-reset-status.real-gateway.e2e.test.ts",
   "ui/src/e2e/model-api-keys.real-gateway.e2e.test.ts",
@@ -72,6 +73,7 @@ export const uiE2eRealGatewayTestFiles = [
   "ui/src/e2e/chat-loading-performance.real-gateway.e2e.test.ts",
   "ui/src/e2e/chat-project-media.real-gateway.e2e.test.ts",
   "ui/src/e2e/chat-stop-finished-run.real-gateway.e2e.test.ts",
+  "ui/src/e2e/chat-stop-owned-exec.real-gateway.e2e.test.ts",
   "ui/src/e2e/chat-collaborator-scroll.real-gateway.e2e.test.ts",
   "ui/src/e2e/chat-thinking-metadata.real-gateway.e2e.test.ts",
   "ui/src/e2e/chat-tts-supplement.real-gateway.e2e.test.ts",
@@ -87,6 +89,7 @@ export const uiE2eRealGatewayTestFiles = [
   "ui/src/e2e/mcp-app-conformance.e2e.test.ts",
   "ui/src/e2e/model-picker-search.real-gateway.e2e.test.ts",
   "ui/src/e2e/profile-page.real-gateway.e2e.test.ts",
+  "ui/src/e2e/session-pr-reader-lifetime.real-gateway.e2e.test.ts",
   "extensions/qa-lab/src/session-host-command-state.real-gateway.e2e.test.ts",
   "ui/src/e2e/session-progress-hovercard.real-gateway.e2e.test.ts",
   "ui/src/e2e/usage-sessions-owner-attribution.e2e.test.ts",
@@ -99,6 +102,7 @@ export const uiE2eRealGatewayTestFiles = [
 // Listed fixtures own their HOME, state, ports, and cleanup; UI bytes are either
 // borrowed from the invocation preview or read by their prepared Gateway child.
 export const uiE2ePrebuiltParallelTestFiles = [
+  "ui/src/e2e/activity-run-inspector.real-gateway.e2e.test.ts",
   "ui/src/e2e/agent-file-lifecycle.real-gateway.e2e.test.ts",
   "ui/src/e2e/chat-agent-avatar.real-gateway.e2e.test.ts",
   "ui/src/e2e/chat-composer-websearch-kill-switch.real-gateway.e2e.test.ts",

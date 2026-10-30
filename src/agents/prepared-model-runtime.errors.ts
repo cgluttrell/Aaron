@@ -1,7 +1,15 @@
 import { PluginInstanceUnavailableError } from "../plugins/plugin-instance-error.js";
+import { PreparedModelRuntimeOwnerNotPublishedError } from "./prepared-model-runtime-admission-errors.js";
 import type { PreparedModelRuntimeInput } from "./prepared-model-runtime.types.js";
 
-export class PreparedModelRuntimeOwnerNotPublishedError extends Error {}
+export { PreparedModelRuntimeOwnerNotPublishedError };
+
+/** Only missing owners permit activation or catalog fallback; refused admission must settle work. */
+export function isPreparedModelRuntimeMissingOwnerError(
+  error: unknown,
+): error is PreparedModelRuntimeOwnerNotPublishedError {
+  return error instanceof PreparedModelRuntimeOwnerNotPublishedError && !error.admissionBlocked;
+}
 
 export class PreparedModelRuntimePublicationSupersededError extends PreparedModelRuntimeOwnerNotPublishedError {}
 

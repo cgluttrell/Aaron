@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => {
-  const stopRouteClaim = vi.fn(async () => undefined);
+  const stopRouteClaim = vi.fn<() => Promise<void>>(async () => undefined);
   return {
     stopRouteClaim,
     claimTailscaleRoute: vi.fn(async (_mode: "serve" | "funnel", _target: number | string) => ({
@@ -25,6 +25,7 @@ vi.mock("../infra/tailscale.js", () => ({
 }));
 
 import { createDeferred } from "../../test/helpers/promise.js";
+import { TailscaleRouteOwnershipConflictError } from "../infra/tailscale-route-ownership-error.js";
 import { resetSecretRedactionRegistryForTest } from "../logging/secret-redaction-registry.test-support.js";
 import { resolveControlUiIdentity } from "./control-ui-identity.js";
 import { startGatewayTailscaleExposure as startGatewayTailscaleExposureBase } from "./server-tailscale.js";
@@ -109,6 +110,7 @@ describe("startGatewayTailscaleExposure", () => {
       MANAGED_BACKEND_PORT,
       18789,
       expect.any(Function),
+      undefined,
     );
     expect(mocks.getTailnetHostnameAfterServe).toHaveBeenCalledOnce();
     expect(mocks.getTailnetHostname).not.toHaveBeenCalled();
@@ -145,6 +147,49 @@ describe("startGatewayTailscaleExposure", () => {
     expect(mocks.stopRouteClaim).toHaveBeenCalledOnce();
   });
 
+  it.each([false, true])(
+    "joins claim cleanup when startup stops during hostname discovery (cleanup fails=%s)",
+    async (cleanupFails) => {
+      const hostnameStarted = createDeferred();
+      const hostname = createDeferred<string>();
+      const stopped = createDeferred();
+      const controller = new AbortController();
+      const interrupted = new Error("Gateway stopped during hostname discovery");
+      const cleanupError = new Error("claim process could not be stopped");
+      mocks.getTailnetHostnameAfterServe.mockImplementation(() => {
+        hostnameStarted.resolve();
+        return hostname.promise;
+      });
+      mocks.stopRouteClaim.mockImplementation(() => stopped.promise);
+      const starting = startGatewayTailscaleExposure({
+        tailscaleMode: "serve",
+        port: 18789,
+        signal: controller.signal,
+        logTailscale: createLogger(),
+      });
+      const result = starting.then(
+        () => "started",
+        (error: unknown) => error,
+      );
+      await hostnameStarted.promise;
+      controller.abort(interrupted);
+      hostname.resolve("fixture.tailnet.ts.net");
+      if (cleanupFails) {
+        stopped.reject(cleanupError);
+        expect(await result).toMatchObject({
+          name: "AggregateError",
+          errors: [interrupted, cleanupError],
+          cause: cleanupError,
+        });
+      } else {
+        stopped.resolve();
+        expect(await result).toBe(interrupted);
+      }
+      expect(mocks.stopRouteClaim).toHaveBeenCalledOnce();
+      expect(getTailscalePublishedOrigin()).toBeUndefined();
+    },
+  );
+
   it.each(["serve", "funnel"] as const)(
     "releases the foreground %s claim during cleanup",
     async (mode) => {
@@ -161,6 +206,7 @@ describe("startGatewayTailscaleExposure", () => {
         MANAGED_BACKEND_PORT,
         18789,
         expect.any(Function),
+        undefined,
       );
       expect(mocks.stopRouteClaim).toHaveBeenCalledOnce();
     },
@@ -221,6 +267,7 @@ describe("startGatewayTailscaleExposure", () => {
       MANAGED_BACKEND_PORT,
       18789,
       expect.any(Function),
+      undefined,
     );
   });
 
@@ -250,6 +297,28 @@ describe("startGatewayTailscaleExposure", () => {
     ).toBeUndefined();
   });
 
+  it.each(["serve", "funnel"] as const)(
+    "warns without releasing the %s claim when hostname discovery fails",
+    async (mode) => {
+      const failure = new Error("status output exceeded its buffer");
+      mocks.getTailnetHostname.mockRejectedValue(failure);
+      mocks.getTailnetHostnameAfterServe.mockRejectedValue(failure);
+      const logTailscale = createLogger();
+
+      const cleanup = await startGatewayTailscaleExposure({
+        tailscaleMode: mode,
+        port: 18789,
+        logTailscale,
+      });
+
+      expect(logTailscale.warn).toHaveBeenCalledWith(expect.stringContaining(failure.message));
+      expect(getTailscalePublishedOrigin()).toBeUndefined();
+      expect(mocks.stopRouteClaim).not.toHaveBeenCalled();
+      await cleanup?.();
+      expect(mocks.stopRouteClaim).toHaveBeenCalledOnce();
+    },
+  );
+
   it("clears the published origin and warns when the foreground claim exits", async () => {
     const { promise: exited, resolve: resolveExit } = createDeferred();
     mocks.claimTailscaleRoute.mockResolvedValue({
@@ -260,7 +329,7 @@ describe("startGatewayTailscaleExposure", () => {
     mocks.getTailnetHostnameAfterServe.mockResolvedValue("node.tailnet.ts.net");
     const logTailscale = createLogger();
 
-    await startGatewayTailscaleExposure({
+    const cleanup = await startGatewayTailscaleExposure({
       tailscaleMode: "serve",
       port: 18789,
       logTailscale,
@@ -277,6 +346,7 @@ describe("startGatewayTailscaleExposure", () => {
         { mode: "token", allowTailscale: true },
       ),
     ).toBeUndefined();
+    await cleanup?.();
   });
 
   it("does not publish an origin for an externally preserved Funnel", async () => {
@@ -321,6 +391,138 @@ describe("startGatewayTailscaleExposure", () => {
       MANAGED_BACKEND_PORT,
       18789,
       expect.any(Function),
+      undefined,
     );
   });
+});
+
+describe("managed Tailscale claim recovery", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  function startExposure(
+    params: { signal?: AbortSignal; logTailscale?: ReturnType<typeof createLogger> } = {},
+  ) {
+    return startGatewayTailscaleExposure({
+      tailscaleMode: "serve",
+      port: 18789,
+      logTailscale: params.logTailscale ?? createLogger(),
+      signal: params.signal,
+    });
+  }
+
+  function recoverableClaim() {
+    const exited = createDeferred();
+    let active = true;
+    const exit = () => {
+      active = false;
+      exited.resolve();
+    };
+    return {
+      exited: exited.promise,
+      isActive: () => active,
+      stop: vi.fn(async () => exit()),
+      exit,
+    };
+  }
+
+  it("keeps retrying transient failures while the daemon returns", async () => {
+    const original = recoverableClaim();
+    const replacement = recoverableClaim();
+    mocks.claimTailscaleRoute
+      .mockResolvedValueOnce(original)
+      .mockRejectedValueOnce(new Error("Tailscale is stopped"))
+      .mockRejectedValueOnce(new Error("connection refused"))
+      .mockResolvedValueOnce(replacement);
+    mocks.getTailnetHostnameAfterServe.mockResolvedValue("fixture.tailnet.ts.net");
+    const startup = new AbortController();
+    const cleanup = await startExposure({ signal: startup.signal });
+    startup.abort();
+    try {
+      const previousOrigin = getTailscalePublishedOrigin();
+      original.exit();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(previousOrigin?.signal.aborted).toBe(true);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await vi.advanceTimersToNextTimerAsync();
+        expect(getTailscalePublishedOrigin()).toBeUndefined();
+      }
+      await vi.advanceTimersToNextTimerAsync();
+      expect(getTailscalePublishedOrigin()?.origin).toBe("https://fixture.tailnet.ts.net");
+      expect(mocks.claimTailscaleRoute).toHaveBeenCalledTimes(4);
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  it("stops retrying when another owner has claimed the HTTPS port", async () => {
+    const original = recoverableClaim();
+    const logTailscale = createLogger();
+    mocks.claimTailscaleRoute
+      .mockResolvedValueOnce(original)
+      .mockRejectedValue(new TailscaleRouteOwnershipConflictError());
+    const cleanup = await startExposure({ logTailscale });
+    try {
+      original.exit();
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersToNextTimerAsync();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(mocks.claimTailscaleRoute).toHaveBeenCalledTimes(2);
+      expect(getTailscalePublishedOrigin()).toBeUndefined();
+      expect(logTailscale.warn).toHaveBeenCalledWith(expect.stringContaining("already owned"));
+    } finally {
+      await cleanup?.();
+    }
+  });
+
+  it("cancels a pending backoff when the Gateway closes", async () => {
+    const original = recoverableClaim();
+    mocks.claimTailscaleRoute.mockResolvedValueOnce(original);
+    const cleanup = await startExposure();
+    original.exit();
+    await vi.advanceTimersByTimeAsync(0);
+    await cleanup?.();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(mocks.claimTailscaleRoute).toHaveBeenCalledOnce();
+    expect(getTailscalePublishedOrigin()).toBeUndefined();
+  });
+
+  it.each([false, true])(
+    "joins replacement cleanup during shutdown (cleanup fails=%s)",
+    async (cleanupFails) => {
+      const original = recoverableClaim();
+      const replacement = recoverableClaim();
+      const cleanupError = new Error("claim process could not be stopped");
+      if (cleanupFails) {
+        replacement.stop.mockRejectedValue(cleanupError);
+      }
+      mocks.claimTailscaleRoute.mockResolvedValueOnce(original).mockResolvedValueOnce(replacement);
+      const hostname = createDeferred<string>();
+      mocks.getTailnetHostnameAfterServe
+        .mockResolvedValueOnce("fixture.tailnet.ts.net")
+        .mockReturnValueOnce(hostname.promise);
+      const cleanup = await startExposure();
+      try {
+        original.exit();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersToNextTimerAsync();
+        expect(mocks.getTailnetHostnameAfterServe).toHaveBeenCalledTimes(2);
+        if (cleanupFails) {
+          await expect(cleanup?.()).rejects.toMatchObject({
+            name: "AggregateError",
+            cause: cleanupError,
+          });
+        } else {
+          await cleanup?.();
+        }
+        expect(replacement.stop).toHaveBeenCalledOnce();
+        hostname.resolve("late.tailnet.ts.net");
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(getTailscalePublishedOrigin()).toBeUndefined();
+        expect(mocks.claimTailscaleRoute).toHaveBeenCalledTimes(2);
+      } finally {
+        hostname.resolve("late.tailnet.ts.net");
+      }
+    },
+  );
 });

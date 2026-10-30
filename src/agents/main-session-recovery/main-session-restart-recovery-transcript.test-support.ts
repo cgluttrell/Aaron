@@ -104,3 +104,17 @@ export function codeModeWaitCallMessage() {
     stopReason: "toolUse",
   };
 }
+
+export function recoveredThenCompletedUserTurns() {
+  return [
+    makeUserMessage("the earlier request"),
+    codeModeCheckpointMessage(),
+    makeUserMessage(
+      "[System] Your previous turn was interrupted by a gateway restart while OpenClaw was waiting on tool/model work. Continue from the existing transcript and finish the interrupted response.",
+      { provenance: { kind: "internal_system", sourceTool: "main_session_restart_recovery" } },
+    ),
+    makeAssistantTextMessage("Finished that recovery."),
+    makeUserMessage("a later request"),
+    makeAssistantTextMessage("Finished the later request."),
+  ];
+}

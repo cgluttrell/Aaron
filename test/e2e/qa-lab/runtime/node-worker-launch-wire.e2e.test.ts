@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { writeSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
@@ -6,6 +7,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { promisify } from "node:util";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { GatewayClient } from "openclaw/plugin-sdk/gateway-runtime";
+import { redactSensitiveText } from "openclaw/plugin-sdk/logging-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { createQaGatewayChild } from "../../../../extensions/qa-lab/api.js";
 import type { AuditRunInspectResult } from "../../../../packages/gateway-protocol/src/index.js";
@@ -38,7 +40,8 @@ import {
 
 const execFileAsync = promisify(execFile);
 const SESSION_KEY = "agent:qa:node-worker-launch-wire";
-const TEST_TIMEOUT_MS = PROOF_TIMEOUT_MS + 60_000;
+const TEST_TIMEOUT_MS = PROOF_TIMEOUT_MS + 300_000;
+const PROGRESS_INTERVAL_MS = 60_000;
 const CONTROL_PROBE_MAX_MS = 4_000;
 const CONTROL_PROBE_P95_MS = 1_000;
 const FINALIZATION_LOAD_CONCURRENCY = 12;
@@ -99,12 +102,21 @@ describe("node worker launch wire", () => {
       let workerAuditBeforeRestart: string | undefined;
       let testFailure: { error: unknown } | undefined;
       let cleanupFailures: unknown[];
+      const proofStartedAt = Date.now();
+      const progress = setInterval(() => {
+        writeSync(
+          2,
+          `[node-worker-launch-wire] proof still running (${Date.now() - proofStartedAt}ms)\n`,
+        );
+      }, PROGRESS_INTERVAL_MS);
+      progress.unref();
 
       try {
         gateway = await startPairedNodeWorkerGateway({
           owner: gatewayOwner,
           providerBaseUrl: provider.baseUrl,
           executionIdentity: true,
+          useRepoCli: false,
         });
         operator = await connectWireClient({ gateway, role: "operator", identity: null });
         workerNode = await createPairedNodeWorkerHost({
@@ -518,7 +530,7 @@ describe("node worker launch wire", () => {
                 );
                 expect(
                   completedLoad,
-                  `load run ${loadRunId} failed\n${waveGateway.logs().slice(-12_000)}`,
+                  `load run ${loadRunId} failed\n${redactSensitiveText(JSON.stringify(completedLoad)).slice(0, 4000)}\n${waveGateway.logs().slice(-12_000)}`,
                 ).toMatchObject({ status: "ok" });
               }),
             );
@@ -576,6 +588,7 @@ describe("node worker launch wire", () => {
       } catch (error) {
         testFailure = { error };
       } finally {
+        clearInterval(progress);
         const cleanup = await Promise.allSettled([
           workerNode?.stop() ?? Promise.resolve(),
           legacyWorkerNode?.stop() ?? Promise.resolve(),

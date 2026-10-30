@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetLogger, setLoggerOverride } from "../logging/logger.js";
 import { createDiagnosticLogRecordCapture } from "../logging/test-helpers/diagnostic-log-capture.js";
 import { resolveAuthProfileOrder } from "./auth-profiles/order.js";
-import { hasAnyAuthProfileStoreSource } from "./auth-profiles/source-check.js";
+import { hasAnyAuthProfileStoreSourceAsync } from "./auth-profiles/source-check.js";
 import { ensureAuthProfileStore } from "./auth-profiles/store-runtime.js";
 import type { AuthProfileStore } from "./auth-profiles/types.js";
 import {
@@ -39,8 +39,9 @@ vi.mock("./auth-profiles/order.js", () => ({ resolveAuthProfileOrder: vi.fn() })
 vi.mock("./provider-model-normalization.runtime.js", () => ({
   normalizeProviderModelIdWithRuntime: () => undefined,
 }));
+// mock-isolation: Cooldown probing uses the mocked profile store; disk source discovery must stay isolated.
 vi.mock("./auth-profiles/source-check.js", () => ({
-  hasAnyAuthProfileStoreSource: vi.fn(() => true),
+  hasAnyAuthProfileStoreSourceAsync: vi.fn(() => true),
 }));
 const sessionSuspensionMocks = vi.hoisted(() => ({
   suspendSession: vi.fn().mockResolvedValue(undefined),
@@ -63,7 +64,7 @@ const sessionSuspensionMocks = vi.hoisted(() => ({
 vi.mock("./session-suspension.js", () => sessionSuspensionMocks);
 vi.mock("../plugins/current-plugin-metadata-snapshot.js", async (importOriginal) => {
   const { createEmptyPluginMetadataSnapshot } =
-    await import("./test-helpers/embedded-agent-runner-e2e-mocks.js");
+    await import("../plugins/plugin-metadata-empty.test-support.js");
   const snapshot = {
     ...createEmptyPluginMetadataSnapshot(),
     policyHash: "model-fallback-probe-test-empty-plugin-policy",
@@ -141,7 +142,7 @@ beforeEach(() => {
   vi.spyOn(Date, "now").mockReturnValue(NOW);
   setLoggerOverride({ level: "silent", consoleLevel: "silent" });
   probeThrottleInternals.lastProbeAttempt.clear();
-  vi.mocked(hasAnyAuthProfileStoreSource).mockReturnValue(true);
+  vi.mocked(hasAnyAuthProfileStoreSourceAsync).mockResolvedValue(true);
   vi.mocked(ensureAuthProfileStore).mockReturnValue({ version: 1, profiles: {} });
   profileOrder.mockImplementation(({ provider }) =>
     ["openai", "anthropic", "google"].includes(provider) ? [`${provider}-profile-1`] : [],
@@ -198,25 +199,14 @@ describe("runWithModelFallback probe logic", () => {
     expect(cooldownDecision(params)).toEqual({ type: "suspend_session", reason: "rate_limit" });
   });
 
-  it("honors provider-recorded reset windows while generic rate-limit cooldowns may probe", () => {
+  it("honors provider rate-limit windows until they are near expiry", () => {
     const params = { reason: "rate_limit" as const, soonest: NOW + 30 * 60 * 1000 };
-    expect(cooldownDecision(params)).toEqual({
+    expect(cooldownDecision(params)).toEqual({ type: "suspend_session", reason: "rate_limit" });
+    expect(cooldownDecision({ ...params, soonest: NOW + 60 * 1000 })).toEqual({
       type: "attempt",
       reason: "rate_limit",
       markProbe: true,
     });
-    expect(
-      cooldownDecision({
-        ...params,
-        usageStats: {
-          "openai-profile-1": {
-            blockedUntil: params.soonest,
-            blockedReason: "subscription_limit",
-            blockedSource: "wham",
-          },
-        },
-      }),
-    ).toEqual({ type: "suspend_session", reason: "rate_limit" });
   });
 
   it("logs primary metadata when a cooldown probe succeeds", async () => {

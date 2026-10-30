@@ -16,8 +16,14 @@ vi.mock("../auto-reply/reply/commands-status.js", () => ({
   buildStatusReply,
 }));
 
-vi.mock("../gateway/session-utils.js", () => ({
-  loadGatewaySessionEntryReadOnly: loadSessionEntry,
+// mock-isolation: Session data and config belong to the direct-status fixture.
+vi.mock("../gateway/session-utils-store-worker.js", () => ({
+  loadGatewaySessionEntryReadOnlyInWorker: loadSessionEntry,
+}));
+
+vi.mock("../config/io.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../config/io.js")>()),
+  getRuntimeConfig: () => ({}),
 }));
 
 vi.mock("../agents/agent-scope.js", () => ({

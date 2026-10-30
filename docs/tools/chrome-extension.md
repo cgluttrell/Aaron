@@ -350,6 +350,9 @@ An agent-created tab may start at `about:blank` while a CDP client initializes
 it before navigating. The extension allows that specific initial tab, keeps it
 in the OpenClaw group, and applies the same pause and access-mode controls.
 Normal navigation keeps the tab available in either access mode.
+In-flight CDP cache, extra-header, and service-worker bypass settings also survive
+allowed navigation. Pausing access, removing a selected tab from the OpenClaw
+group, or detaching its debugger still rejects in-flight command results.
 Existing blank tabs, manually grouped blanks, and other `about:` pages remain
 unavailable. Navigating away, replacing the tab, or restarting or reconnecting
 the extension ends the initial blank admission. Returning to `about:blank`
@@ -627,7 +630,7 @@ non-secret failure code. The bootstrap request remains exactly
 `{v:1, op:"ensure_relay", nonce, relayPort}` with a required integer port from
 1 through 65535. Missing, duplicate, malformed, or extra fields are rejected.
 After manifest and caller validation, the host checks the requested port
-against current extension profiles before probing or spawning. No request can
+against current extension profiles before checking or spawning. No request can
 supply a host, executable path, or credential to the launcher.
 The response is below Chrome's 1 MiB native-message limit. Pairing keys never
 appear in launcher arguments, manifests, status JSON, or diagnostics.

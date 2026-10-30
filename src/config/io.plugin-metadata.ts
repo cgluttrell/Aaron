@@ -12,8 +12,10 @@ import {
   type PluginManifestRegistry,
 } from "../plugins/manifest-registry.js";
 import {
+  cachePluginMetadataSnapshot,
   createPluginCache,
   getPluginCache,
+  readPluginMetadataSnapshotCache,
   retainPluginCache,
   withPluginCache,
 } from "../plugins/plugin-cache.js";
@@ -146,7 +148,7 @@ export async function resolveConfigWidePluginMetadataSnapshotAsync(
         return preparedCurrent;
       }
       const { key } = resolveConfigWideMetadataSelection(captured);
-      const existing = cache.metadata.snapshots.get(key);
+      const existing = readPluginMetadataSnapshotCache(key);
       if (existing) {
         activateDiscovery();
         return existing;
@@ -193,27 +195,22 @@ export function resolveConfigWidePluginMetadataSnapshot(
   if (gatewaySnapshot) {
     return gatewaySnapshot;
   }
-  return withSynchronousArtifactPreservingStateSnapshot(() =>
-    resolveConfigWidePluginMetadataSnapshotInScope(params),
-  );
-}
-
-function resolveConfigWidePluginMetadataSnapshotInScope(
-  params: ResolveConfigWidePluginMetadataParams,
-): PluginMetadataSnapshot {
-  const env = params.env ?? process.env;
-  if (params.installRecords === undefined) {
-    preparePluginMetadataMachineState({ env, stateDir: params.stateDir });
-  }
-  const { key, workspaceDirs } = resolveConfigWideMetadataSelection(params);
-  const cache = getPluginCache();
-  const cached = cache.metadata.snapshots.get(key);
-  if (cached) {
-    return cached;
-  }
-  const snapshot = resolveConfigWidePluginMetadataSnapshotImpl(params, workspaceDirs);
-  cache.metadata.snapshots.set(key, snapshot);
-  return snapshot;
+  return withSynchronousArtifactPreservingStateSnapshot(() => {
+    if (params.installRecords === undefined) {
+      preparePluginMetadataMachineState({
+        env: params.env ?? process.env,
+        stateDir: params.stateDir,
+      });
+    }
+    const { key, workspaceDirs } = resolveConfigWideMetadataSelection(params);
+    const cached = readPluginMetadataSnapshotCache(key);
+    if (cached) {
+      return cached;
+    }
+    const snapshot = resolveConfigWidePluginMetadataSnapshotImpl(params, workspaceDirs);
+    cachePluginMetadataSnapshot(key, snapshot);
+    return snapshot;
+  });
 }
 
 function resolveConfigWidePluginMetadataSnapshotImpl(

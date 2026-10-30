@@ -25,9 +25,11 @@ import {
 import type { PluginManifestRecord, PluginManifestRegistry } from "./manifest-registry.types.js";
 import {
   bindPluginMetadataSnapshotCache,
+  cachePluginMetadataSnapshot,
   createPluginCache,
   getPluginCache,
   getPluginMetadataSnapshotCache,
+  readPluginMetadataSnapshotCache,
   retainPluginCache,
   withPluginCache,
 } from "./plugin-cache.js";
@@ -446,9 +448,8 @@ export function loadPluginMetadataSnapshotForRegistry(
 function loadCachedPluginMetadataSnapshot(
   params: LoadPluginMetadataSnapshotParams,
 ): PluginMetadataSnapshot {
-  const cache = getPluginCache();
   const key = resolvePluginMetadataSnapshotCacheKey(params);
-  const cached = cache.metadata.snapshots.get(key);
+  const cached = readPluginMetadataSnapshotCache(key);
   if (cached) {
     return projectPluginMetadataSnapshot(
       cached,
@@ -482,7 +483,7 @@ function loadCachedPluginMetadataSnapshot(
       },
     },
   );
-  cache.metadata.snapshots.set(key, frozen);
+  cachePluginMetadataSnapshot(key, frozen);
   return projectPluginMetadataSnapshot(
     frozen,
     params.pluginIds ?? params.pluginIdScope?.resolve({ index: frozen.index }),
@@ -696,7 +697,7 @@ export function resolvePluginMetadataSnapshotInput(
     return selection.snapshot;
   }
   return (
-    getPluginCache().metadata.snapshots.get(resolvePluginMetadataSnapshotCacheKey(params)) ??
+    readPluginMetadataSnapshotCache(resolvePluginMetadataSnapshotCacheKey(params)) ??
     loadPluginMetadataSnapshotInput(params, () => registryReader(params.workspaceDir))
   );
 }

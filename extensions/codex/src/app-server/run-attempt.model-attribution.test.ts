@@ -48,10 +48,11 @@ describe("registered Codex harness model attribution", () => {
     // Protocol events own completion; host load must not spend the attempt watchdog.
     vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     const params = createTestParams();
+    params.timeoutMs = 60_000;
     // Supervision replaces the helper model; this fixture supplies no host tools.
     params.hostCapabilities = Object.freeze({
       ...params.hostCapabilities,
-      createToolSurface: () => [],
+      createToolSurfaceAsync: async () => [],
     });
     params.agentDir = path.join(tempDir, "agent");
     params.provider = "anthropic";

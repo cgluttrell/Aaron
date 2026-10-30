@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createEmptyPluginRegistry } from "../../plugins/registry-empty.js";
 import type { ModelCatalogEntry, ModelCatalogSnapshot } from "../model-catalog.types.js";
-import { mergePreparedNativeCatalog } from "../prepared-model-runtime.full-catalog.js";
+import { mergePreparedNativeCatalog } from "../prepared-model-runtime.catalog-publication.js";
 import {
   augmentModelCatalogWithAgentHarness,
   augmentPreparedModelCatalogWithAgentHarness,
@@ -11,13 +11,11 @@ import {
 const cfg = {
   agents: {
     defaults: { model: { primary: "openai/gpt-5.6-sol" } },
-    list: [
-      {
-        id: "main",
-        default: true,
+    entries: {
+      main: {
         models: { "openai/gpt-5.6-sol": { agentRuntime: { id: "codex" } } },
       },
-    ],
+    },
   },
 } as OpenClawConfig;
 

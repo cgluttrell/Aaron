@@ -1,7 +1,6 @@
 import { getRuntimeConfig } from "../config/config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { computeBackoff, type BackoffPolicy } from "../infra/backoff.js";
-import { settlesWithin } from "../shared/settle-within.js";
 import {
   applyConfiguredContextWindows,
   prepareContextWindowCaches,
@@ -9,9 +8,6 @@ import {
 } from "./context-cache-projection.js";
 import {
   getContextWindowCaches,
-  lookupCachedContextTokens,
-  lookupCachedContextWindow,
-  minPositiveContextTokens,
   replaceContextWindowCaches,
   replaceDiscoveredContextTokenCache,
 } from "./context-cache.js";
@@ -25,19 +21,6 @@ import {
   CONTEXT_WINDOW_RUNTIME_STATE,
 } from "./context-runtime-state.js";
 
-export {
-  ANTHROPIC_CONTEXT_1M_TOKENS,
-  ANTHROPIC_FABLE_CONTEXT_TOKENS,
-  ANTHROPIC_MYTHOS_5_CONTEXT_TOKENS,
-  ANTHROPIC_OPUS_5_CONTEXT_TOKENS,
-  ANTHROPIC_SONNET_5_CONTEXT_TOKENS,
-  ANTHROPIC_VERTEX_CONTEXT_1M_TOKENS,
-} from "./context-resolution.js";
-export { resetContextWindowCacheForTest } from "./context-runtime-state.js";
-export {
-  applyConfiguredContextWindows,
-  applyDiscoveredContextWindows,
-} from "./context-cache-projection.js";
 const CONFIG_LOAD_RETRY_POLICY: BackoffPolicy = {
   initialMs: 1_000,
   maxMs: 60_000,
@@ -206,25 +189,6 @@ export async function prewarmContextWindowCacheAfterReady(params: {
   }
 }
 
-export async function waitForContextWindowCacheLoad(options?: {
-  timeoutMs?: number;
-}): Promise<"idle" | "loaded" | "timeout"> {
-  const promise = CONTEXT_WINDOW_RUNTIME_STATE.loadPromise;
-  if (
-    !promise ||
-    CONTEXT_WINDOW_RUNTIME_STATE.loadGeneration !== CONTEXT_WINDOW_RUNTIME_STATE.generation
-  ) {
-    return "idle";
-  }
-
-  const timeoutMs = Math.max(0, Math.trunc(options?.timeoutMs ?? 250));
-  if (timeoutMs === 0) {
-    return "timeout";
-  }
-
-  return (await settlesWithin(promise, timeoutMs)) ? "loaded" : "timeout";
-}
-
 /** Restore configured context limits without acquiring a model catalog. */
 export function resetContextWindowCache(cfg: OpenClawConfig): void {
   beginContextWindowCacheRefresh();
@@ -257,20 +221,6 @@ function prepareContextWindowCache(options?: {
   }
 }
 
-export function lookupContextTokens(
-  modelId?: string,
-  options?: { allowAsyncLoad?: boolean; skipRuntimeConfigLoad?: boolean },
-): number | undefined {
-  if (!modelId) {
-    return undefined;
-  }
-  prepareContextWindowCache(options);
-  return minPositiveContextTokens(
-    lookupCachedContextTokens(modelId),
-    lookupCachedContextWindow(modelId),
-  );
-}
-
 export function resolveContextTokensForModel(
   params: ContextTokenResolutionParams,
 ): number | undefined {
@@ -282,7 +232,7 @@ export function resolveModelContextTokenProjection(
 ): ModelContextTokenProjection {
   prepareContextWindowCache({
     allowAsyncLoad: params.allowAsyncLoad,
-    skipRuntimeConfigLoad: Boolean(params.cfg),
+    skipRuntimeConfigLoad: Boolean(params.cfg) || params.allowCacheLookup === false,
   });
   return resolveModelContextTokenProjectionFromCache(params);
 }

@@ -2,6 +2,8 @@
 export type PluginInstanceLifecycle = {
   readonly signal: AbortSignal;
   onDispose: (dispose: () => void | Promise<void>) => () => void;
+  /** Detach caller context while retaining this instance's current registry and host resources. */
+  runInBackgroundContext: <T>(run: () => T) => T;
 };
 
 /** Execution and host cleanup retain the same instance admission. */
@@ -16,6 +18,12 @@ export type PluginInstanceAdmission = {
 };
 
 /** Known disposal faults are reported outcomes, never new-call admission failures. */
+/** Reload observers get the bounded report; final resource owners join physical settlement. */
+export type PluginInstanceDisposal = {
+  observed: Promise<PluginInstanceDisposalResult>;
+  settled: Promise<PluginInstanceDisposalResult>;
+};
+
 export type PluginInstanceDisposalResult = {
   errors: readonly unknown[];
   /** Errors seen only in host cleanup, eligible for its named-hook reporting. */
@@ -36,20 +44,14 @@ export type PluginInstanceCallLease = {
   release: () => void | Promise<unknown>;
 };
 
-/** An iterator keeps the admission that owns its pending protocol operations. */
-export type PluginIteratorAdmission = {
-  readonly done: boolean;
-  readonly active: boolean;
-  invoke: <T>(run: () => T) => T;
-  close: () => void;
-  call: (key: PropertyKey, method: Function | undefined, args: unknown[]) => Promise<unknown>;
-};
-
 /** Inventory custody owns retirement without depending on registry contributions. */
 export interface PluginInstanceResource {
   readonly pluginId: string;
   quiesce(): boolean;
-  dispose(beforeCleanup?: () => void | Promise<void>): Promise<PluginInstanceDisposalResult>;
+  dispose(
+    beforeCleanup?: () => void | Promise<void>,
+    options?: { waitForSettlement?: boolean },
+  ): Promise<PluginInstanceDisposalResult>;
 }
 
 /** Captured code custody survives retiring a runtime until recovery consumes or releases it. */
@@ -75,6 +77,10 @@ export interface PluginModuleLoaderOwner extends PluginInstanceResource, PluginI
 
 /** Current-call helpers retain the instance itself, not a registry or plugin-id lookup. */
 export interface PluginInvocationInstance extends PluginModuleLoaderOwner {
+  /** The current invocation's call or retained-consumer token is still admitted. */
+  readonly hasActiveCall: boolean;
+  /** This instance's replacement is reserved and still joins the given live token. */
+  holdsPendingReplacement(token: object): boolean;
   readonly slots: Map<string | symbol, { runtime: unknown }>;
   wrap<T>(value: T): T;
 }

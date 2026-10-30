@@ -19,6 +19,7 @@ import type { ResolvedGatewayAuth } from "./auth.js";
 import type { NodeDesktopStreamBroker } from "./desktop/node-stream-broker.js";
 import type { DesktopSessionRegistry } from "./desktop/session-registry.js";
 import type { HooksConfigResolved } from "./hooks.js";
+import type { GatewayHttpRequestLifetime } from "./http-request-authority.js";
 import {
   createGatewayUnattributableProxyReporter,
   type GatewayIngressTransport,
@@ -30,7 +31,8 @@ import { isLoopbackHost, resolveGatewayListenHosts } from "./net.js";
 import { createGatewayPortalService, type GatewayPortalService } from "./portals/portal-service.js";
 import { MAX_PREAUTH_PAYLOAD_BYTES } from "./server-constants.js";
 import type { ControlUiRootState } from "./server-control-ui-root.js";
-import { attachGatewayUpgradeHandler, createGatewayHttpServer } from "./server-http.js";
+import { attachGatewayUpgradeHandler } from "./server-http-upgrades.js";
+import { createGatewayHttpServer } from "./server-http.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import type { HookClientIpConfig, HooksRequestHandler } from "./server/hooks-request-handler.js";
 import { listenGatewayHttpServer } from "./server/http-listen.js";
@@ -76,6 +78,7 @@ export async function createGatewayHttpTransport(params: {
   getRuntimeConfig?: () => import("../config/config.js").OpenClawConfig;
   bindHost: string;
   port: number;
+  onListening?: () => void;
   /** Test-instance listener held since allocation; caller closes it if construction fails. */
   testListener?: HttpServer;
   updateCanary?: boolean;
@@ -96,6 +99,7 @@ export async function createGatewayHttpTransport(params: {
   getPluginRouteRegistry?: () => PluginRegistry;
   isStartupPluginRuntimeReady?: () => boolean;
   getGatewayRequestContext?: () => GatewayRequestContext | undefined;
+  httpRequestLifetime?: GatewayHttpRequestLifetime;
   deps: CliDeps;
   log: { info: (msg: string) => void; warn: (msg: string) => void };
   logHooks: ReturnType<typeof createSubsystemLogger>;
@@ -354,6 +358,7 @@ export async function createGatewayHttpTransport(params: {
       getRuntimeConfig: loadRuntimeConfig,
       getGatewayRequestContext: params.getGatewayRequestContext,
       isStartupPluginRuntimeReady: params.isStartupPluginRuntimeReady,
+      httpRequestLifetime: params.httpRequestLifetime,
       isTerminalEnabled: params.isTerminalEnabled,
       tlsOptions,
       ingressTransport,
@@ -558,6 +563,7 @@ export async function createGatewayHttpTransport(params: {
       if (httpBindHosts.length === 0) {
         throw new Error("Gateway HTTP server failed to start");
       }
+      params.onListening?.();
       if (!params.updateCanary) {
         await portalService.startIngress();
       }

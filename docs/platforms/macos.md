@@ -35,8 +35,10 @@ require macOS 26 or later.
 
 The Node-based CLI and Gateway need a [supported Node version](/install/node)
 on an operating system supported by that runtime. Official Node 24 and Node 26
-macOS binaries require macOS 13.5 or later. Running the CLI on an older Mac
-does not make the native app compatible with that macOS version.
+macOS binaries are built for macOS 13.5 or later, the oldest release Node
+supports. Older macOS releases may still run them but are not supported. Running
+the CLI on an older Mac does not make the native app compatible with that macOS
+version.
 
 Building from source also requires the toolchain listed in
 [macOS developer setup](/platforms/mac/dev-setup#prerequisites).
@@ -136,7 +138,7 @@ app profile is active.
 
 If the primary Gateway connection rejects the app's protocol version, the app
 shows an update alert and keeps the explanation in its connection status.
-Remote setup and connection probes show the same guidance inline. The message names the app
+Remote setup and connection checks show the same guidance inline. The message names the app
 release and both protocol versions, and tells you which side needs updating:
 run `openclaw update` on an older Gateway host, or install a newer Mac app from
 the [download options](#download). A rejected handshake may not report the
@@ -270,6 +272,15 @@ shortcut, microphone-test, or browser-import panels.
 - App-context execution for approved shell commands, preserving the app's macOS
   permission attribution while the CLI runtime owns shared node policy.
 - Remote-mode SSH tunnels or direct Gateway connections.
+
+For native `system.run`, the app augments its inherited `PATH` with its preferred
+tool folders, including Homebrew and `~/.local/bin`, regardless of whether it
+opens from Finder, the Dock, or login startup. It discovers these folders once
+on first use and reuses them for approval and execution without loading shell
+startup files. Relaunch the app after changing tool installation folders;
+installing a tool into an already listed folder needs no restart. Request-level
+`PATH` overrides remain blocked. The CLI and separately managed node services
+keep their own environment configuration.
 
 In the embedded Control UI, **Dashboard → Settings → Notifications** shows the app's native
 notification permission instead of browser push because the app delivers notifications natively.

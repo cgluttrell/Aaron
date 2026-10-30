@@ -6,7 +6,6 @@ import { publishTranscriptScroll } from "./chat-transcript-scroll-events.ts";
 export class TranscriptEndAnchor {
   private offset: number | null = null;
   private frame: number | null = null;
-  private rowModelFrame: number | null = null;
 
   isResizeAnchor(element: HTMLDivElement | null): boolean {
     const max = maxTranscriptScrollOffset(element);
@@ -46,25 +45,9 @@ export class TranscriptEndAnchor {
     }
   }
 
-  scheduleRowModelReconcile(reconcile: () => void): void {
-    if (this.rowModelFrame !== null) {
-      return;
-    }
-    this.rowModelFrame = requestAnimationFrame(() => {
-      this.rowModelFrame = requestAnimationFrame(() => {
-        this.rowModelFrame = null;
-        reconcile();
-      });
-    });
-  }
-
   disconnect(): void {
     this.cancelComposerResize();
     this.cancelReconcile();
-    if (this.rowModelFrame !== null) {
-      cancelAnimationFrame(this.rowModelFrame);
-      this.rowModelFrame = null;
-    }
   }
 
   private maxOffset: number | null = null;
@@ -87,10 +70,7 @@ export class TranscriptEndAnchor {
     canFollow: boolean,
     suspended: boolean,
   ) {
-    if (!this.composerResizePending) {
-      return null;
-    }
-    if (!changed || suspended) {
+    if (!this.composerResizePending || !changed || suspended) {
       // At the height cap, native caret scrolling can move the transcript
       // after overflow settles without producing a viewport ResizeObserver.
       return null;
@@ -132,6 +112,11 @@ export class TranscriptEndAnchor {
     if (previousMax !== max || correction.before !== correction.after) {
       publishTranscriptScroll(element, {
         type: "resize",
+        viewport: {
+          clientHeight: element.clientHeight,
+          scrollHeight: element.scrollHeight,
+          scrollTop: correction.after,
+        },
         ...(correction.before !== correction.after
           ? { scrollCorrection: { before: correction.before, after: correction.after } }
           : {}),
@@ -181,13 +166,7 @@ export class TranscriptEndAnchor {
       this.clear();
       return;
     }
-    if (suspended) {
-      return;
-    }
-    if (!element || this.maxOffset === null) {
-      return;
-    }
-    if (this.offset === null) {
+    if (suspended || !element || this.maxOffset === null || this.offset === null) {
       return;
     }
     if (atEnd) {

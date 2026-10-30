@@ -1,10 +1,57 @@
+import { execFileSync } from "node:child_process";
 import path from "node:path";
-import { expect } from "vitest";
+import { expect, vi } from "vitest";
+import { buildRuntimeProbeEnv } from "../../daemon/runtime-paths.js";
+import * as containerEnvironment from "../../infra/container-environment.js";
 import type { UpdateRunRecord } from "../../infra/update-run-record.js";
 import type { UpdateRunResult } from "../../infra/update-runner-types.js";
 import type { UpdateRecoveryStep } from "../../shared/update-outcome.js";
+import * as versionManagerPath from "../../shared/version-manager-path.js";
+import { resolveTestNodeExecPath } from "../../test-utils/node-process.js";
 import { createCommandResult } from "../../test-utils/npm-spec-install-test-helpers.js";
 import { quoteCliArg, quotePowerShellArg } from "../quote-cli-arg.js";
+
+const nodeRuntimeVersions = new Map<string, NodeJS.ProcessVersions>();
+
+export function getNodeRuntimeFixture() {
+  const nodeExecutable = resolveTestNodeExecPath();
+  let versions = nodeRuntimeVersions.get(nodeExecutable);
+  if (!versions) {
+    // Bun's Node compatibility version is not the selected executable's version.
+    versions = process.versions.bun
+      ? (JSON.parse(
+          execFileSync(nodeExecutable, ["-p", "JSON.stringify(process.versions)"], {
+            encoding: "utf8",
+            timeout: 5_000,
+            env: {
+              ...buildRuntimeProbeEnv(process.env),
+              HOME: process.env.HOME,
+              OPENCLAW_STATE_DIR: process.env.OPENCLAW_STATE_DIR,
+            },
+          }),
+        ) as NodeJS.ProcessVersions)
+      : { ...process.versions };
+    nodeRuntimeVersions.set(nodeExecutable, versions);
+  }
+  const sqliteVersion = versions.sqlite;
+  if (!sqliteVersion) {
+    throw new Error("The Node runtime fixture requires a SQLite version");
+  }
+  return { execPath: nodeExecutable, versions: { ...versions, sqlite: sqliteVersion } };
+}
+
+export function stubNodeRuntime() {
+  const runtime = getNodeRuntimeFixture();
+  vi.spyOn(process, "execPath", "get").mockReturnValue(runtime.execPath);
+  vi.spyOn(process, "versions", "get").mockReturnValue(runtime.versions);
+  vi.spyOn(process, "version", "get").mockReturnValue(`v${runtime.versions.node}`);
+  return runtime;
+}
+
+export function mockNonContainerSystemRuntime(): void {
+  vi.spyOn(versionManagerPath, "resolveNodeVersionManager").mockReturnValue("system");
+  vi.spyOn(containerEnvironment, "isContainerEnvironment").mockReturnValue(false);
+}
 
 export const alreadyCurrentConvergenceCases = [
   { restart: true, running: true, failure: undefined },
@@ -67,11 +114,11 @@ export function expectedManagedRuntimeRecoverySteps(
         "unset OPENCLAW_HOME OPENCLAW_STATE_DIR OPENCLAW_CONFIG_PATH OPENCLAW_PROFILE OPENCLAW_GATEWAY_PORT OPENCLAW_LAUNCHD_LABEL OPENCLAW_SYSTEMD_UNIT OPENCLAW_WINDOWS_TASK_NAME OPENCLAW_WORKSPACE_DIR",
     },
     manager === "nvm"
-      ? { kind: "select-runtime", command: expectedRuntimeSelectionCommand("nvm", "24.16.0") }
+      ? { kind: "select-runtime", command: expectedRuntimeSelectionCommand("nvm", "24.22.1") }
       : {
           kind: "select-runtime",
           instruction:
-            "Install and select Node 24.16.0 using your system package manager or https://nodejs.org/en/download.",
+            "Install and select Node 24.22.1 using your system package manager or https://nodejs.org/en/download.",
         },
     {
       kind: "continue-update",
@@ -122,7 +169,7 @@ export function currentGitCoreFixture(root: string, version: string) {
     {
       kind: "select-runtime",
       instruction:
-        "Install and select Node 24.16.0 using your system package manager or https://nodejs.org/en/download.",
+        "Install and select Node 24.22.1 using your system package manager or https://nodejs.org/en/download.",
     },
     { kind: "continue-update", command: `${launcher} update` },
   ];

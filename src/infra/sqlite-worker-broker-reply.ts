@@ -11,15 +11,16 @@ import {
   assertStateDatabaseAccessAllowed,
   type StateDatabaseSchemaLease,
 } from "./gateway-state-owner.js";
+import { installSqliteNativeRuntimeAdmission } from "./node-sqlite.js";
 import { retainSqliteWriteAdmissionService } from "./sqlite-transaction.js";
 import { prepareSqliteWorkerActorContext } from "./sqlite-worker-broker-admission.js";
 import type { Actor, Job, Slot } from "./sqlite-worker-broker.types.js";
 import {
   SQLITE_WORKER_MAX_MESSAGE_BYTES,
   retainSqliteWorkerErrorCode,
+  SqliteWorkerAdmissionTimeoutError,
   SqliteWorkerError,
   type SqliteWorkerReply,
-  type SqliteWorkerCloseReceipt,
   type SqliteWorkerRequest,
 } from "./sqlite-worker-contract.js";
 import { createSqliteWorkerOperationAdmission } from "./sqlite-worker-operation-admission.js";
@@ -67,6 +68,10 @@ export function dispatchSqliteWorkerJob(
     if (job.dispatchState) {
       job.dispatchState.dispatched = true;
     }
+    if (actor && request.type !== "close") {
+      // A later request may open or write natively even if its reply is lost.
+      actor.openDispatch.openRefused = false;
+    }
     job.requestPosted = true;
     slot.worker.postMessage(
       request,
@@ -83,7 +88,9 @@ function prepareSqliteWorkerOperationAdmission(
   assertDispatchable: () => void,
   assertCurrentJob: () => void,
 ) {
-  const databasePath = job.request.stateDatabasePath ?? actor?.databasePath;
+  const databasePath = actor?.target
+    ? undefined
+    : (job.request.stateDatabasePath ?? actor?.databasePath);
   if (!job.createAdmission && !databasePath) {
     return undefined;
   }
@@ -108,7 +115,7 @@ function prepareSqliteWorkerOperationAdmission(
         job.maintenanceScope?.assertAdmission();
         assertStateDatabaseAccessAllowed(databasePath, {
           maintenanceScope: job.maintenanceScope,
-          schemaLease,
+          schemaLease: schemaLease ?? job.cleanupAccess,
         });
       };
       retained.admission.bindDatabaseAuthority({
@@ -253,15 +260,18 @@ function decodeSqliteWorkerReplyValue(
 }
 
 function decodeSqliteWorkerReplyError(
-  job: Job,
   error: Extract<SqliteWorkerReply, { ok: false }>["error"],
 ): Error {
+  if (error.name === "SqliteWorkerAdmissionTimeoutError" && error.code === "admission-timeout") {
+    return new SqliteWorkerAdmissionTimeoutError();
+  }
   const failure = Object.assign(new Error(error.message), {
     name: error.name,
     ...(error.code === undefined ? {} : { code: error.code }),
   });
-  if (job.request.stateContext && error.code !== "outcome-unknown" && error.sharedState) {
+  if (error.code !== "outcome-unknown" && error.sharedState) {
     retainOpenClawStateWorkerErrorPayload(failure, error.sharedState);
+    return hydrateOpenClawStateWorkerError(failure, { includeOrdinary: true });
   }
   return failure;
 }
@@ -286,13 +296,15 @@ export type SqliteWorkerReplyOwner = {
     error?: unknown,
     value?: unknown,
     settlement?: SqliteWorkerOperationSettlement,
-    closeReceipt?: SqliteWorkerCloseReceipt,
   ): void;
   dispatch(): void;
 };
 
 export function receiveSqliteWorkerReply(
-  slot: Pick<Slot, "current" | "failed"> & { worker: Pick<Slot["worker"], "postMessage"> },
+  slot: Pick<Slot, "current" | "failed"> & {
+    actors: ReadonlySet<Pick<Actor, "id" | "closeReceipt" | "openDispatch">>;
+    worker: Pick<Slot["worker"], "postMessage">;
+  },
   reply: SqliteWorkerReply,
   owner: SqliteWorkerReplyOwner,
 ): void {
@@ -302,13 +314,13 @@ export function receiveSqliteWorkerReply(
     return;
   }
   if (!reply.ok) {
+    const admission = job.operationAdmission?.admission;
     if (reply.cleanupFailure && job.nativeDispatched && !reply.retire) {
-      const admission = job.operationAdmission?.admission;
       const failure =
         admission?.failureSource === "domain" && !reply.admissionRefused
           ? undefined
           : admission?.failure;
-      const original = failure ?? decodeSqliteWorkerReplyError(job, reply.error);
+      const original = failure ?? decodeSqliteWorkerReplyError(reply.error);
       owner.fail(decodeSqliteWorkerCleanupError(reply.cleanupFailure), undefined, undefined, {
         error: original,
       });
@@ -317,30 +329,41 @@ export function receiveSqliteWorkerReply(
     if (reply.openNotEntered && job.request.type === "open" && job.dispatchState) {
       job.dispatchState.openNotEntered = true;
     }
-    const error = decodeSqliteWorkerReplyError(job, reply.error);
-    if (job.request.type === "open" && reply.openNotEntered && !reply.retire) {
+    const error = decodeSqliteWorkerReplyError(reply.error);
+    const openRefused = reply.openOutcome === "refused-before-agent-open";
+    if (!reply.retire && (openRefused || (job.request.type === "open" && reply.openNotEntered))) {
       slot.current = undefined;
-      const refusal = job.operationAdmission?.admission.failure ?? error;
-      owner.finish(job, refusal, undefined, { kind: "not-entered", error: refusal });
+      const refusal = admission?.failure ?? error;
+      owner.finish(
+        job,
+        refusal,
+        undefined,
+        reply.openNotEntered ? { kind: "not-entered", error: refusal } : { kind: "completed" },
+      );
+      if (openRefused) {
+        const actor = [...slot.actors].find((candidate) => candidate.id === job.request.actor);
+        if (actor) {
+          actor.openDispatch.openRefused = !admission?.cleanupFailures.length;
+        }
+      }
       owner.dispatch();
       return;
     }
     if (job.request.type !== "execute" || reply.retire) {
-      const refusedOpen =
-        job.request.type === "open" && reply.openOutcome === "refused-before-agent-open";
+      const refusedFactory = job.request.type === "open" && openRefused;
       const failure =
-        refusedOpen || (job.request.type === "open" && reply.admissionRefused)
-          ? toErrorObject(job.operationAdmission?.admission.failure ?? error, error.message)
+        refusedFactory || reply.admissionRefused
+          ? toErrorObject(admission?.failure ?? error, error.message)
           : error;
       owner.fail(
         failure,
-        job.request.type !== "execute" ? failure : undefined,
-        refusedOpen ? "refused-before-agent-open" : undefined,
+        job.request.type !== "execute" || reply.admissionRefused ? failure : undefined,
+        refusedFactory ? "refused-before-agent-open" : undefined,
       );
       return;
     }
     slot.current = undefined;
-    owner.finish(job, job.operationAdmission?.admission.failure ?? error);
+    owner.finish(job, admission?.failure ?? error);
     owner.dispatch();
     return;
   }
@@ -368,9 +391,19 @@ export function receiveSqliteWorkerReply(
     );
     return;
   }
+  if (reply.nativeRuntimeAdmission !== undefined) {
+    // Completion can create a sibling immediately; publish only after the full reply settles.
+    installSqliteNativeRuntimeAdmission(reply.nativeRuntimeAdmission);
+  }
   slot.current = undefined;
   if (job.request.type === "close") {
-    owner.finish(job, undefined, value, undefined, reply.closeReceipt);
+    if (reply.closeReceipt) {
+      const actor = [...slot.actors].find((candidate) => candidate.id === job.request.actor);
+      if (actor) {
+        actor.closeReceipt = reply.closeReceipt;
+      }
+    }
+    owner.finish(job, undefined, value);
   } else {
     // Domains own handled refusal results; physical and request authority still fence delivery.
     const admission = job.operationAdmission?.admission;
@@ -451,7 +484,11 @@ export function settleFailedSqliteWorkerJobs({
         current.nativeDispatched
           ? retired && openOutcome === "refused-before-agent-open"
             ? { kind: "completed" }
-            : { kind: "unknown", error: currentError ?? error }
+            : {
+                kind: "unknown",
+                error: currentError ?? error,
+                ...(retired ? { nativeStopped: true as const } : {}),
+              }
           : { kind: "not-entered", error },
       );
     }
@@ -476,21 +513,23 @@ export function settleSqliteWorkerJob(
   );
   job.operationAdmission?.admission.finish();
   job.operationAdmission?.releaseService();
-  let failure = error;
+  // finish() drains the receipt port before the separate command reply can acknowledge success.
+  const admission = job.operationAdmission?.admission;
+  let failure = error ?? (admission?.failureSource === "domain" ? undefined : admission?.failure);
   const admissionCleanupFailures = job.operationAdmission?.admission.cleanupFailures ?? [];
   if (admissionCleanupFailures.length > 0) {
     const cleanupError = new AggregateError(
       admissionCleanupFailures,
       "SQLite worker admission cleanup failed",
     );
-    if (error === undefined && job.request.type === "execute") {
+    if (failure === undefined && job.request.type === "execute") {
       process.emitWarning(cleanupError);
     } else {
       failure =
-        error === undefined
+        failure === undefined
           ? cleanupError
           : withSqliteWorkerCleanupFailure(
-              toErrorObject(error, "SQLite worker failed"),
+              toErrorObject(failure, "SQLite worker failed"),
               cleanupError,
             );
     }

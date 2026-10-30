@@ -121,8 +121,6 @@ describe("openrouter speech provider", () => {
       defaultHeaders: {
         Authorization: "Bearer sk-openrouter",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://openclaw.ai",
-        "X-OpenRouter-Title": "OpenClaw",
       },
       provider: "openrouter",
       capability: "audio",
@@ -137,8 +135,6 @@ describe("openrouter speech provider", () => {
     expect(Object.fromEntries(headers.entries())).toEqual({
       authorization: "Bearer sk-openrouter",
       "content-type": "application/json",
-      "http-referer": "https://openclaw.ai",
-      "x-openrouter-title": "OpenClaw",
     });
     expect(request).toEqual({
       url: "https://openrouter.ai/api/v1/audio/speech",
@@ -251,6 +247,7 @@ describe("openrouter speech provider", () => {
 
   it("defaults to a live-proven OpenRouter TTS model", () => {
     const provider = buildOpenRouterSpeechProvider();
+    expect(provider.defaultTimeoutMs).toBe(120_000);
 
     expect(
       provider.resolveConfig?.({ cfg: {} as never, rawConfig: {}, timeoutMs: 30_000 }),

@@ -17,7 +17,7 @@ Symptom-first checks for a Telegram bot that is not behaving.
 
     - If `requireMention=false`, Telegram privacy mode must allow full visibility: BotFather `/setprivacy` -> Disable, then remove + re-add the bot to the group.
     - `openclaw channels status` warns when config expects unmentioned group messages.
-    - `openclaw channels status --probe` checks explicit numeric group IDs; wildcard `"*"` cannot be membership-probed.
+    - `openclaw channels status --probe` checks explicit numeric group IDs; membership cannot be checked for the wildcard `"*"`.
     - Quick session test: `/activation always`.
 
   </Accordion>
@@ -45,12 +45,31 @@ Symptom-first checks for a Telegram bot that is not behaving.
 
   </Accordion>
 
+  <Accordion title="Messages fail with runtime owner was not published">
+
+    OpenClaw tries to rebuild an agent's failed model runtime when the next
+    message arrives. After a failed recovery, the inbound message waits until
+    the runtime is eligible to retry. Waiting does not consume a recovery
+    attempt or keep typing active. If two actual recovery attempts fail in the same process, the
+    message remains in the failed ingress queue with the reason
+    `runtime-recovery-failed`. Ordinary network failures keep their normal
+    retry policy.
+
+    Check `openclaw logs --follow` for the underlying publication error, correct
+    the reported model or plugin problem, and resend the message. The failed
+    queue entry retains the original input for operator inspection.
+
+  </Accordion>
+
   <Accordion title="Polling or network instability">
+
+    The `Node 22+` references below describe Node networking behavior, not OpenClaw's
+    supported runtime versions. See [Node.js](/install/node) for current requirements.
 
     - Node 22+ with a custom fetch/proxy can trigger immediate abort behavior if `AbortSignal` types mismatch.
     - Some hosts resolve `api.telegram.org` to IPv6 first; broken IPv6 egress causes intermittent API failures.
     - Logs with `TypeError: fetch failed` or `Network request for 'getUpdates' failed!` are retried as recoverable network errors.
-    - During polling startup, OpenClaw reuses the successful startup `getMe` probe for grammY so the runner does not need a second `getMe` before the first `getUpdates`.
+    - During polling startup, OpenClaw reuses the successful startup `getMe` check for grammY so the runner does not need a second `getMe` before the first `getUpdates`.
     - If `deleteWebhook` fails with a transient network error during polling startup, OpenClaw continues into long polling instead of making another pre-poll control-plane call. A still-active webhook then surfaces as a `getUpdates` conflict; OpenClaw rebuilds the transport and retries webhook cleanup.
     - `Polling stall detected` in logs means OpenClaw restarts polling and rebuilds the transport after 120 seconds without completed long-poll liveness by default.
     - `openclaw channels status --probe` and `openclaw doctor` warn when a running polling account has not completed `getUpdates` after startup grace, a running webhook account has not completed `setWebhook` after startup grace, or the last successful polling transport activity is stale.
@@ -65,7 +84,8 @@ channels:
     proxy: socks5://<user>:<password>@proxy-host:1080
 ```
 
-    - Node 22+ defaults to `autoSelectFamily=true` (except WSL2). Telegram DNS result order honors `OPENCLAW_TELEGRAM_DNS_RESULT_ORDER`, then `channels.telegram.network.dnsResultOrder`, then the process default (for example `NODE_OPTIONS=--dns-result-order=ipv4first`), falling back to `ipv4first` on Node 22+ if none applies.
+    - Telegram DNS result order honors `OPENCLAW_TELEGRAM_DNS_RESULT_ORDER`, then `channels.telegram.network.dnsResultOrder`, then the process default, falling back to `ipv4first` if none applies. With `ipv4first`, Telegram disables address-family racing by default so an unreachable IPv6 route cannot interfere with the preferred IPv4 connection. `verbatim` keeps address-family selection enabled with a 300 ms attempt timeout, except on WSL2. Explicit `network.autoSelectFamily` or its environment overrides take precedence.
+    - On dual-stack hosts with broken IPv6, set `channels.telegram.network.dnsResultOrder: "ipv4first"`; no `NODE_OPTIONS` change is needed. Connection failures proven to occur before sending remain retryable; timeouts after sending remain ambiguous to avoid duplicate replies.
     - On WSL2, or when IPv4-only behavior works better, force family selection:
 
 ```yaml

@@ -1,24 +1,27 @@
 // Gateway register option collision tests cover gateway command option registration.
+import "../../test-utils/prepare-compiled-subprocesses.js";
 import { Command } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { registerGatewayCli } from "./register.js";
 
 const mocks = vi.hoisted(() => ({
-  callGatewayCli: vi.fn(async (method: string, _opts: unknown, _params?: unknown) => {
-    if (method === "gateway.suspend.prepare") {
-      return {
-        status: "ready",
-        suspensionId: "suspension-1",
-        expiresAtMs: 1_800_000_000_000,
-        activeCount: 0,
-        blockers: [],
-      };
-    }
-    if (method === "gateway.suspend.resume") {
-      return { ok: true, status: "running", resumed: true };
-    }
-    return { ok: true };
-  }),
+  callGatewayCli: vi.fn(
+    async (method: string, _opts: unknown, _params?: unknown): Promise<unknown> => {
+      if (method === "gateway.suspend.prepare") {
+        return {
+          status: "ready",
+          suspensionId: "suspension-1",
+          expiresAtMs: 1_800_000_000_000,
+          activeCount: 0,
+          blockers: [],
+        };
+      }
+      if (method === "gateway.suspend.resume") {
+        return { ok: true, status: "running", resumed: true };
+      }
+      return { ok: true };
+    },
+  ),
   emitReachableGatewayAuthDiagnostic: vi.fn(async (_params: unknown) => false),
   formatHealthChannelLines: vi.fn(() => []),
   gatewayStatusCommand: vi.fn(async (_opts: unknown, _runtime: unknown) => {}),
@@ -339,6 +342,38 @@ describe("gateway register option collisions", () => {
     assert();
   });
 
+  it("preserves one busy JSON result when suspend exits nonzero", async () => {
+    const busy = {
+      status: "busy",
+      reason: "active-work",
+      retryAfterMs: 200,
+      activeCount: 1,
+      blockers: [{ kind: "root-request", count: 1, message: "1 active request" }],
+    };
+    callGatewayCli.mockResolvedValueOnce(busy);
+    const { ExitError } =
+      await vi.importActual<typeof import("../../runtime.js")>("../../runtime.js");
+    // Model a non-exiting runtime: the default runtime terminates the process here.
+    const exit = (code: number) => {
+      throw new ExitError(code);
+    };
+
+    await defaultRuntime.exit.withImplementation(exit, async () => {
+      await expect(
+        sharedProgram.parseAsync(
+          ["gateway", "suspend", "--request-id", "host-operation", "--json"],
+          { from: "user" },
+        ),
+      ).rejects.toMatchObject({ name: "ExitError", code: 1 });
+    });
+
+    const stdout = defaultRuntime.writeJson.mock.calls
+      .map(([value]) => JSON.stringify(value))
+      .join("\n");
+    expect(JSON.parse(stdout)).toEqual({ ...busy, requestId: "host-operation" });
+    expect(defaultRuntime.error).not.toHaveBeenCalled();
+  });
+
   it("rejects non-decimal usage-cost --days values instead of silently defaulting", async () => {
     await sharedProgram.parseAsync(["gateway", "usage-cost", "--days", "1e3", "--json"], {
       from: "user",
@@ -391,20 +426,22 @@ describe("gateway register option collisions", () => {
     });
   });
 
-  it("defers health presentation imports for successful JSON output", async () => {
+  it("loads health presentation only for text output", async () => {
     const program = new Command();
     program.exitOverride();
     const loadGatewayHealthModule = vi.fn(async () => ({
       emitReachableGatewayAuthDiagnostic: mocks.emitReachableGatewayAuthDiagnostic,
       formatHealthChannelLines: mocks.formatHealthChannelLines,
+      readNonObservingHealthConfig: async () => ({}),
     }));
     const loadHealthStyleModule = vi.fn(async () => ({
       styleHealthChannelLine: (line: string) => line,
     }));
-    registerGatewayCli(program, {
-      loadGatewayHealthModule: loadGatewayHealthModule as never,
-      loadHealthStyleModule: loadHealthStyleModule as never,
-    });
+    vi.resetModules();
+    vi.doMock("../../commands/health.js", loadGatewayHealthModule);
+    vi.doMock("../../../packages/terminal-core/src/health-style.js", loadHealthStyleModule);
+    const { registerGatewayCli: registerFreshGatewayCli } = await import("./register.js");
+    registerFreshGatewayCli(program);
 
     await program.parseAsync(["node", "openclaw", "gateway", "health", "--json"]);
 
@@ -416,5 +453,14 @@ describe("gateway register option collisions", () => {
     expect(loadGatewayHealthModule).not.toHaveBeenCalled();
     expect(loadHealthStyleModule).not.toHaveBeenCalled();
     expect(defaultRuntime.writeJson).toHaveBeenCalledWith({ ok: true });
+
+    const textProgram = new Command();
+    textProgram.exitOverride();
+    registerFreshGatewayCli(textProgram);
+    await textProgram.parseAsync(["node", "openclaw", "gateway", "health"]);
+
+    expect(loadGatewayHealthModule).toHaveBeenCalledOnce();
+    expect(loadHealthStyleModule).toHaveBeenCalledOnce();
+    expect(defaultRuntime.log).toHaveBeenCalledWith("Gateway Health");
   });
 });

@@ -4,6 +4,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { appendFileSync, readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { classifyReleaseTrain, parseReleaseVersion } from "./lib/release-version.mjs";
+import { decodePluginSdkApiArtifact } from "./plugin-sdk-api-release-evidence.mjs";
 
 const SUPPORTED_DIST_TAGS = new Set(["beta", "latest", "extended-stable"]);
 
@@ -95,7 +96,8 @@ export function validateNpmPreflightDistTag({ manifest, npmDistTag }) {
   }
   // Only the qualified package format proves both regular-release predecessors.
   // Historical receipts and prerelease/extended-stable packages retain exact channels.
-  const selectors = manifest?.pluginSdkApi?.selectors;
+  const pluginSdkApi = decodePluginSdkApiArtifact(manifest?.pluginSdkApi);
+  const selectors = pluginSdkApi?.selectors;
   if (
     manifest?.version === 3 &&
     typeof manifest.packageVersion === "string" &&
@@ -104,7 +106,7 @@ export function validateNpmPreflightDistTag({ manifest, npmDistTag }) {
     [
       "openclaw.plugin-sdk-api-release-evidence-set/v1",
       "openclaw.plugin-sdk-api-release-evidence-set/v2",
-    ].includes(manifest.pluginSdkApi?.schema) &&
+    ].includes(pluginSdkApi?.schema) &&
     selectors &&
     Object.keys(selectors).length === 2 &&
     ["beta", "latest"].every(
@@ -218,19 +220,12 @@ export function validateActiveExtendedStableLine(releaseVersion, mainPackageVers
   }
   const mainCalendarMonth = mainVersion.year * 12 + mainVersion.month;
   const releaseCalendarMonth = releaseVersionParsed.year * 12 + releaseVersionParsed.month;
-  // Keep both trailing completed months eligible so maintenance can finish shortly after
-  // main enters a new month. Advancing main a third month retires the older line.
-  const monthDifference = mainCalendarMonth - releaseCalendarMonth;
-  if (monthDifference < 1 || monthDifference > 2) {
-    const allowedMonths = [mainCalendarMonth - 1, mainCalendarMonth - 2]
-      .map((calendarMonth) => {
-        const year = Math.floor((calendarMonth - 1) / 12);
-        const month = ((calendarMonth - 1) % 12) + 1;
-        return `${year}.${month}`;
-      })
-      .join(" or ");
+  // Keep one active trailing-month line; advancing main another month retires the older line.
+  if (mainCalendarMonth - releaseCalendarMonth !== 1) {
+    const expectedYear = mainVersion.month === 1 ? mainVersion.year - 1 : mainVersion.year;
+    const expectedMonth = mainVersion.month === 1 ? 12 : mainVersion.month - 1;
     throw new Error(
-      `Extended-stable publishes only the two trailing completed months: protected main ${mainPackageVersion} allows ${allowedMonths}.PATCH, not ${releaseVersion}. Retire the older line; publishing a retired line requires an explicit maintainer decision.`,
+      `Extended-stable publishes only the trailing completed month: protected main ${mainPackageVersion} allows ${expectedYear}.${expectedMonth}.PATCH, not ${releaseVersion}. Retire the older line; publishing a retired line requires an explicit maintainer decision.`,
     );
   }
   if (classifyReleaseTrain(mainVersion) !== "stable") {

@@ -1,7 +1,33 @@
-import { resolveGlobalSet } from "../shared/global-singleton.js";
+import { resolveGlobalSet, resolveGlobalSingleton } from "../shared/global-singleton.js";
 
 type SignalExitBarrier = () => Promise<void>;
-type CliExitSignal = "SIGINT" | "SIGTERM";
+const cliSignalExitCodes = { SIGINT: 130, SIGTERM: 143, SIGHUP: 129 };
+type CliExitSignal = keyof typeof cliSignalExitCodes;
+
+type SignalExitOwner = (code: number | string) => void;
+// Process custody outlives the Gateway generations that reset ordinary barriers.
+const processExitOwner = resolveGlobalSingleton<{ current?: SignalExitOwner }>(
+  Symbol.for("openclaw.signalExitOwner"),
+  () => ({}),
+);
+
+/** An exclusive process owner handles output failure through its normal shutdown. */
+export function registerSignalExitOwner(owner: SignalExitOwner): () => void {
+  if (processExitOwner.current) {
+    throw new Error("A process signal exit owner is already registered");
+  }
+  processExitOwner.current = owner;
+  let active = true;
+  return () => {
+    if (!active) {
+      return;
+    }
+    active = false;
+    if (processExitOwner.current === owner) {
+      processExitOwner.current = undefined;
+    }
+  };
+}
 
 // Gates let bounded mutations finish before signal cleanup begins; barriers
 // then prevent one cleanup from exiting while another still owns state.
@@ -43,6 +69,10 @@ let pendingProcessExit: Promise<void> | undefined;
 
 /** Broken output must not bypass a maintenance owner's asynchronous recovery. */
 export function exitAfterSignalExitBarriers(code: number | string): void {
+  if (processExitOwner.current) {
+    processExitOwner.current(code);
+    return;
+  }
   if (pendingProcessExit) {
     return;
   }
@@ -57,9 +87,13 @@ export function exitAfterSignalExitBarriers(code: number | string): void {
     .then((exitCode) => {
       pendingProcessExit = undefined;
       const outcome = process.exitCode;
-      process.exit(
-        (exitCode === 0 || exitCode === "0") && outcome !== undefined ? outcome : exitCode,
-      );
+      const finalCode =
+        (exitCode === 0 || exitCode === "0") && outcome != null ? outcome : exitCode;
+      if (processExitOwner.current) {
+        processExitOwner.current(finalCode);
+      } else {
+        process.exit(finalCode);
+      }
     });
 }
 
@@ -98,10 +132,9 @@ function handleCliSignal(signal: CliExitSignal): void {
   if (cliSignalExit) {
     return;
   }
-  const listener = signal === "SIGINT" ? onCliSigint : onCliSigterm;
   if (
     !cliDoctorSignalOwner &&
-    process.listeners(signal).some((existing) => existing !== listener)
+    process.listeners(signal).some((existing) => existing !== cliSignalListeners[signal])
   ) {
     // Run first and relinquish the fallback synchronously: signal-exit observers
     // must see their original listener count, and custom owners retain their drain.
@@ -114,13 +147,19 @@ function handleCliSignal(signal: CliExitSignal): void {
         "CLI signal cleanup did not complete. Retry the command to reclaim interrupted snapshots.\n",
       );
     })
-    .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+    .finally(() => process.exit(cliSignalExitCodes[signal]));
 }
 
-const onCliSigint = () => handleCliSignal("SIGINT");
-const onCliSigterm = () => handleCliSignal("SIGTERM");
-const onCliSigpipe = () => {
-  if (cliSignalOwners > 0) {
+const cliSignalListeners = {
+  SIGINT: () => handleCliSignal("SIGINT"),
+  SIGTERM: () => handleCliSignal("SIGTERM"),
+  SIGHUP: () => handleCliSignal("SIGHUP"),
+};
+// Any EPIPE write raises SIGPIPE, including a child's closed stdin, so the
+// signal only keeps Node's ignore disposition; EPIPE on our output decides exit.
+const onCliSigpipe = () => {};
+const onCliOutputError = (error: NodeJS.ErrnoException) => {
+  if (error.code === "EPIPE" && cliSignalOwners > 0) {
     exitAfterSignalExitBarriers(141);
   }
 };
@@ -128,26 +167,31 @@ const onCliSigpipe = () => {
 /** Doctor keeps termination custody when progress spinners observe signals.
  * Retain SIGPIPE until exit: removing its last listener restores SIG_DFL, not SIG_IGN. */
 export function installCliDoctorSignalExitHandlers(): void {
-  if (cliSignalOwners === 0) {
+  if (cliSignalOwners === 0 || cliDoctorSignalOwner) {
     return;
   }
   cliDoctorSignalOwner = true;
+  process.prependListener("SIGHUP", cliSignalListeners.SIGHUP);
   if (!process.listeners("SIGPIPE").includes(onCliSigpipe)) {
     process.on("SIGPIPE", onCliSigpipe);
+    // Run before console capture's generic EPIPE exit so closed output reports 141.
+    process.stdout.prependListener("error", onCliOutputError);
+    process.stderr.prependListener("error", onCliOutputError);
   }
 }
 
 function detachCliSignalExitHandlers(): void {
-  process.off("SIGINT", onCliSigint);
-  process.off("SIGTERM", onCliSigterm);
+  for (const [signal, listener] of Object.entries(cliSignalListeners)) {
+    process.off(signal, listener);
+  }
 }
 
 /** Executable CLI commands share one signal owner; Gateway and update handlers
  * keep their specialized lifecycle and use these same barriers. */
 export function installCliSignalExitHandlers(): () => void {
   if (cliSignalOwners++ === 0) {
-    process.prependListener("SIGINT", onCliSigint);
-    process.prependListener("SIGTERM", onCliSigterm);
+    process.prependListener("SIGINT", cliSignalListeners.SIGINT);
+    process.prependListener("SIGTERM", cliSignalListeners.SIGTERM);
   }
   let active = true;
   return () => {

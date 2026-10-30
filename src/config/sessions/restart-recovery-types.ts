@@ -28,6 +28,8 @@ export type RestartRecoveryTerminalDeliveryEvidenceResult = {
   captured?: true;
   payloads?: Array<{ mediaUrls?: string[]; visible?: boolean }>;
   payloadsTruncated?: true;
+  /** Classification facts only; raw terminal text and errors are never retained here. */
+  meta?: { aborted?: true; error?: true };
   deliveryStatus?: {
     status: "failed" | "partial_failed" | "sent" | "suppressed";
     resultCount?: number;

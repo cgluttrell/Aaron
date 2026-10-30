@@ -143,33 +143,27 @@ describe("human Notes blocks", () => {
     expect(preserveHumanNotesBlock(rendered, existing)).toBe(existing);
   });
 
-  it("ignores source-body marker pairs when extracting and preserving actual Notes", () => {
-    const sourceWithMarkers = [
-      "# Source",
-      "",
-      "## Content",
-      "```text",
-      startMarker,
-      "Generated source annotation",
-      endMarker,
-      "```",
-      "",
-      "## Notes",
-      startMarker,
-      "Durable human annotation",
-      endMarker,
-      "",
-    ].join("\n");
+  it.each([startMarker, endMarker])("rejects an unpaired producer-page marker %s", (marker) => {
+    const existing = `# Concept\n\n## Notes\n${marker}\nHandwritten note.\n`;
 
-    expect(extractHumanNotesBlock(sourceWithMarkers)).toBe(
-      `${startMarker}\nDurable human annotation\n${endMarker}`,
+    expect(() => preserveHumanNotesBlock(rendered, existing, { producerMarkdown: true })).toThrow(
+      "human Notes are missing",
     );
-    expect(preserveHumanNotesBlock(rendered, sourceWithMarkers)).toBe(
-      rendered.replace(
-        `${startMarker}\n${endMarker}`,
-        `${startMarker}\nDurable human annotation\n${endMarker}`,
-      ),
+  });
+
+  it.each(["\n", "\r\n"])("preserves legacy Notes under an open producer fence (%j)", (newline) => {
+    const humanBlock = [startMarker, "Keep café and trailing spaces.  ", endMarker].join(newline);
+    const existing = `~~~sql${newline}SELECT 1${newline}## Notes${newline}${humanBlock}${newline}`;
+
+    expect(preserveHumanNotesBlock(rendered, existing, { producerMarkdown: true })).toBe(
+      rendered.replace(`${startMarker}\n${endMarker}`, () => humanBlock),
     );
+  });
+
+  it("does not preserve a legacy producer's closed Notes example", () => {
+    const existing = `~~~markdown\n## Notes\n${startMarker}\nProducer example.\n${endMarker}\n~~~`;
+
+    expect(preserveHumanNotesBlock(rendered, existing, { producerMarkdown: true })).toBe(rendered);
   });
 });
 

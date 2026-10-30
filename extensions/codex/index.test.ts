@@ -29,7 +29,6 @@ import plugin from "./index.js";
 import {
   CODEX_MANAGED_THREAD_NAMESPACE,
   CODEX_MANAGED_THREAD_MAX_ENTRIES,
-  markStartedCodexManagedThread,
   type StoredCodexManagedThread,
 } from "./src/app-server/managed-thread-store.js";
 import {
@@ -194,7 +193,7 @@ describe("codex plugin", () => {
         bindingStore: CodexAppServerBindingStore;
       };
       const managed = bindingStore.managedThreads!;
-      await markStartedCodexManagedThread(managed, original);
+      await managed.mark(original);
       await expect(managed.mark({ ...original, rolloutPath: "/later.jsonl" })).resolves.toBe(true);
       await expect(managed.has("home", "managed")).resolves.toBe(true);
       const control: CodexSessionCatalogControl = {
@@ -482,11 +481,11 @@ describe("codex plugin", () => {
     expect(providers[1]).not.toHaveProperty("catalog");
   });
 
-  it("registers the five shipped supervision tools only when supervision is enabled", () => {
+  it("keeps native declarations across owner, completion, and owner turns", async () => {
     const registerTool = vi.fn<OpenClawPluginApi["registerTool"]>();
     plugin.register(
       createCodexTestApi({
-        pluginConfig: { supervision: { enabled: true } },
+        pluginConfig: { appServer: { homeScope: "user" }, supervision: { enabled: true } },
         registerTool,
       }),
     );
@@ -496,8 +495,26 @@ describe("codex plugin", () => {
     expect(registration.create({ senderIsOwner: true }).map((tool) => tool.name)).toEqual([
       ...CODEX_SUPERVISION_COMPAT_TOOL_NAMES,
     ]);
-    expect(registration.create({ senderIsOwner: false })).toEqual([]);
-    expect(registration.create()).toEqual([]);
+    for (const registered of [
+      registration,
+      registeredCodexTools(registerTool, "codex_plugins"),
+      registeredCodexTools(registerTool, "codex_threads"),
+    ]) {
+      const declaration = (owner?: boolean) =>
+        registered.create({ senderIsOwner: owner }).map(({ name, description, parameters }) => ({
+          name,
+          description,
+          parameters,
+        }));
+      const ownerDeclaration = declaration(true);
+      expect(ownerDeclaration).not.toEqual([]);
+      expect(declaration(false)).toEqual(ownerDeclaration);
+      expect(declaration()).toEqual(ownerDeclaration);
+      expect(declaration(true)).toEqual(ownerDeclaration);
+      for (const tool of registered.create({ senderIsOwner: false })) {
+        await expect(tool.execute("denied", {})).rejects.toThrow("owner-authorized sender");
+      }
+    }
   });
 
   it.each([

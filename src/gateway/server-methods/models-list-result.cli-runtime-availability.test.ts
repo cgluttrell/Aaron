@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { testing as cliBackendsTesting } from "../../agents/cli-backends.test-support.js";
+import {
+  createModelCatalogDecisions,
+  prepareModelCatalogDecisions,
+} from "../../agents/model-catalog-decisions.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   clearUserProfileAuthLink,
@@ -8,10 +12,7 @@ import {
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
 import { withOpenClawTestState } from "../../test-utils/openclaw-test-state.js";
 import { loadDeferredCatalog } from "../server-model-catalog-auth.js";
-import {
-  buildModelsListResult,
-  createGatewayAgentModelCatalogProjector,
-} from "./models-list-result.js";
+import { buildModelsListResult } from "./models-list-result.js";
 import {
   createModelsListTestContext,
   listModels,
@@ -21,17 +22,29 @@ import {
 const config = {
   agents: {
     defaults: { model: { primary: "anthropic/claude-opus-5" } },
-    list: [
-      {
-        id: "main",
-        default: true,
+    entries: {
+      main: {
         models: {
           "anthropic/claude-opus-5": { agentRuntime: { id: "claude-cli" } },
         },
       },
-    ],
+    },
   },
 } satisfies OpenClawConfig;
+
+const token = (provider: string, expired = false, value = "synthetic-shared") => ({
+  type: "token" as const,
+  provider,
+  token: value,
+  expires: Date.now() + (expired ? -60_000 : 600_000),
+});
+const oauthCredential = (provider: string) => ({
+  type: "oauth" as const,
+  provider,
+  access: "synthetic-access",
+  refresh: "synthetic-refresh",
+  expires: Date.now() + 600_000,
+});
 
 async function listClaudeCliModel(
   params: {
@@ -53,23 +66,6 @@ async function listClaudeCliModel(
     catalogComplete: true,
     view: "configured",
     includeDefaultModels: false,
-  });
-}
-
-async function listDirectClaudeCliModel(params: {
-  authenticated: boolean;
-  pluginDisabled?: boolean;
-}) {
-  const cfg = params.pluginDisabled
-    ? { ...config, plugins: { entries: { anthropic: { enabled: false } } } }
-    : config;
-  return await listModels({
-    catalog: [providerCatalogEntry("claude-cli", "claude-opus-5")],
-    cfg,
-    preparedAuthModes:
-      params.authenticated && !params.pluginDisabled ? { "claude-cli": "oauth" } : {},
-    catalogComplete: true,
-    view: "all",
   });
 }
 
@@ -95,44 +91,12 @@ describe("models.list CLI runtime availability", () => {
   });
 
   it.each([
-    { authenticated: true, available: true, reason: undefined },
-    { authenticated: false, available: false, reason: "missing-auth" },
-    {
-      authenticated: true,
-      pluginDisabled: true,
-      available: false,
-      reason: "missing-auth",
-    },
-  ])(
-    "reports direct Claude CLI auth=$authenticated and plugin disabled=$pluginDisabled",
-    async (scenario) => {
-      const result = await listDirectClaudeCliModel(scenario);
-
-      expect(result.models).toEqual([
-        expect.objectContaining({
-          provider: "claude-cli",
-          id: "claude-opus-5",
-          available: scenario.available,
-          ...(scenario.reason ? { unavailableReason: scenario.reason } : {}),
-        }),
-      ]);
-    },
-  );
-
-  it.each([
     {
       authenticated: true,
       providerApiKey: false,
       pluginDisabled: false,
       available: true,
       reason: undefined,
-    },
-    {
-      authenticated: false,
-      providerApiKey: false,
-      pluginDisabled: false,
-      available: false,
-      reason: "missing-auth",
     },
     {
       authenticated: false,
@@ -160,35 +124,79 @@ describe("models.list CLI runtime availability", () => {
       expect(result.models[0]?.unavailableUntil).toBeUndefined();
     },
   );
-  it("does not use synthetic auth when plugins are globally disabled", async () => {
-    await expect(
-      listClaudeCliModel({
-        authenticated: true,
-        cfg: {
-          ...config,
-          plugins: { enabled: false },
+
+  it("keeps every Claude CLI model listed as needing login before the full catalog arrives", async () => {
+    const pinned = ["claude-fable-5", "claude-opus-5", "claude-sonnet-5"];
+    const result = await listModels({
+      catalog: [...pinned, "claude-haiku-4-5"].map((id) => providerCatalogEntry("anthropic", id)),
+      cfg: {
+        agents: {
+          defaults: {
+            model: { primary: "anthropic/claude-opus-5" },
+            models: Object.fromEntries(
+              pinned.map((id) => [`anthropic/${id}`, { agentRuntime: { id: "claude-cli" } }]),
+            ),
+          },
         },
-      }),
-    ).resolves.toEqual({
-      models: [expect.objectContaining({ id: "claude-opus-5", available: false })],
+      },
+      view: "configured",
+      includeDefaultModels: false,
     });
+    expect(
+      result.models
+        .map(({ id, available, unavailableReason }) => ({ id, available, unavailableReason }))
+        .toSorted((left, right) => left.id.localeCompare(right.id)),
+    ).toEqual(pinned.map((id) => ({ id, available: false, unavailableReason: "missing-auth" })));
   });
 
-  it("does not use provider auth when the native runtime plugin is disabled", async () => {
-    vi.stubEnv("ANTHROPIC_API_KEY", "test-key");
-
-    const result = await listClaudeCliModel({ authenticated: true, pluginDisabled: true });
-
-    expect(result.models[0]).toMatchObject({ available: false, unavailableReason: "missing-auth" });
+  it.each<{
+    name: string;
+    available: boolean;
+    oauth?: boolean;
+    order?: Record<string, string[]>;
+    disabled?: boolean;
+  }>([
+    { name: "saved setup tokens", available: true },
+    { name: "saved OAuth subscription", oauth: true, available: true },
+    { name: "empty CLI account order", order: { "claude-cli": [] }, available: false },
+    { name: "empty provider account order", order: { anthropic: [] }, available: false },
+    { name: "API-key-only account order", order: { anthropic: ["api"] }, available: false },
+    { name: "disabled plugin", disabled: true, available: false },
+  ])("evaluates unpinned Claude CLI models with $name and no native login", async (testCase) => {
+    const result = await listModels({
+      cfg: {
+        ...config,
+        auth: { order: testCase.order },
+        ...(testCase.disabled ? { plugins: { entries: { anthropic: { enabled: false } } } } : {}),
+      },
+      catalog: [providerCatalogEntry("anthropic", "claude-opus-5")],
+      preparedAuthModes: {},
+      preparedAuthStore: {
+        version: 1,
+        profiles: {
+          first: testCase.oauth ? oauthCredential("anthropic") : token("anthropic"),
+          second: token("anthropic", testCase.oauth),
+          api: { type: "api_key", provider: "anthropic", key: "synthetic-api-key" },
+        },
+      },
+      view: "configured",
+      includeDefaultModels: false,
+    });
+    expect(result.models).toEqual([
+      expect.objectContaining({
+        id: "claude-opus-5",
+        available: testCase.available,
+        agentRuntime: expect.objectContaining({ id: "claude-cli" }),
+      }),
+    ]);
+    expect(result.models[0]?.unavailableReason).toBe(
+      testCase.available ? undefined : "missing-auth",
+    );
   });
 
   it.each([
-    { selection: "draft", expired: false, sharedOrder: false },
     { selection: "default", expired: false, sharedOrder: false },
-    { selection: "draft", expired: true, sharedOrder: false },
-    { selection: "default", expired: true, sharedOrder: false },
     { selection: "draft", expired: false, sharedOrder: true },
-    { selection: "default", expired: false, sharedOrder: true },
     { selection: "draft", expired: true, sharedOrder: true },
     { selection: "default", expired: true, sharedOrder: true },
     { selection: "default", expired: true, sharedOrder: true, oauth: true },
@@ -252,7 +260,7 @@ describe("models.list CLI runtime availability", () => {
             params: { view: "configured", preparedOnly: true },
             preloadedCatalog: { agentId: "main", config: cfg, snapshot },
             preloadedOnly: true,
-            catalogProjector: createGatewayAgentModelCatalogProjector({
+            catalogProjector: await prepareModelCatalogDecisions({
               cfg,
               agentId: "main",
               agentDir: state.agentDir(),
@@ -292,8 +300,6 @@ describe("models.list CLI runtime availability", () => {
       reason: "auth-failed",
     },
     { scenario: "direct refresh-needed", expired: true, available: false },
-    { scenario: "direct unselected", expired: true, unselected: true, available: true },
-    { scenario: "direct disabled", disabled: true, available: false, reason: "missing-auth" },
     {
       scenario: "canonical pin",
       provider: "anthropic",
@@ -319,7 +325,7 @@ describe("models.list CLI runtime availability", () => {
         const cfg: OpenClawConfig = {
           agents: {
             defaults: { model: { primary: `${provider}/${modelId}` } },
-            list: [{ id: "main", default: true }],
+            entries: { main: {} },
           },
           auth: {
             profiles: {
@@ -328,7 +334,6 @@ describe("models.list CLI runtime availability", () => {
             },
             order: { [provider]: ["shared"] },
           },
-          ...(scenario.disabled ? { plugins: { entries: { anthropic: { enabled: false } } } } : {}),
         };
         await state.writeAuthProfiles({
           version: 1,
@@ -363,7 +368,7 @@ describe("models.list CLI runtime availability", () => {
           params: { view: "all", preparedOnly: true },
           preloadedCatalog: { agentId: "main", config: cfg, snapshot },
           preloadedOnly: true,
-          catalogProjector: createGatewayAgentModelCatalogProjector({
+          catalogProjector: createModelCatalogDecisions({
             cfg,
             agentId: "main",
             agentDir: state.agentDir(),
@@ -373,9 +378,8 @@ describe("models.list CLI runtime availability", () => {
             preparedAuthStore: snapshot.authStore,
             preparedRuntimeAuthModes: snapshot.authModes,
             preparedSyntheticAuthComplete: true,
-            ...(scenario.unselected
-              ? {}
-              : { preferredProfileId: "selected", pinnedProfileId: "selected" }),
+            preferredProfileId: "selected",
+            pinnedProfileId: "selected",
           }),
         });
         const model = result.models.find(

@@ -20,7 +20,7 @@ import { createPluginRecord } from "./status.test-helpers.js";
 
 const emptyResult = { cleanupCount: 0, failures: [] };
 
-async function collect() {
+async function collect(...released: WeakRef<object>[]) {
   const gc = globalThis.gc;
   assert.ok(gc, "The retention child requires --expose-gc");
   const control = new WeakRef({ unowned: true });
@@ -31,6 +31,22 @@ async function collect() {
         gc();
         resolve();
       });
+    });
+  }
+  // JavaScriptCore also scans native stacks conservatively. Bun's immediate
+  // dispatcher can keep a stale pointer to a completed fixture graph across
+  // every immediate; a timer-phase collection runs from other native frames.
+  // These passes are bounded and do not delay a graph that already collected.
+  for (
+    let pass = 0;
+    pass < 4 && released.some((reference) => reference.deref() !== undefined);
+    pass += 1
+  ) {
+    await new Promise<void>((resolve) => {
+      setTimeout(() => {
+        gc();
+        resolve();
+      }, 0);
     });
   }
   assert.equal(control.deref(), undefined, "Unowned control must collect");
@@ -63,12 +79,12 @@ async function retireSuccessors(withInstance: boolean) {
   return { oldest, successors };
 }
 
-function inspectRetiredSuccessors(
-  withInstance: boolean,
-  inspect: (result: Awaited<ReturnType<typeof retireSuccessors>>) => Promise<void>,
+function inspectAfterFrameRelease<T>(
+  produce: () => Promise<T>,
+  inspect: (result: T) => Promise<void>,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    void retireSuccessors(withInstance).then((result) => {
+    void produce().then((result) => {
       // Inspect inside the next task so no producer or outer resolution frame stays live.
       void setImmediate().then(() => inspect(result).then(resolve, reject), reject);
     }, reject);
@@ -180,26 +196,34 @@ switch (process.argv[2]) {
     assert.ok(kind === "source" || kind === "bundled-cjs" || kind === "bundled-mjs");
     // openclaw-temp-dir: allow -- standalone GC child has no Vitest hooks and joins cleanup below.
     const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "recovery-retention-")));
-    const result = await recoverOwner(root, kind);
-    try {
-      await collect();
-      assert.equal(result.owner.deref(), undefined, "Live recovery retained its retired instance");
-      assert.equal(
-        result.registry.deref(),
-        undefined,
-        "Live recovery retained its retired registry",
-      );
-      assert.equal(
-        (result.current.loadModule(result.source) as { read(): string }).read(),
-        "recovered source",
-      );
-      // Keep the recovery factory live too: another failed update must still be recoverable.
-      const recovery = result.current.captureModuleLoaderRecovery();
-      recovery.dispose();
-    } finally {
-      await result.current.dispose();
-      fs.rmSync(root, { recursive: true, force: true });
-    }
+    await inspectAfterFrameRelease(
+      () => recoverOwner(root, kind),
+      async (result) => {
+        try {
+          await collect(result.owner, result.registry);
+          assert.equal(
+            result.owner.deref(),
+            undefined,
+            "Live recovery retained its retired instance",
+          );
+          assert.equal(
+            result.registry.deref(),
+            undefined,
+            "Live recovery retained its retired registry",
+          );
+          assert.equal(
+            (result.current.loadModule(result.source) as { read(): string }).read(),
+            "recovered source",
+          );
+          // Keep the recovery factory live too: another failed update must still be recoverable.
+          const recovery = result.current.captureModuleLoaderRecovery();
+          recovery.dispose();
+        } finally {
+          await result.current.dispose();
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+    );
     break;
   }
   case "loader": {
@@ -290,8 +314,8 @@ switch (process.argv[2]) {
   }
   case "registry":
   case "registry-instances": {
-    await inspectRetiredSuccessors(
-      process.argv[2] === "registry-instances",
+    await inspectAfterFrameRelease(
+      () => retireSuccessors(process.argv[2] === "registry-instances"),
       async ({ oldest, successors }) => {
         await collect();
         assert.ok(

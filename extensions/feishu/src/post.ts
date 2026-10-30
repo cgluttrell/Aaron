@@ -123,7 +123,7 @@ function renderElement(
     return escapeMarkdownText(toStringOrEmpty(element));
   }
 
-  const tag = normalizeLowercaseStringOrEmpty(toStringOrEmpty(element.tag));
+  const tag = normalizeLowercaseStringOrEmpty(element.tag);
   switch (tag) {
     case "text":
       return applyInlineStyles(escapeMarkdownText(toStringOrEmpty(element.text)), element.style);
@@ -139,14 +139,14 @@ function renderElement(
       }
       return applyInlineStyles(renderMentionElement(element), element.style);
     case "img": {
-      const imageKey = normalizeFeishuExternalKey(toStringOrEmpty(element.image_key));
+      const imageKey = normalizeFeishuExternalKey(element.image_key);
       if (imageKey) {
         attachments.push({ kind: "image", key: imageKey });
       }
       return renderMediaPlaceholders ? "![image]" : "";
     }
     case "media": {
-      const fileKey = normalizeFeishuExternalKey(toStringOrEmpty(element.file_key));
+      const fileKey = normalizeFeishuExternalKey(element.file_key);
       if (fileKey) {
         const fileName = toStringOrEmpty(element.file_name) || undefined;
         attachments.push({ kind: "file", key: fileKey, ...(fileName ? { fileName } : {}) });
@@ -190,7 +190,7 @@ function appendTopLevelPostFiles(
     if (!isRecord(entry) || entry.is_folder === true) {
       continue;
     }
-    const fileKey = normalizeFeishuExternalKey(toStringOrEmpty(entry.file_key));
+    const fileKey = normalizeFeishuExternalKey(entry.file_key);
     if (!fileKey || seenFileKeys.has(fileKey)) {
       continue;
     }
@@ -234,21 +234,10 @@ function resolveLocalePayload(candidate: unknown): PostPayload | null {
 }
 
 function resolvePostPayload(parsed: unknown): PostPayload | null {
-  const direct = toPostPayload(parsed);
-  if (direct) {
-    return direct;
-  }
-
-  if (!isRecord(parsed)) {
-    return null;
-  }
-
-  const wrappedPost = resolveLocalePayload(parsed.post);
-  if (wrappedPost) {
-    return wrappedPost;
-  }
-
-  return resolveLocalePayload(parsed);
+  return (
+    toPostPayload(parsed) ??
+    (isRecord(parsed) ? (resolveLocalePayload(parsed.post) ?? resolveLocalePayload(parsed)) : null)
+  );
 }
 
 type PostParseOptions = {

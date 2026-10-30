@@ -29,34 +29,28 @@ function containsModuleAccess(node: import("acorn").AnyNode): boolean {
   }
 
   for (const value of Object.values(node)) {
-    if (Array.isArray(value)) {
-      for (const child of value) {
-        if (
-          child !== null &&
-          typeof child === "object" &&
-          "type" in child &&
-          typeof child.type === "string" &&
-          // SAFETY: Children are taken directly from Acorn's parsed AST.
-          containsModuleAccess(child as import("acorn").AnyNode)
-        ) {
-          return true;
-        }
+    for (const child of Array.isArray(value) ? value : [value]) {
+      if (
+        child !== null &&
+        typeof child === "object" &&
+        "type" in child &&
+        typeof child.type === "string" &&
+        // SAFETY: Children are taken directly from Acorn's parsed AST.
+        containsModuleAccess(child as import("acorn").AnyNode)
+      ) {
+        return true;
       }
-      continue;
-    }
-    if (
-      value !== null &&
-      typeof value === "object" &&
-      "type" in value &&
-      typeof value.type === "string" &&
-      // SAFETY: Child fields are taken directly from Acorn's parsed AST.
-      containsModuleAccess(value as import("acorn").AnyNode)
-    ) {
-      return true;
     }
   }
   return false;
 }
+
+// Existing test assertions match the leading sentence; keep it verbatim.
+export const CODE_MODE_MODULE_ACCESS_ERROR =
+  "code mode module access is disabled. " +
+  "Call an enabled async tool global from guest JavaScript; use " +
+  "catalog.search(query) when the bounded quick index omits it. " +
+  "Do not retry the same source with require() or an import.";
 
 export function prepareSource(code: string): string {
   const parsed = parseCodeModeScriptSyntax(code);
@@ -75,7 +69,7 @@ export function prepareSource(code: string): string {
     (code.includes("import") || code.includes("require") || code.includes("\\u")) &&
     containsModuleAccess(parsed.program)
   ) {
-    throw new ToolInputError("code mode module access is disabled.");
+    throw new ToolInputError(CODE_MODE_MODULE_ACCESS_ERROR);
   }
   return code;
 }

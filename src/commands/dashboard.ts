@@ -1,5 +1,5 @@
-// Implements `openclaw dashboard` URL resolution, readiness check, clipboard, and browser launch.
 import { readConfigFileSnapshot } from "../config/config.js";
+import { openUrlPrivately } from "../infra/browser-handoff.js";
 import { copyToClipboard } from "../infra/clipboard.js";
 import { isRemoteEnvironment } from "../infra/remote-env.js";
 import { defaultRuntime, type RuntimeEnv, writeRuntimeJson } from "../runtime.js";
@@ -9,8 +9,8 @@ import {
   resolveControlUiHandoffTarget,
   waitForControlUiDocument,
 } from "./control-ui-handoff.js";
-import { ensureGatewayReadyForOperation } from "./gateway-readiness.js";
-import { detectBrowserOpenSupport, formatControlUiSshHint, openUrl } from "./onboard-helpers.js";
+import { ensureDashboardGatewayReady } from "./gateway-readiness.js";
+import { detectBrowserOpenSupport, formatControlUiSshHint } from "./onboard-helpers.js";
 
 type DashboardOptions = {
   json?: boolean;
@@ -45,14 +45,10 @@ async function ensureDashboardTargetReady(params: {
   yes?: boolean;
   allowRecovery?: boolean;
 }) {
-  return ensureGatewayReadyForOperation({
+  return ensureDashboardGatewayReady({
     runtime: params.runtime,
-    operation: "open the dashboard",
     yes: params.yes,
     probeUrl: params.target.probeUrl,
-    // First-time CLI probes intentionally lack paired operator scope. Gateway
-    // handshake evidence plus the same-PID alias check below proves the target.
-    readyWhenReachable: true,
     ...(params.allowRecovery === false ? { allowInstall: false, interactive: false } : {}),
   });
 }
@@ -117,7 +113,6 @@ async function dashboardJsonCommand(runtime: RuntimeEnv): Promise<void> {
   }
 }
 
-/** Open or print the Control UI dashboard URL after ensuring the Gateway is reachable. */
 export async function dashboardCommand(
   runtime: RuntimeEnv = defaultRuntime,
   options: DashboardOptions = {},
@@ -199,26 +194,24 @@ export async function dashboardCommand(
   if (!options.noOpen) {
     const browserSupport = await detectBrowserOpenSupport();
     if (browserSupport.ok) {
-      opened = await openUrl(browserUrl);
-      if (!opened && !copied && isRemoteEnvironment()) {
-        hint = formatControlUiSshHint({
-          port,
-          basePath,
-          tlsEnabled: tlsConfig?.enabled === true,
-        });
-      } else {
-        hint = opened
-          ? undefined
-          : copied
-            ? "Browser launch failed. Open the one-time pairing URL copied to clipboard."
-            : "Browser launch failed. Open the Dashboard URL above manually.";
-      }
-    } else {
+      // The handoff URL carries the one-time pairing credential in its
+      // fragment. Open it through a private file handoff so the credential
+      // never appears in a browser-opener process argument, where another
+      // OS user could read it from /proc on default procfs hosts.
+      opened = await openUrlPrivately(browserUrl);
+    }
+    if (!browserSupport.ok || (!opened && !copied && isRemoteEnvironment())) {
       hint = formatControlUiSshHint({
         port,
         basePath,
         tlsEnabled: tlsConfig?.enabled === true,
       });
+    } else {
+      hint = opened
+        ? undefined
+        : copied
+          ? "Browser launch failed. Open the one-time pairing URL copied to clipboard."
+          : "Browser launch failed. Open the Dashboard URL above manually.";
     }
   } else {
     hint = copied
@@ -227,10 +220,7 @@ export async function dashboardCommand(
   }
 
   const handoffDeliveryFailed = !copied && !opened;
-  const fallbackToManualAuth = handoffDeliveryFailed && includeTokenInUrl;
-  const fallbackToJsonHandoff = handoffDeliveryFailed && !includeTokenInUrl;
-  const suppressNoOpenHint =
-    options.noOpen === true && (fallbackToManualAuth || fallbackToJsonHandoff);
+  const suppressNoOpenHint = options.noOpen === true && handoffDeliveryFailed;
 
   if (opened) {
     runtime.log("Opened in your browser. Keep that tab to control OpenClaw.");
@@ -238,13 +228,11 @@ export async function dashboardCommand(
     runtime.log(hint);
   }
 
-  if (fallbackToManualAuth) {
+  if (handoffDeliveryFailed) {
     runtime.log(
-      "Token auto-auth not delivered. Append your gateway token (from OPENCLAW_GATEWAY_TOKEN or gateway.auth.token) as a URL fragment with key `token` to authenticate.",
-    );
-  } else if (fallbackToJsonHandoff) {
-    runtime.log(
-      "One-time pairing URL not delivered. Run `openclaw dashboard --json` and open its `browserUrl` within ten minutes.",
+      includeTokenInUrl
+        ? "Token auto-auth not delivered. Append your gateway token (from OPENCLAW_GATEWAY_TOKEN or gateway.auth.token) as a URL fragment with key `token` to authenticate."
+        : "One-time pairing URL not delivered. Run `openclaw dashboard --json` and open its `browserUrl` within ten minutes.",
     );
   }
 }

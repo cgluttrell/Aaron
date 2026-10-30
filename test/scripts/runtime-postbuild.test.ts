@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { createNativeTypeScriptParser } from "../../scripts/lib/native-typescript.mts";
+import { collectPackageDistImportErrors } from "../../scripts/lib/package-dist-imports.mjs";
 import {
   copyStaticExtensionAssets,
   copyStaticExtensionAssetsToRuntimeOverlay,
@@ -24,6 +25,7 @@ import {
   isUpdateConfigRuntimeAlias,
 } from "../../scripts/lib/update-config-runtime-compat.mts";
 import {
+  listCoreRuntimePostBuildOutputs,
   rewriteRootRuntimeImportsToStableAliases,
   runRuntimePostBuild,
   writeLegacyCliExitCompatChunks,
@@ -94,6 +96,54 @@ async function writeExportHtmlBuildFixture(rootDir: string): Promise<void> {
 }
 
 describe("runtime postbuild static assets", () => {
+  it("closes private CLI diagnostic imports without adding public-build companions", async () => {
+    const rootDir = createTempDir("openclaw-runtime-postbuild-cli-");
+    writeUpdateCompatibilityBuildFixture(rootDir);
+    const companions = [
+      "cli-process-diagnostics.test-support.cjs",
+      "cli-process-tree.test-support.cjs",
+    ];
+    await fs.mkdir(path.join(rootDir, "src/cli"), { recursive: true });
+    for (const fileName of companions) {
+      await fs.copyFile(
+        path.join(MODULE_ROOT, "src/cli", fileName),
+        path.join(rootDir, "src/cli", fileName),
+      );
+    }
+    const params = {
+      rootDir,
+      env: { OPENCLAW_RUNTIME_POSTBUILD_STATIC_ASSETS: "0" },
+      timings: false,
+    };
+    runRuntimePostBuild(params);
+    for (const fileName of companions) {
+      await expectPathMissing(path.join(rootDir, "dist", fileName));
+    }
+    await fs.mkdir(path.join(rootDir, "dist/plugin-sdk"), { recursive: true });
+    await fs.writeFile(
+      path.join(rootDir, "dist/plugin-sdk/test-env.js"),
+      'export * from "../test-env-fixture.mjs";\n',
+    );
+    await fs.writeFile(
+      path.join(rootDir, "dist/test-env-fixture.mjs"),
+      companions.map((fileName) => `new URL("./${fileName}", import.meta.url);`).join("\n"),
+    );
+    runRuntimePostBuild(params);
+    const files = fsSync.readdirSync(path.join(rootDir, "dist")).map((name) => `dist/${name}`);
+    expect(
+      collectPackageDistImportErrors({
+        files: files.filter(
+          (name) => name.endsWith(".cjs") || name === "dist/test-env-fixture.mjs",
+        ),
+        readText: (file: string) => fsSync.readFileSync(path.join(rootDir, file), "utf8"),
+      }),
+    ).toEqual([]);
+    for (const fileName of companions) {
+      await fs.unlink(path.join(rootDir, "dist", fileName));
+      expect(listCoreRuntimePostBuildOutputs({ rootDir })).toContain(`dist/${fileName}`);
+    }
+  });
+
   it("copies bundled hook metadata without replacing compiled handlers", async () => {
     const rootDir = createTempDir("openclaw-runtime-postbuild-hooks-");
     writeUpdateCompatibilityBuildFixture(rootDir);
@@ -135,8 +185,6 @@ describe("runtime postbuild static assets", () => {
     `);
 
     expect(payload.outputs).toEqual([
-      "dist/extensions/acpx/mcp-command-line.mjs",
-      "dist/extensions/acpx/mcp-proxy.mjs",
       "dist/extensions/apple-fm/assets/AppleFoundationModels.swift",
       "dist/extensions/code-mode-quickjs/assets/encoding.so",
       "dist/extensions/code-mode-quickjs/assets/quickjs.wasm",
@@ -758,7 +806,6 @@ describe("runtime postbuild static assets", () => {
       path.join(distDir, "install.runtime-Aaa111.mjs"),
       [
         "export const scanPackageInstallSource = true;",
-        "export const scanFileInstallSource = true;",
         "export const scanInstalledPackageDependencyTree = true;",
         "export const scanBundleInstallSource = true;",
         "",
@@ -1006,7 +1053,6 @@ describe("runtime postbuild static assets", () => {
       path.join(distDir, "install.runtime-Aaa111.mjs"),
       [
         "export const scanPackageInstallSource = true;",
-        "export const scanFileInstallSource = true;",
         "export const scanInstalledPackageDependencyTree = true;",
         "export const scanBundleInstallSource = true;",
         "",
@@ -1240,30 +1286,6 @@ describe("previous release update compatibility", () => {
     return { root, inventory };
   }
 
-  it("records deferred plugin migration imports that a shipped updater can execute after swap", () => {
-    const { inventory } = recordImportedFixture(
-      '(await import("./state-worker-abcdefgh.mjs")).runOpenClawStateWorkerOperation',
-      {
-        "state-worker-abcdefgh.mjs":
-          "//#region src/state/openclaw-state-worker-store.ts\nexport function runOpenClawStateWorkerOperation() {}\n",
-      },
-      undefined,
-      "src/infra/deferred-plugin-migrations.ts",
-    );
-
-    expect(inventory.releases[0]?.chunks).toMatchObject([
-      {
-        path: "state-worker-abcdefgh.mjs",
-        imports: [
-          {
-            owner: "src/infra/deferred-plugin-migrations.ts",
-            exports: ["runOpenClawStateWorkerOperation"],
-          },
-        ],
-      },
-    ]);
-  });
-
   it.each([
     "generated",
     "historical",
@@ -1319,6 +1341,59 @@ describe("previous release update compatibility", () => {
       {
         path: "io.runtime.js",
         exports: ["createConfigIO", "readConfigFileSnapshot"].map((exported) => ({
+          exported,
+          origin: { module: "src/config/io.ts", symbol: exported },
+        })),
+      },
+    ]);
+  });
+
+  it.each(
+    (
+      [
+        ["2026.9.8", "io.runtime-BNEtkwm5.mjs"],
+        ["2026.10.5-beta.1", "io.runtime-t3hrjkTX.mjs"],
+      ] as const
+    ).flatMap(([release, target]) =>
+      ["exact", "changed delegation", "changed binding", "changed target"].map(
+        (variant) => [release, target, variant] as const,
+      ),
+    ),
+  )("traces only the exact shipped %s config alias (%s, %s)", (release, target, variant) => {
+    let alias = fsSync.readFileSync(
+      path.join(MODULE_ROOT, `test/fixtures/update-config-runtime-alias-${release}.txt`),
+      "utf8",
+    );
+    const exportedNames = [...alias.matchAll(/select\("(\w+)"\)/g)].flatMap(
+      (match) => match[1] ?? [],
+    );
+    const sortedNames = exportedNames.toSorted((left, right) =>
+      left < right ? -1 : left > right ? 1 : 0,
+    );
+    if (variant === "changed delegation") {
+      alias = alias.replace("return runtime[name]", "return undefined");
+    } else if (variant === "changed binding") {
+      alias = alias.replace('select("createConfigIO")', 'select("readConfigFileSnapshot")');
+    } else if (variant === "changed target") {
+      alias = alias.replace(`"./${target}"`, '"./"');
+    }
+    const record = () =>
+      recordImportedFixture('(await import("./io.runtime.js"))', {
+        "io.runtime.js": alias,
+        [target]: `export { ${exportedNames.join(", ")} } from "./config-abcdefgh.mjs";\n`,
+        "config-abcdefgh.mjs": [
+          "//#region src/config/io.ts",
+          ...exportedNames.map((name) => `export function ${name}() {}`),
+        ].join("\n"),
+      });
+    if (variant !== "exact") {
+      expect(record).toThrow(`Cannot trace io.runtime.js export ${sortedNames[0]}`);
+      return;
+    }
+    expect(record().inventory.releases[0]?.chunks).toMatchObject([
+      {
+        path: "io.runtime.js",
+        exports: sortedNames.map((exported) => ({
           exported,
           origin: { module: "src/config/io.ts", symbol: exported },
         })),
@@ -1719,6 +1794,11 @@ describe("previous release update compatibility", () => {
     const stub = path.join(bin, "npm.cjs");
     write(
       root,
+      "package.json",
+      JSON.stringify({ openclaw: { schemaVersions: { state: 1, agent: 1 } } }),
+    );
+    write(
+      root,
       "bin/npm.cjs",
       [
         `#!${testNodeExecPath}`,
@@ -1745,6 +1825,7 @@ describe("previous release update compatibility", () => {
       [path.join(MODULE_ROOT, "scripts/update-compat-inventory.mts"), ...args],
       {
         encoding: "utf8",
+        cwd: root,
         env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` },
         timeout: 30_000,
       },
@@ -1761,7 +1842,15 @@ describe("previous release update compatibility", () => {
     const args = ["--output", output];
     for (const version of ["2026.9.3", "2026.9.1", "2026.9.2"]) {
       const packageDir = path.join(root, version);
-      write(packageDir, "package.json", JSON.stringify({ name: "openclaw", version }));
+      write(
+        packageDir,
+        "package.json",
+        JSON.stringify({
+          name: "openclaw",
+          version,
+          openclaw: { schemaVersions: { state: 1, agent: 1 } },
+        }),
+      );
       write(
         packageDir,
         "dist/build-info.json",
@@ -1774,14 +1863,17 @@ describe("previous release update compatibility", () => {
     expect(generated.result.status, generated.result.stderr).toBe(0);
     expect(generated.calls).toEqual([]);
     expect(
-      readUpdateCompatibilityInventory(output).releases.map(({ version, chunks }) => ({
-        version,
-        chunks,
-      })),
+      readUpdateCompatibilityInventory(output).releases.map(
+        ({ version, chunks, schemaVersions }) => ({
+          version,
+          chunks,
+          schemaVersions,
+        }),
+      ),
     ).toEqual([
-      { version: "2026.9.1", chunks: [] },
-      { version: "2026.9.2", chunks: [] },
-      { version: "2026.9.3", chunks: [] },
+      { version: "2026.9.1", chunks: [], schemaVersions: { state: 1, agent: 1 } },
+      { version: "2026.9.2", chunks: [], schemaVersions: { state: 1, agent: 1 } },
+      { version: "2026.9.3", chunks: [], schemaVersions: { state: 1, agent: 1 } },
     ]);
     const checked = runInventoryCli([...args, "--check"]);
     expect(checked.result.status, checked.result.stderr).toBe(0);
@@ -1803,47 +1895,6 @@ describe("previous release update compatibility", () => {
     },
   );
 
-  it("keeps stable upgrade coverage independent of a newer beta tag", () => {
-    const output = writeWindowInventory(createTempDir("update-compat-newer-beta-"));
-    const npmArgs = ["view", "openclaw", "dist-tags", "--json"];
-    const { result, calls } = runInventoryCli(
-      ["--check", "--output", output],
-      [{ args: npmArgs, value: { latest: "2026.9.3", beta: "2026.10.1-beta.2" } }],
-    );
-    expect(result.status, result.stderr).toBe(0);
-    expect(calls).toEqual([npmArgs]);
-  });
-
-  it.each(["generate", "check"])("refuses newer-release downgrade inventory during %s", (mode) => {
-    const root = createTempDir("update-compat-newer-source-");
-    const output = writeWindowInventory(root);
-    const original = fsSync.readFileSync(output, "utf8");
-    const version = "2026.10.1-beta.2";
-    let args: string[];
-    if (mode === "generate") {
-      const packageDir = path.join(root, version);
-      write(packageDir, "package.json", JSON.stringify({ name: "openclaw", version }));
-      write(
-        packageDir,
-        "dist/build-info.json",
-        JSON.stringify({ version, buildId: version, commit: "0".repeat(40) }),
-      );
-      write(packageDir, "dist/entry.js", "export {};\n");
-      args = ["--output", output, "--release", `${packageDir}=${integrity}`];
-    } else {
-      const inventory = JSON.parse(original);
-      inventory.releases.push({ ...inventory.releases[0], version, chunks: [] });
-      write(root, path.basename(output), JSON.stringify(inventory));
-      args = ["--check", "--output", output];
-    }
-    const before = fsSync.readFileSync(output, "utf8");
-    const { result, calls } = runInventoryCli(args);
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain("source 2026.10.1-beta.2 is newer than target 2026.9.9");
-    expect(fsSync.readFileSync(output, "utf8")).toBe(before);
-    expect(calls).toEqual([]);
-  });
-
   it.each([
     { latest: "2026.9.3", beta: "2026.9.4-beta.1", missing: "2026.9.4-beta.1" },
     { latest: "2026.9.4", beta: "2026.9.4", missing: "2026.9.4" },
@@ -1855,13 +1906,18 @@ describe("previous release update compatibility", () => {
       const tags = { latest, beta };
       const expectedCalls = [
         ["view", "openclaw", "dist-tags", "--json"],
+        ["view", `openclaw@${missing}`, "openclaw.schemaVersions", "--json"],
         ["view", `openclaw@${missing}`, "dist.integrity", "--json"],
       ];
       const { result, calls } = runInventoryCli(
         ["--check", "--output", output],
         [
           { args: expectedCalls[0]!, value: latest === beta ? [tags] : tags },
-          { args: expectedCalls[1]!, value: latest === beta ? [newIntegrity] : newIntegrity },
+          {
+            args: expectedCalls[1]!,
+            value: latest === beta ? [{ state: 1, agent: 1 }] : { state: 1, agent: 1 },
+          },
+          { args: expectedCalls[2]!, value: latest === beta ? [newIntegrity] : newIntegrity },
         ],
       );
       expect(result.status).toBe(1);
@@ -1878,6 +1934,25 @@ describe("previous release update compatibility", () => {
       expect(calls).toEqual(expectedCalls);
     },
   );
+
+  it.each([
+    { state: 2, agent: 1 },
+    { state: 1, agent: 2 },
+  ])("accounts for newer-schema npm tags without requiring a downgrade bridge: %j", (schemas) => {
+    const output = writeWindowInventory(createTempDir("update-compat-newer-tag-"));
+    const npmArgs = ["view", "openclaw", "dist-tags", "--json"];
+    const schemaArgs = ["view", "openclaw@2026.10.1-beta.1", "openclaw.schemaVersions", "--json"];
+    const { result, calls } = runInventoryCli(
+      ["--check", "--output", output],
+      [
+        { args: npmArgs, value: { latest: "2026.9.3", beta: "2026.10.1-beta.1" } },
+        { args: schemaArgs, value: [schemas] },
+      ],
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Accounted unsupported first-hop source 2026.10.1-beta.1");
+    expect(calls).toEqual([npmArgs, schemaArgs]);
+  });
 
   it.each([
     { tags: { beta: "2026.9.3" }, invalid: "latest" },

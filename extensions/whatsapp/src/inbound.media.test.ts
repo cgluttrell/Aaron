@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { setTimeout as waitForLogTick } from "node:timers/promises";
 import { extractErrorCode } from "openclaw/plugin-sdk/error-runtime";
+import { resolveRequestUrl } from "openclaw/plugin-sdk/request-url";
 import { withinTest } from "openclaw/plugin-sdk/test-fixtures";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -82,6 +83,7 @@ let currentMockSocket:
       readMessages: ReturnType<typeof vi.fn>;
       groupFetchAllParticipating: ReturnType<typeof vi.fn>;
       updateMediaMessage: ReturnType<typeof vi.fn>;
+      getMediaHost: () => string;
       logger: Record<string, never>;
       user: { id: string };
     }
@@ -248,6 +250,7 @@ vi.mock("./session.js", async () => {
         readMessages: vi.fn().mockResolvedValue(undefined),
         groupFetchAllParticipating: vi.fn().mockResolvedValue({}),
         updateMediaMessage: vi.fn(),
+        getMediaHost: () => "media-conn.example",
         logger: {},
         user: { id: "me@s.whatsapp.net" },
       };
@@ -263,10 +266,6 @@ let resetWebInboundDedupe: typeof import("./inbound.js").resetWebInboundDedupe;
 let createWaSocket: typeof import("./session.js").createWaSocket;
 let resetLogger: typeof import("openclaw/plugin-sdk/runtime-env").resetLogger;
 let setLoggerOverride: typeof import("openclaw/plugin-sdk/runtime-env").setLoggerOverride;
-type MediaOnMessage = NonNullable<Parameters<typeof monitorWebInbox>[0]["onMessage"]>;
-type MediaMessage = Parameters<MediaOnMessage>[0];
-let deliveredMessages: MediaMessage[] = [];
-let messageWaiters: Array<(message: MediaMessage) => void> = [];
 
 const LOG_PATH = path.join(os.tmpdir(), `openclaw-inbound-media-${crypto.randomUUID()}.log`);
 const DIRECT_SYNTHETIC_BEARER = "synthetic-direct-bearer-never-real";
@@ -274,13 +273,13 @@ const QUOTED_SYNTHETIC_API_KEY = "synthetic-quoted-api-key-never-real";
 const DEPLOYMENT_REDACTION_SENTINEL = "deployment-secret-never-real";
 
 async function waitForMessage(onMessage: ReturnType<typeof vi.fn>) {
-  const delivered =
-    deliveredMessages.shift() ??
-    (await new Promise<MediaMessage>((resolve) => {
-      messageWaiters.push(resolve);
-    }));
-  expect(onMessage).toHaveBeenCalledTimes(1);
-  return delivered;
+  // Saturated no-isolate suite runs can stall the worker (sync module fetches
+  // against the shared transform queue) well past a 2s delivery budget.
+  await vi.waitFor(() => expect(onMessage).toHaveBeenCalledTimes(1), {
+    interval: 1,
+    timeout: 5_000,
+  });
+  return onMessage.mock.calls[0]?.[0];
 }
 
 function latestSaveMediaStreamCall() {
@@ -360,22 +359,14 @@ describe("web inbound media saves with extension", () => {
     };
   }
 
-  function startMediaMonitor(onMessage: MediaOnMessage, mediaMaxMb?: number) {
-    const observeMessage: MediaOnMessage = (...args) => {
-      const result = onMessage(...args);
-      const delivered = args[0];
-      const waiter = messageWaiters.shift();
-      if (waiter) {
-        waiter(delivered);
-      } else {
-        deliveredMessages.push(delivered);
-      }
-      return result;
-    };
+  function startMediaMonitor(
+    onMessage: Parameters<typeof monitorWebInbox>[0]["onMessage"],
+    mediaMaxMb?: number,
+  ) {
     return monitorWebInbox({
       cfg: { channels: { whatsapp: { allowFrom: ["*"] } } },
       verbose: false,
-      onMessage: observeMessage,
+      onMessage,
       accountId: "default",
       authDir: path.join(HOME, "wa-auth"),
       ...(mediaMaxMb === undefined ? {} : { mediaMaxMb }),
@@ -388,8 +379,6 @@ describe("web inbound media saves with extension", () => {
     downloadMediaMessageMock.mockClear();
     observedConsoleWarnings.mockClear();
     saveMediaStreamSpy.mockClear();
-    deliveredMessages = [];
-    messageWaiters = [];
     resetWebInboundDedupe();
   });
 
@@ -574,6 +563,68 @@ describe("web inbound media saves with extension", () => {
 
     await listener.close();
   });
+
+  it.for([
+    { urlHost: "a.whatsapp.net", fetchHost: "media-conn.example" },
+    // Recorded WhatsApp Web stickers carry the bare host as url (WhiskeySockets/Baileys#1085, #1557).
+    { urlHost: "web.whatsapp.net", fetchHost: "media-conn.example", bareUrl: true },
+    { urlHost: "mmg.whatsapp.net", fetchHost: "mmg.whatsapp.net" },
+    { urlHost: "custom-cdn.example", fetchHost: "custom-cdn.example" },
+  ])(
+    "downloads a sticker whose url is on $urlHost from $fetchHost",
+    async ({ urlHost, fetchHost, bareUrl }, { onTestFinished }) => {
+      const { downloadMediaMessage, getMediaKeys } =
+        await vi.importActual<typeof import("baileys")>("baileys");
+      downloadMediaMessageMock.mockImplementationOnce(downloadMediaMessage);
+
+      // 1x1 lossless WebP.
+      const sticker = Buffer.from("UklGRhoAAABXRUJQVlA4TA0AAAAvAAAAEAcQERGIiP4HAA==", "base64");
+      const mediaKey = crypto.randomBytes(32);
+      const { cipherKey, iv } = await getMediaKeys(mediaKey, "sticker");
+      const cipher = crypto.createCipheriv("aes-256-cbc", cipherKey, iv);
+      const encrypted = Buffer.concat([cipher.update(sticker), cipher.final()]);
+      const directPath = "/v/t62.15575-24/sticker.enc?ccb=11-4";
+      const fetchUrl = `https://${fetchHost}${directPath}`;
+      // Any other host fails the way undici fails a host with no DNS record.
+      const fetchSpy = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async (input) =>
+          resolveRequestUrl(input) === fetchUrl
+            ? new Response(encrypted)
+            : Promise.reject(new TypeError("fetch failed")),
+        );
+      onTestFinished(() => fetchSpy.mockRestore());
+
+      const onMessage = vi.fn();
+      const listener = await startMediaMonitor(onMessage);
+      onTestFinished(() => listener.close());
+      const realSock = await getMockSocket();
+
+      realSock.ev.emit("messages.upsert", {
+        type: "notify",
+        messages: [
+          {
+            key: { id: `sticker-${urlHost}`, fromMe: false, remoteJid: "111@s.whatsapp.net" },
+            message: {
+              stickerMessage: {
+                url: bareUrl ? `https://${urlHost}` : `https://${urlHost}${directPath}`,
+                directPath,
+                mediaKey,
+                mimetype: "image/webp",
+              },
+            },
+            messageTimestamp: 1_700_000_012,
+          },
+        ],
+      });
+
+      const inbound = await waitForMessage(onMessage);
+      expect(fetchSpy.mock.calls.map(([input]) => resolveRequestUrl(input))).toEqual([fetchUrl]);
+      expect(inbound.payload.media?.type).toBe("image/webp");
+      const mediaPath = requireMediaPath(inbound.payload.media?.path);
+      expect(await fs.readFile(mediaPath)).toEqual(sticker);
+    },
+  );
 
   it("delivers native polls and preserves their questions when quoted", async () => {
     const onMessage = vi.fn();

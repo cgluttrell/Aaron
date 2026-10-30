@@ -28,6 +28,12 @@ const UiPanelCommandFields = {
 export const UiPanelCommandSchema = Type.Union([
   closedObject({
     ...UiPanelCommandFields,
+    panel: Type.Literal("plugin"),
+    pluginId: NonEmptyString,
+    panelId: NonEmptyString,
+  }),
+  closedObject({
+    ...UiPanelCommandFields,
     panel: Type.Literal("terminal"),
     terminalSessionId: Type.Optional(NonEmptyString),
   }),
@@ -52,6 +58,9 @@ export const UiNavigateCommandSchema = closedObject({
   kind: Type.Literal("navigate"),
   sessionKey: NonEmptyString,
 });
+export const UiAgentGitHubSettingsCommandSchema = closedObject({
+  kind: Type.Literal("agent-github-settings"),
+});
 
 export const UiCommandSchema = Type.Union([
   UiSplitCommandSchema,
@@ -60,6 +69,7 @@ export const UiCommandSchema = Type.Union([
   UiSidebarCommandSchema,
   UiPanelCommandSchema,
   UiNavigateCommandSchema,
+  UiAgentGitHubSettingsCommandSchema,
 ]);
 export type UiCommand = Static<typeof UiCommandSchema>;
 

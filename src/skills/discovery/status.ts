@@ -2,8 +2,9 @@ import path from "node:path";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
 import { evaluateEntryRequirementsForCurrentPlatform } from "../../shared/entry-status.js";
+import { isOsRequirementSatisfied } from "../../shared/requirements.js";
 import { CONFIG_DIR } from "../../utils.js";
-import { loadSkillLibrarySelection } from "../library/selection.js";
+import { prepareSkillLibrarySelection } from "../library/selection.js";
 import { resolveBundledSkillsDir } from "../loading/bundled-dir.js";
 import {
   hasBinary,
@@ -22,6 +23,7 @@ import {
 } from "../loading/workspace-skill-loader.js";
 import type { WorkspaceSkillSources } from "../loading/workspace-skill-sources.js";
 import { mergeRemoteNodeSkillEntries } from "../runtime/remote-skills.js";
+import { resolveSkillFileHost } from "../skill-file-host.js";
 import type {
   SkillEntry,
   SkillEligibilityContext,
@@ -116,24 +118,14 @@ function normalizeInstallOptions(
   platform: string,
 ): SkillInstallOption[] {
   // Recipes execute where the workspace dependencies live.
-  const requiredOs = entry.metadata?.os ?? [];
-  if (requiredOs.length > 0 && !requiredOs.includes(platform)) {
+  if (!isOsRequirementSatisfied(entry.metadata?.os ?? [], [platform])) {
     return [];
   }
 
   const install = entry.metadata?.install ?? [];
-  if (install.length === 0) {
-    return [];
-  }
-
-  const supportsPlatform = (spec: SkillInstallSpec) => {
-    const osList = spec.os ?? [];
-    return osList.length === 0 || osList.includes(platform);
-  };
+  const supportsPlatform = (spec: SkillInstallSpec) =>
+    isOsRequirementSatisfied(spec.os ?? [], [platform]);
   const filtered = install.filter(supportsPlatform);
-  if (filtered.length === 0) {
-    return [];
-  }
 
   const toOption = (spec: SkillInstallSpec, index: number): SkillInstallOption => {
     const id = (spec.id ?? `${spec.kind}-${index}`).trim();
@@ -160,23 +152,14 @@ function normalizeInstallOptions(
     return { id, kind: spec.kind, label, bins };
   };
 
-  const allDownloads = filtered.every((spec) => spec.kind === "download");
-  if (allDownloads) {
-    const options: SkillInstallOption[] = [];
-    for (const [index, spec] of install.entries()) {
-      if (supportsPlatform(spec)) {
-        options.push(toOption(spec, index));
-      }
-    }
-    return options;
+  if (filtered.every((spec) => spec.kind === "download")) {
+    return install.flatMap((spec, index) =>
+      supportsPlatform(spec) ? [toOption(spec, index)] : [],
+    );
   }
-
   const preferred = selectPreferredInstallSpec(filtered, prefs, hasLocalBin);
-  if (!preferred) {
-    return [];
-  }
   // installSkill resolves implicit IDs in the original metadata list, before OS filtering.
-  return [toOption(preferred, install.indexOf(preferred))];
+  return preferred ? [toOption(preferred, install.indexOf(preferred))] : [];
 }
 
 type SkillRequirementsContext = {
@@ -196,7 +179,7 @@ type BuildSkillStatusContext = Readonly<
 >;
 
 function buildSkillRequirements(entry: SkillEntry, context: SkillRequirementsContext) {
-  const skillKey = resolveSkillKey(entry.skill, entry);
+  const skillKey = resolveSkillKey(entry);
   const { config, eligibility, allowBundled } = context;
   const skillConfig = resolveSkillConfig(config, skillKey);
   const disabled = skillConfig?.enabled === false;
@@ -238,8 +221,12 @@ function buildSkillRequirements(entry: SkillEntry, context: SkillRequirementsCon
 function buildSkillStatus(entry: SkillEntry, context: BuildSkillStatusContext): SkillStatusEntry {
   const { prefs, agentSkillSet } = context;
   const { required, ...requirements } = buildSkillRequirements(entry, context);
-  const blockedByAgentFilter = agentSkillSet !== undefined && !agentSkillSet.has(entry.skill.name);
   const skillSource = resolveSkillSource(entry.skill);
+  // Learned Workshop skills are always visible to their agent; allowlists never hide them.
+  const blockedByAgentFilter =
+    skillSource !== "openclaw-workshop" &&
+    agentSkillSet !== undefined &&
+    !agentSkillSet.has(entry.skill.name);
   // Loader provenance owns bundled status; a matching name cannot establish source.
   const bundled = skillSource === "openclaw-bundled" || skillSource === "openclaw-custodian";
   const availableToAgent = requirements.eligible && !blockedByAgentFilter;
@@ -363,8 +350,8 @@ export async function prepareWorkspaceSkillStatus(
   }
   const localEntries = sources.status
     ? [
-        ...loadSkillLibrarySelection(opts?.librarySelections ?? []),
-        ...sources.entries.filter((entry) => entry.skill.fileHost === "gateway"),
+        ...(await prepareSkillLibrarySelection(opts?.librarySelections ?? [], {}, () => {})),
+        ...sources.entries.filter((entry) => resolveSkillFileHost(entry.skill) === "gateway"),
       ]
     : sources.entries;
   const localFacts =
@@ -378,7 +365,7 @@ export async function prepareWorkspaceSkillStatus(
       : undefined;
   const hostPaths = new Set(
     sources.entries
-      .filter((entry) => entry.skill.fileHost === "workspace")
+      .filter((entry) => resolveSkillFileHost(entry.skill) === "workspace")
       .map((entry) => entry.skill.filePath),
   );
   const files = [

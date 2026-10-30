@@ -86,6 +86,8 @@ async function captureContext(params: {
   model?: string;
   modelProvider?: string;
   authProfileId?: string;
+  promptSuppressed?: boolean;
+  promptIdentity?: string;
 }) {
   mocks.readHistory.mockImplementation(
     (_target, read: (messages: Iterable<AgentMessage>) => unknown) => read(params.historyMessages),
@@ -99,6 +101,8 @@ async function captureContext(params: {
     model: params.model ?? "gpt-5.6-luna",
     modelProvider: params.modelProvider,
     authProfileId: params.authProfileId,
+    promptSuppressed: params.promptSuppressed,
+    promptIdentity: params.promptIdentity,
   });
 }
 
@@ -202,6 +206,97 @@ describe("captureCodexSettledTurnFinalizationContext", () => {
       expect(Object.isFrozen(context?.selection)).toBe(true);
     },
   );
+
+  it("captures a turn whose internal prompt was never mirrored, anchored at its first tool call", async () => {
+    // A stranded-reply retry suppresses its system prompt and carries no recorder, so the
+    // transcript holds no `turn-2:prompt` row; the turn's evidence starts at its tool call.
+    const prior = [
+      message({ role: "user", content: "Send the update to Alice." }, "turn-1:prompt"),
+      message(
+        { role: "assistant", content: [{ type: "text", text: "Update: shipped." }] },
+        "turn-1:final",
+      ),
+    ];
+    const settledMessages = settledTurn().slice(1);
+    const historyMessages = [...prior, ...settledMessages];
+    const base = { historyMessages, mirroredMessages: settledMessages, settledMessages };
+
+    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => {});
+    try {
+      await expect(captureContext(base)).resolves.toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+
+    const context = await captureContext({ ...base, promptSuppressed: true });
+    expect(context?.data).toEqual([
+      {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Send the update to Alice." }],
+      },
+      {
+        type: "message",
+        role: "assistant",
+        content: [{ type: "output_text", text: "Update: shipped." }],
+      },
+      { type: "function_call", call_id: "call-2", name: "message", arguments: "{}" },
+      { type: "function_call_output", call_id: "call-2", output: "sent" },
+    ]);
+  });
+
+  it("captures a continuation against its persisted prompt from an earlier native turn", async () => {
+    const persistedPrompt = message({ role: "user", content: "Send it." }, "turn-1:prompt");
+    const settledMessages = [persistedPrompt, ...settledTurn().slice(1)];
+    const history = [
+      message({ role: "user", content: "Older context." }, "older:prompt"),
+      ...settledMessages,
+    ];
+    const base = { mirroredMessages: settledMessages, settledMessages };
+    const context = await captureContext({
+      ...base,
+      historyMessages: history,
+      promptIdentity: "turn-1:prompt",
+    });
+    expect(context?.data).toEqual([
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Older context." }] },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "Send it." }] },
+      { type: "function_call", call_id: "call-2", name: "message", arguments: "{}" },
+      { type: "function_call_output", call_id: "call-2", output: "sent" },
+    ]);
+    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => {});
+    try {
+      await expect(
+        captureContext({
+          ...base,
+          historyMessages: history.slice(2),
+          promptIdentity: "turn-1:prompt",
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("still rejects a suppressed-prompt turn whose evidence carries a prompt row", async () => {
+    const settledMessages = settledTurn();
+    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => {});
+    try {
+      await expect(
+        captureContext({
+          historyMessages: settledMessages,
+          mirroredMessages: settledMessages,
+          settledMessages,
+          promptSuppressed: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith("codex settled-turn finalization context capture failed", {
+        reason: "provenance_rejected",
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
 
   it("recovers after a long history without splitting the recent tool exchange", async () => {
     const prior = Array.from({ length: 201 }, (_, index) =>

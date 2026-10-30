@@ -1,8 +1,4 @@
-import {
-  classifyReleaseTrain,
-  compareReleaseVersions,
-  parseReleaseVersion,
-} from "./release-version.mjs";
+import { compareReleaseVersions, parseReleaseVersion } from "./release-version.mjs";
 import catalog from "./upgrade-survivor-scenarios.json" with { type: "json" };
 
 const UPGRADE_SURVIVOR_SCENARIOS = Object.freeze(catalog.scenarios);
@@ -17,9 +13,30 @@ export const OLDEST_SUPPORTED_UPGRADE_SURVIVOR_BASELINE = catalog.oldestSupporte
 export const MINIMUM_UPGRADE_SURVIVOR_BASELINE = "2026.6.1";
 export const CUSTOM_PLUGIN_SIBLINGS_BASELINE = "openclaw@2026.9.4";
 
+// Keep the released strict readers in the matrix after latest/previous advance.
+const PACKAGE_RECOVERY_BASELINES = ["openclaw@2026.9.8", "openclaw@2026.9.9"];
+export function isPackageRecoveryScenario(scenario) {
+  return (
+    scenario === "package-publication-recovery" ||
+    scenario === "package-verification-recovery" ||
+    scenario === "package-stranded-first-hop"
+  );
+}
+export function packageRecoveryBaselines(scenario) {
+  return scenario === "package-stranded-first-hop"
+    ? ["openclaw@2026.9.7"]
+    : PACKAGE_RECOVERY_BASELINES;
+}
+
 // 2026.9.7 retired code mode; older baselines must still seed the migration specimen.
 export function usesStructuredToolSearchAtBaseline(baselineVersion) {
   const comparison = compareReleaseVersions(baselineVersion ?? "", "2026.9.7");
+  return comparison !== null && comparison >= 0;
+}
+
+// The June SQLite cron codec predates persisted owners; July introduced the owner columns.
+export function usesCronOwnerAtBaseline(baselineVersion) {
+  const comparison = compareReleaseVersions(baselineVersion ?? "", "2026.7.1");
   return comparison !== null && comparison >= 0;
 }
 
@@ -41,6 +58,7 @@ const TRUSTED_HARNESS_OWNED_SCENARIOS = new Set([
   "workshop-doctor-recovery",
   "update-report-recovery",
   "dreaming-cron-doctor",
+  "cron-owner-doctor",
 ]);
 
 export function isTrustedHarnessOwnedUpgradeSurvivorScenario(scenario) {
@@ -54,6 +72,7 @@ export function isTrustedHarnessOwnedUpgradeSurvivorScenario(scenario) {
 const aggregateScenarios = UPGRADE_SURVIVOR_SCENARIOS.filter(
   (scenario) =>
     scenario !== "abandoned-update" &&
+    scenario !== "backup-schedule" &&
     scenario !== "missing-configured-plugin-migration" &&
     scenario !== "missing-load-path" &&
     scenario !== "projects-doctor" &&
@@ -62,6 +81,7 @@ const aggregateScenarios = UPGRADE_SURVIVOR_SCENARIOS.filter(
     scenario !== "workshop-doctor-recovery" &&
     scenario !== "update-report-recovery" &&
     scenario !== "dreaming-cron-doctor" &&
+    scenario !== "cron-owner-doctor" &&
     scenario !== "mobile-pairing-reconnect" &&
     scenario !== "watchos-direct-node" &&
     scenario !== "prerelease-plugin-registry" &&
@@ -218,24 +238,27 @@ function comparePublishedReleaseVersion(a, b) {
 }
 
 export function supportsUpgradeSurvivorScenarioAtBaseline(scenario, baselineSpec) {
+  if (isPackageRecoveryScenario(scenario)) {
+    return packageRecoveryBaselines(scenario).includes(baselineSpec);
+  }
+  if (scenario === "backup-schedule") {
+    return baselineSpec === "openclaw@2026.9.7";
+  }
   if (scenario === "missing-load-path") {
     const release = parseReleaseVersion((baselineSpec ?? "").replace(/^openclaw@/u, ""));
     // Floating tags are checked again against the installed baseline before seeding.
     if (!release) {
       return true;
     }
-    // #113324 first shipped in beta.5; July's frozen line retained the older CLI guard.
-    const train = classifyReleaseTrain(release);
-    const frozenJuly =
-      release.year === 2026 &&
-      release.month === 7 &&
-      (train === "extended-stable" || train === "unsupported-extended-stable-correction");
     const comparison = compareReleaseVersions(release.version, "2026.7.2-beta.5");
-    return !frozenJuly && comparison !== null && comparison >= 0;
+    return comparison !== null && comparison >= 0;
   }
   const version = parsePublishedReleaseVersion(baselineSpec);
   if (scenario === "dreaming-cron-doctor") {
     return baselineSpec === "openclaw@2026.9.6";
+  }
+  if (scenario === "cron-owner-doctor") {
+    return baselineSpec === "openclaw@2026.9.4" || baselineSpec === "openclaw@2026.9.7";
   }
   if (
     scenario === "projects-doctor" ||

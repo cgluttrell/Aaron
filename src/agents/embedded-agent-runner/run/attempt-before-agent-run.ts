@@ -20,11 +20,6 @@ type BeforeAgentRunSession = {
   agent: { state: { messages: AgentMessage[] } };
 };
 
-type BeforeAgentRunBlockOutcome = {
-  blockedBy: string;
-  promptError: Error;
-};
-
 export async function runEmbeddedAttemptBeforeAgentRun(input: {
   attempt: Pick<
     EmbeddedRunAttemptParams,
@@ -38,7 +33,7 @@ export async function runEmbeddedAttemptBeforeAgentRun(input: {
   sessionManager: ReturnType<typeof guardSessionManager>;
   systemPrompt: string;
   withOwnedTranscriptWrite: <T>(operation: () => Promise<T> | T) => Promise<T>;
-}): Promise<BeforeAgentRunBlockOutcome | undefined> {
+}) {
   const block = await runBeforeAgentRunGate(
     input.hookRunner,
     {
@@ -64,10 +59,8 @@ export async function runEmbeddedAttemptBeforeAgentRun(input: {
   ) {
     try {
       await input.withOwnedTranscriptWrite(() =>
-        withSessionManagerWrite(input.sessionManager, () => {
-          input.sessionManager.appendMessage(
-            redactedUserMessage as Parameters<typeof input.sessionManager.appendMessage>[0],
-          );
+        withSessionManagerWrite(input.sessionManager, async () => {
+          await input.sessionManager.appendMessageAsync(redactedUserMessage);
           input.sessionManager.flushPendingPersistence();
         }),
       );

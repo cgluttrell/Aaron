@@ -1,10 +1,17 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { once } from "node:events";
 import fs from "node:fs";
 import path from "node:path";
 import type { Worker } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createDeferred, withTestTimeout } from "../../../test/helpers/promise.js";
+import {
+  awaitGateBeforeSettlement,
+  createDeferred,
+  withinTest,
+} from "../../../test/helpers/promise.js";
+import { useSqliteWorkerFault } from "../../../test/helpers/sqlite-worker-fault.js";
 import { requireNodeSqlite } from "../../infra/node-sqlite.js";
+import { runInDetachedAsyncContext } from "../../shared/detached-async-context.js";
 import * as readonlyDatabase from "../../state/openclaw-agent-db-readonly.js";
 import {
   closeOpenClawAgentDatabaseByPathAsync,
@@ -22,6 +29,7 @@ import {
 } from "../../test-utils/openclaw-test-state.js";
 import { readSessionArchiveContentSync } from "./archive-compression.js";
 import {
+  createSessionEntryWithTranscript,
   deleteSessionEntryLifecycle,
   loadSessionEntry,
   loadTranscriptEvents,
@@ -35,11 +43,22 @@ import type {
 } from "./session-accessor.sqlite-archive-types.js";
 import * as archiveWorker from "./session-accessor.sqlite-archive.js";
 import { runExclusiveSqliteTranscriptArchiveWorker } from "./session-accessor.sqlite-archive.js";
+import * as reclamation from "./session-accessor.sqlite-reclamation-run.js";
+import type { SqliteReclamationWorker } from "./session-accessor.sqlite-reclamation-worker-lifetime.js";
 import * as reclamationWorker from "./session-accessor.sqlite-reclamation-worker.js";
-import * as reclamation from "./session-accessor.sqlite-reclamation.js";
 import { replaceTranscriptEvents } from "./session-accessor.sqlite-transcript-write.js";
 import { resolveSqliteTargetFromSessionStorePath } from "./session-sqlite-target.js";
 import { waitForSessionTranscriptIndexReconcilesInStateDir } from "./session-transcript-reconcile.js";
+
+const fault = useSqliteWorkerFault([
+  {
+    name: "refuse_archive_result",
+    match: /^update session_transcript_archives\b/u,
+    sql: `CREATE TEMP TRIGGER refuse_archive_result BEFORE UPDATE OF published_at
+      ON main.session_transcript_archives
+      BEGIN SELECT RAISE(ABORT, 'synthetic archive result recording failure'); END;`,
+  },
+]);
 
 const archiveScopeHooks = vi.hoisted(() => ({
   afterMaterializeQueued: undefined as (() => void) | undefined,
@@ -99,7 +118,26 @@ describe("SQLite transcript archive sessions", () => {
     await testState.cleanup();
   });
 
-  it("reads pending archives without waiting for reclamation or writer admission", async ({
+  async function prepareSession(sessionId: string, content: string) {
+    const sessionKey = `agent:main:${sessionId}`;
+    const scope = { sessionKey, sessionId, storePath };
+    const event = createTranscriptEvent(sessionId, content);
+    await replaceSessionEntry(scope, { sessionId, updatedAt: 1 });
+    await replaceTranscriptEvents(scope, [event]);
+    await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
+    const database = openLifecycleTestDatabase(storePath);
+    return { sessionId, sessionKey, scope, event, database };
+  }
+
+  function deleteArchivedSession(sessionKey: string, targetStorePath = storePath) {
+    return deleteSessionEntryLifecycle({
+      archiveTranscript: true,
+      storePath: targetStorePath,
+      target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
+    });
+  }
+
+  it("reads fresh pending archives without waiting for reclamation or writer admission", async ({
     signal,
   }) => {
     const database = openLifecycleTestDatabase(storePath);
@@ -107,6 +145,7 @@ describe("SQLite transcript archive sessions", () => {
     const archiveEntered = createDeferred();
     const writerEntered = createDeferred();
     const release = createDeferred();
+    const peer = new (requireNodeSqlite().DatabaseSync)(database.path);
     const archive = runExclusiveSqliteTranscriptArchiveWorker(async () => {
       archiveEntered.resolve();
       await release.promise;
@@ -117,21 +156,30 @@ describe("SQLite transcript archive sessions", () => {
     });
     try {
       await Promise.all([archiveEntered.promise, writerEntered.promise]);
-      await expect(
+      const readPending = () =>
         withSqliteTranscriptArchiveSession(options, () =>
           archiveWorker.readPendingSqliteTranscriptArchivesInWorker(
             { agentId: "main", databasePath: database.path, env: testState.env },
             signal,
           ),
-        ),
-      ).resolves.toBe(false);
+        );
+      await expect(readPending()).resolves.toBe(false);
+      peer
+        .prepare(
+          "INSERT INTO session_transcript_archives (session_id, generation, session_key, reason, encoding, archive_blob, archive_sha256, archive_name, created_at) VALUES ('deleted-session', 'generation', 'agent:main:deleted-session', 'deleted', 'identity', X'', ?, 'pending.jsonl', 1)",
+        )
+        .run("0".repeat(64));
+      await expect(readPending()).resolves.toBe(true);
+      peer.exec("UPDATE session_transcript_archives SET published_at = 2");
+      await expect(readPending()).resolves.toBe(false);
     } finally {
+      peer.close();
       release.resolve();
       await Promise.allSettled([archive, writer]);
     }
   });
 
-  it("reuses one archive worker across deletion generations and joins it before returning", async () => {
+  it("reuses one archive worker across deletion generations and joins it at database close", async () => {
     const sessionKey = "agent:main:durable-delete";
     const sessionIds = ["durable-delete-first", "durable-delete-second", "durable-delete-current"];
     const events = sessionIds.map((sessionId) =>
@@ -158,11 +206,7 @@ describe("SQLite transcript archive sessions", () => {
 
     let result: Awaited<ReturnType<typeof deleteSessionEntryLifecycle>>;
     try {
-      result = await deleteSessionEntryLifecycle({
-        archiveTranscript: true,
-        storePath,
-        target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
-      });
+      result = await deleteArchivedSession(sessionKey);
     } finally {
       archiveWorkers.stop();
     }
@@ -176,7 +220,7 @@ describe("SQLite transcript archive sessions", () => {
       "published",
     ]);
     expect(new Set(archiveWorkers.replies.map(({ worker }) => worker)).size).toBe(1);
-    expect(archiveWorkers.replies.every(({ worker }) => worker.threadId === -1)).toBe(true);
+    expect(archiveWorkers.replies.every(({ worker }) => worker.threadId > 0)).toBe(true);
     expect(archiveWorkers.replies.every(({ message }) => message.settled === true)).toBe(true);
     const operationIds = archiveWorkers.replies.flatMap(({ message }) =>
       typeof message.operationId === "number" ? [message.operationId] : [],
@@ -202,112 +246,193 @@ describe("SQLite transcript archive sessions", () => {
     ).toEqual(
       sessionIds.map(() => ({ published_at: expect.any(Number), session_key: sessionKey })),
     );
+    await closeOpenClawAgentDatabaseByPathAsync(database.path);
+    expect(archiveWorkers.replies.every(({ worker }) => worker.threadId === -1)).toBe(true);
   });
 
-  it.each(["file collision", "result recording"] as const)(
-    "joins a failed publisher and recovers its committed archive after %s",
-    async (failure) => {
-      const sessionKey = "agent:main:scoped-publish-failure";
-      const sessionIds = ["scoped-publish-history", "scoped-publish-current"] as const;
-      const events = sessionIds.map((sessionId) =>
-        createTranscriptEvent(sessionId, "recover exact bytes"),
-      );
-      for (const [index, sessionId] of sessionIds.entries()) {
-        await replaceSessionEntry({ sessionKey, storePath }, { sessionId, updatedAt: index + 1 });
-        await replaceTranscriptEvents({ sessionKey, sessionId, storePath }, [events[index]!]);
+  it("reuses one archive worker across sequential deletions of newly created sessions", async () => {
+    const database = openLifecycleTestDatabase(storePath);
+    const archiveWorkers = observeArchiveSessionWorkers();
+    try {
+      for (const sessionId of ["empty-first", "empty-second"]) {
+        const scope = { sessionKey: `agent:main:${sessionId}`, sessionId, storePath };
+        await createSessionEntryWithTranscript(scope, () => ({
+          ok: true,
+          entry: { sessionId, updatedAt: Date.now() },
+        }));
+        const events = await loadTranscriptEvents(scope);
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({ type: "session", id: sessionId });
+        const result = await deleteArchivedSession(scope.sessionKey);
+        expect(result.deleted).toBe(true);
+        expect(result.archivedTranscripts).toHaveLength(1);
+        expect(readArchiveLines(result.archivedTranscripts[0]?.archivedPath)).toEqual([
+          JSON.stringify(events[0]),
+        ]);
       }
-      await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
-      let collisionPath: string | undefined;
-      const archiveWorkers = observeArchiveSessionWorkers((message) => {
-        if (message.type === "done" && !collisionPath) {
-          const archiveName = message.results[0]?.archive?.archiveName;
-          if (archiveName) {
-            collisionPath = path.join(path.dirname(storePath), archiveName);
-            fs.writeFileSync(collisionPath, "conflicting derived file");
-          }
+    } finally {
+      archiveWorkers.stop();
+    }
+    expect(archiveWorkers.replies.map(({ message }) => message.type)).toEqual([
+      "done",
+      "published",
+      "done",
+      "published",
+    ]);
+    expect(new Set(archiveWorkers.replies.map(({ worker }) => worker)).size).toBe(1);
+    expect(archiveWorkers.replies.every(({ worker }) => worker.threadId > 0)).toBe(true);
+    await closeOpenClawAgentDatabaseByPathAsync(database.path);
+    expect(archiveWorkers.replies.every(({ worker }) => worker.threadId === -1)).toBe(true);
+  });
+
+  it.each([false, true])(
+    "retires the idle archive worker after five idle minutes (open scope: %s)",
+    async (keepScopeOpen) => {
+      const first = await prepareSession("idle-first", "idle archive first");
+      const second = await prepareSession("idle-second", "idle archive second");
+      const options = { agentId: "main", path: first.database.path, env: testState.env };
+      const idleTimers: Array<() => void> = [];
+      const schedule = globalThis.setTimeout;
+      const timers = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
+        callback: (...callbackArgs: unknown[]) => void,
+        delay?: number,
+        ...args: unknown[]
+      ) => {
+        if (delay === 5 * 60_000) {
+          idleTimers.push(() => callback(...args));
         }
-      });
-      const deletionParams = {
-        archiveTranscript: true,
-        storePath,
-        target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
+        return schedule(() => callback(...args), delay);
+      }) as typeof setTimeout);
+      const archiveWorkers = observeArchiveSessionWorkers();
+      const exercise = async () => {
+        const firstResult = await deleteArchivedSession(first.sessionKey);
+        expect(readArchiveLines(firstResult.archivedTranscripts[0]?.archivedPath)).toEqual([
+          JSON.stringify(first.event),
+        ]);
+        const carrier = archiveWorkers.replies[0]?.worker;
+        expect(carrier?.threadId).toBeGreaterThan(0);
+        // Each settled request re-arms the deadline; the latest one owns retirement.
+        expect(idleTimers.length).toBeGreaterThan(0);
+        const exited = once(carrier!, "exit");
+        idleTimers.at(-1)?.();
+        await exited;
+        expect(carrier?.threadId).toBe(-1);
+
+        const secondResult = await deleteArchivedSession(second.sessionKey);
+        expect(readArchiveLines(secondResult.archivedTranscripts[0]?.archivedPath)).toEqual([
+          JSON.stringify(second.event),
+        ]);
+        const replacement = archiveWorkers.replies.at(-1)?.worker;
+        expect(replacement).not.toBe(carrier);
+        expect(replacement?.threadId).toBeGreaterThan(0);
       };
       try {
-        await expect(deleteSessionEntryLifecycle(deletionParams)).rejects.toThrow(
-          "transcript archive file export(s) remain pending in SQLite",
-        );
+        if (keepScopeOpen) {
+          await withSqliteTranscriptArchiveSession(options, exercise);
+        } else {
+          await exercise();
+        }
       } finally {
+        timers.mockRestore();
         archiveWorkers.stop();
       }
-
-      expect(archiveWorkers.replies.map(({ message }) => message.type)).toEqual([
-        "done",
-        "published",
-      ]);
-      expect(new Set(archiveWorkers.replies.map(({ worker }) => worker)).size).toBe(1);
+      expect(new Set(archiveWorkers.replies.map(({ worker }) => worker)).size).toBe(2);
+      await closeOpenClawAgentDatabaseByPathAsync(first.database.path);
       expect(archiveWorkers.replies.every(({ worker }) => worker.threadId === -1)).toBe(true);
-      expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject({
-        sessionId: sessionIds[1],
-      });
-      await expect(
-        loadTranscriptEvents({ sessionKey, sessionId: sessionIds[0], storePath }),
-      ).resolves.toEqual([]);
-      await expect(
-        loadTranscriptEvents({ sessionKey, sessionId: sessionIds[1], storePath }),
-      ).resolves.toEqual([events[1]]);
-      expect(
-        openLifecycleTestDatabase(storePath)
-          .db.prepare(
-            "SELECT published_at, last_publish_error FROM session_transcript_archives WHERE session_id = ?",
-          )
-          .get(sessionIds[0]!),
-      ).toEqual({ published_at: null, last_publish_error: expect.stringContaining("collision") });
-      expect(collisionPath).toBeDefined();
-      fs.rmSync(collisionPath!);
-      if (failure === "result recording") {
-        const database = openLifecycleTestDatabase(storePath);
-        const readPending = () =>
-          database.db
-            .prepare(
-              "SELECT published_at, last_publish_attempt_at, last_publish_error, publish_attempts FROM session_transcript_archives WHERE session_id = ?",
-            )
-            .get(sessionIds[0]);
-        const pending = readPending();
-        database.db.exec(`
-        CREATE TRIGGER refuse_archive_result BEFORE UPDATE OF published_at
-        ON session_transcript_archives BEGIN
-          SELECT RAISE(ABORT, 'synthetic archive result recording failure');
-        END;
-      `);
-        try {
-          await expect(deleteSessionEntryLifecycle(deletionParams)).rejects.toThrow(
-            "synthetic archive result recording failure",
-          );
-          expect(readArchiveLines(collisionPath)).toEqual([JSON.stringify(events[0])]);
-          expect(readPending()).toEqual(pending);
-          await expect(
-            loadTranscriptEvents({ sessionKey, sessionId: sessionIds[0], storePath }),
-          ).resolves.toEqual([]);
-        } finally {
-          database.db.exec("DROP TRIGGER refuse_archive_result");
-        }
-      }
-
-      await expect(deleteSessionEntryLifecycle(deletionParams)).resolves.toMatchObject({
-        deleted: failure === "file collision",
-      });
-      expect(readArchiveLines(collisionPath)).toEqual([JSON.stringify(events[0])]);
-      expect(
-        openLifecycleTestDatabase(storePath)
-          .db.prepare(
-            "SELECT published_at, last_publish_error FROM session_transcript_archives WHERE session_id = ?",
-          )
-          .get(sessionIds[0]!),
-      ).toEqual({ published_at: expect.any(Number), last_publish_error: null });
+      expect(loadSessionEntry(first.scope)).toBeUndefined();
+      expect(loadSessionEntry(second.scope)).toBeUndefined();
     },
   );
 
-  it("retires competing archive scopes and publishes with the originally captured environment", async () => {
+  it("joins a failed publisher and recovers its committed archive after result recording fails", async () => {
+    const sessionKey = "agent:main:scoped-publish-failure";
+    const sessionIds = ["scoped-publish-history", "scoped-publish-current"] as const;
+    const events = sessionIds.map((sessionId) =>
+      createTranscriptEvent(sessionId, "recover exact bytes"),
+    );
+    for (const [index, sessionId] of sessionIds.entries()) {
+      await replaceSessionEntry({ sessionKey, storePath }, { sessionId, updatedAt: index + 1 });
+      await replaceTranscriptEvents({ sessionKey, sessionId, storePath }, [events[index]!]);
+    }
+    await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
+    let collisionPath: string | undefined;
+    const archiveWorkers = observeArchiveSessionWorkers((message) => {
+      if (message.type === "done" && !collisionPath) {
+        const archiveName = message.results[0]?.archive?.archiveName;
+        if (archiveName) {
+          collisionPath = path.join(path.dirname(storePath), archiveName);
+          fs.writeFileSync(collisionPath, "conflicting derived file");
+        }
+      }
+    });
+    try {
+      await expect(deleteArchivedSession(sessionKey)).rejects.toThrow(
+        "transcript archive file export(s) remain pending in SQLite",
+      );
+    } finally {
+      archiveWorkers.stop();
+    }
+
+    expect(archiveWorkers.replies.map(({ message }) => message.type)).toEqual([
+      "done",
+      "published",
+    ]);
+    expect(new Set(archiveWorkers.replies.map(({ worker }) => worker)).size).toBe(1);
+    expect(archiveWorkers.replies.every(({ worker }) => worker.threadId === -1)).toBe(true);
+    expect(loadSessionEntry({ sessionKey, storePath })).toMatchObject({
+      sessionId: sessionIds[1],
+    });
+    await expect(
+      loadTranscriptEvents({ sessionKey, sessionId: sessionIds[0], storePath }),
+    ).resolves.toEqual([]);
+    await expect(
+      loadTranscriptEvents({ sessionKey, sessionId: sessionIds[1], storePath }),
+    ).resolves.toEqual([events[1]]);
+    expect(
+      openLifecycleTestDatabase(storePath)
+        .db.prepare(
+          "SELECT published_at, last_publish_error FROM session_transcript_archives WHERE session_id = ?",
+        )
+        .get(sessionIds[0]!),
+    ).toEqual({ published_at: null, last_publish_error: expect.stringContaining("collision") });
+    expect(collisionPath).toBeDefined();
+    fs.rmSync(collisionPath!);
+    const database = openLifecycleTestDatabase(storePath);
+    const readPending = () =>
+      database.db
+        .prepare(
+          "SELECT published_at, last_publish_attempt_at, last_publish_error, publish_attempts FROM session_transcript_archives WHERE session_id = ?",
+        )
+        .get(sessionIds[0]);
+    const pending = readPending();
+    fault.enable();
+    try {
+      await expect(deleteArchivedSession(sessionKey)).rejects.toThrow(
+        "synthetic archive result recording failure",
+      );
+      expect(readArchiveLines(collisionPath)).toEqual([JSON.stringify(events[0])]);
+      expect(readPending()).toEqual(pending);
+      await expect(
+        loadTranscriptEvents({ sessionKey, sessionId: sessionIds[0], storePath }),
+      ).resolves.toEqual([]);
+    } finally {
+      fault.disable();
+    }
+
+    await expect(deleteArchivedSession(sessionKey)).resolves.toMatchObject({
+      deleted: false,
+    });
+    expect(readArchiveLines(collisionPath)).toEqual([JSON.stringify(events[0])]);
+    expect(
+      openLifecycleTestDatabase(storePath)
+        .db.prepare(
+          "SELECT published_at, last_publish_error FROM session_transcript_archives WHERE session_id = ?",
+        )
+        .get(sessionIds[0]!),
+    ).toEqual({ published_at: expect.any(Number), last_publish_error: null });
+  });
+
+  it.each([false, true])("reuses idle workers across scopes (exited=%s)", async (exited) => {
     testState.envVars.OPENCLAW_SUPERVISOR_MODE = " ExTeRnAl ";
     testState.applyEnv();
     const first = {
@@ -344,7 +469,7 @@ describe("SQLite transcript archive sessions", () => {
         [...observedWorkers].filter((observed) => observed.threadId !== -1).length,
       );
     });
-    const publicationWorkers = new Set<reclamationWorker.SqliteReclamationWorker>();
+    const publicationWorkers = new Set<SqliteReclamationWorker>();
     const withWorker = reclamationWorker.withSqliteReclamationWorker;
     const reclamationObserver = vi
       .spyOn(reclamationWorker, "withSqliteReclamationWorker")
@@ -361,11 +486,7 @@ describe("SQLite transcript archive sessions", () => {
         ),
       );
     const deleteScope = (scope: typeof first) =>
-      deleteSessionEntryLifecycle({
-        archiveTranscript: true,
-        storePath: scope.storePath,
-        target: { canonicalKey: scope.sessionKey, storeKeys: [scope.sessionKey] },
-      });
+      deleteArchivedSession(scope.sessionKey, scope.storePath);
     const firstDeletion = deleteScope(first);
     let secondDeletion: ReturnType<typeof deleteScope> | undefined;
     const successorRoot = path.join(tempDir, "ambient-successor");
@@ -378,9 +499,12 @@ describe("SQLite transcript archive sessions", () => {
       ]);
       const firstWorker = archiveWorkers.replies[0]?.worker;
       expect(firstWorker?.threadId).toBeGreaterThan(0);
+      if (exited) {
+        await firstWorker!.terminate();
+      }
       secondDeletion = deleteScope(second);
       const secondResult = await secondDeletion;
-      expect(firstWorker?.threadId).toBe(-1);
+      expect(firstWorker?.threadId === -1).toBe(exited);
       expect(readArchiveLines(secondResult.archivedTranscripts[0]?.archivedPath)).toEqual([
         JSON.stringify(events[1]),
       ]);
@@ -408,8 +532,9 @@ describe("SQLite transcript archive sessions", () => {
         ["published", second.sessionId],
         ["published", first.sessionId],
       ]);
-      expect(observedWorkers.size).toBe(3);
+      expect(observedWorkers.size).toBe(exited ? 2 : 1);
       expect(activeWorkersAtReply).toEqual([1, 1, 1, 1]);
+      await closeOpenClawAgentDatabasesAsync(tempDir);
       expect([...observedWorkers].every((worker) => worker.threadId === -1)).toBe(true);
     } finally {
       releasePublication.resolve();
@@ -424,40 +549,50 @@ describe("SQLite transcript archive sessions", () => {
     await expect(loadTranscriptEvents(second)).resolves.toEqual([]);
   });
 
-  it("retires queued archive work without waiting on the blocked global FIFO", async () => {
-    const sessionId = "queued-retirement";
-    const sessionKey = "agent:main:queued-retirement";
-    const scope = { sessionKey, sessionId, storePath };
-    const event = createTranscriptEvent(sessionId, "do not dispatch after retirement");
-    await replaceSessionEntry(scope, { sessionId, updatedAt: 1 });
-    await replaceTranscriptEvents(scope, [event]);
-    await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
-    const database = openLifecycleTestDatabase(storePath);
+  it("retires queued archive work without waiting on the blocked global FIFO", async ({
+    signal,
+  }) => {
+    const { sessionId, sessionKey, scope, event, database } = await prepareSession(
+      "queued-retirement",
+      "do not dispatch after retirement",
+    );
     const blockerEntered = createDeferred();
     const releaseBlocker = createDeferred();
     const materializationQueued = createDeferred();
-    const blocker = runExclusiveSqliteTranscriptArchiveWorker(async () => {
-      blockerEntered.resolve();
-      await releaseBlocker.promise;
-    });
-    await blockerEntered.promise;
+    let blocker: Promise<void> | undefined;
+    const prepare = reclamation.runSessionDeletionPlanning;
+    const planning = vi
+      .spyOn(reclamation, "runSessionDeletionPlanning")
+      .mockImplementationOnce(async (...args) => {
+        const result = await prepare(...args);
+        if (result.operation !== "entry" || result.value.kind !== "ready") {
+          throw new Error("Expected entry planning before blocking archive materialization");
+        }
+        expect(result.value.value.targetSnapshot).toMatchObject([
+          { sessionKey, entry: { sessionId } },
+        ]);
+        blocker = runExclusiveSqliteTranscriptArchiveWorker(async () => {
+          blockerEntered.resolve();
+          await releaseBlocker.promise;
+        });
+        await blockerEntered.promise;
+        return result;
+      });
     archiveScopeHooks.afterMaterializeQueued = () => materializationQueued.resolve();
     const archiveWorkers = observeArchiveSessionWorkers();
-    const deletion = deleteSessionEntryLifecycle({
-      archiveTranscript: true,
-      storePath,
-      target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
-    });
+    const deletion = deleteArchivedSession(sessionKey);
     let retirement: Promise<boolean> | undefined;
     try {
-      await Promise.race([
-        materializationQueued.promise,
-        deletion.then(() => {
-          throw new Error("deletion skipped archive materialization");
-        }),
-      ]);
+      await withinTest(
+        awaitGateBeforeSettlement(
+          materializationQueued.promise,
+          deletion,
+          "deletion skipped archive materialization",
+        ),
+        signal,
+      );
       retirement = closeOpenClawAgentDatabaseByPathAsync(database.path);
-      await withTestTimeout(retirement, 5_000, "retirement waited on undispatched archive work");
+      await withinTest(retirement, signal);
       expect(archiveWorkers.replies).toEqual([]);
       releaseBlocker.resolve();
       await expect(deletion).rejects.toThrow(/revok/i);
@@ -465,6 +600,7 @@ describe("SQLite transcript archive sessions", () => {
     } finally {
       releaseBlocker.resolve();
       await Promise.allSettled([blocker, deletion, retirement]);
+      planning.mockRestore();
       archiveWorkers.stop();
     }
     expect(loadSessionEntry(scope)).toMatchObject({ sessionId });
@@ -474,33 +610,24 @@ describe("SQLite transcript archive sessions", () => {
   it.each(["done", "published"] as const)(
     "joins scoped archive %s before database close and refuses later scope work",
     async (boundary) => {
-      const sessionId = "scoped-retirement";
-      const sessionKey = "agent:main:scoped-retirement";
-      const scope = { sessionKey, sessionId, storePath };
-      const event = createTranscriptEvent(sessionId, "retain after retirement");
-      await replaceSessionEntry(scope, { sessionId, updatedAt: 1 });
-      await replaceTranscriptEvents(scope, [event]);
-      await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
-      const database = openLifecycleTestDatabase(storePath);
+      const { sessionId, sessionKey, scope, event, database } = await prepareSession(
+        "scoped-retirement",
+        "retain after retirement",
+      );
       let retirement: Promise<boolean> | undefined;
       let nativeExitAtRetirement = false;
       const archiveWorkers = observeArchiveSessionWorkers((message, worker) => {
         if (message.type === boundary && !retirement) {
-          retirement = closeOpenClawAgentDatabaseByPathAsync(database.path).then((closed) => {
+          retirement = runInDetachedAsyncContext(() =>
+            closeOpenClawAgentDatabaseByPathAsync(database.path),
+          ).then((closed) => {
             nativeExitAtRetirement = worker.threadId === -1;
             return closed;
           });
         }
       });
-      const deletionParams = {
-        archiveTranscript: true,
-        storePath,
-        target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
-      };
       try {
-        await expect(deleteSessionEntryLifecycle(deletionParams)).rejects.toThrow(
-          /clos|retir|revok/i,
-        );
+        await expect(deleteArchivedSession(sessionKey)).rejects.toThrow(/clos|retir|revok/i);
         expect(retirement).toBeDefined();
         await retirement;
       } finally {
@@ -518,29 +645,20 @@ describe("SQLite transcript archive sessions", () => {
         expect(loadSessionEntry(scope)).toBeUndefined();
         await expect(loadTranscriptEvents(scope)).resolves.toEqual([]);
       }
-      await expect(deleteSessionEntryLifecycle(deletionParams)).resolves.toMatchObject({
+      await expect(deleteArchivedSession(sessionKey)).resolves.toMatchObject({
         deleted: boundary === "done",
       });
     },
   );
 
-  it.each([
+  it.for([
     { phase: "file", owner: "agent" },
     { phase: "prepare", owner: "agent" },
-    { phase: "record", owner: "agent" },
-    { phase: "prepare", owner: "state" },
     { phase: "record", owner: "state" },
   ] as const)(
     "cancels queued $phase publication at $owner close without waiting on another queue owner",
-    async ({ phase, owner }) => {
-      const sessionId = "queued-publication";
-      const sessionKey = "agent:main:queued-publication";
-      await replaceSessionEntry({ sessionKey, storePath }, { sessionId, updatedAt: 1 });
-      await replaceTranscriptEvents({ sessionKey, sessionId, storePath }, [
-        createTranscriptEvent(sessionId, "queued bytes"),
-      ]);
-      await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
-      const database = openLifecycleTestDatabase(storePath);
+    async ({ phase, owner }, { signal }) => {
+      const { sessionKey, database } = await prepareSession("queued-publication", "queued bytes");
       const queued = createDeferred();
       const release = createDeferred();
       let blocker: Promise<void> | undefined;
@@ -570,29 +688,25 @@ describe("SQLite transcript archive sessions", () => {
             ? blockBefore(() => withWorker(...args))
             : withWorker(...args),
         );
-      const publication = deleteSessionEntryLifecycle({
-        archiveTranscript: true,
-        storePath,
-        target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
-      });
+      const publication = deleteArchivedSession(sessionKey);
       const observed = publication.then(
         () => undefined,
         (error: unknown) => error,
       );
       let close: Promise<boolean> | undefined;
       try {
-        await Promise.race([
-          queued.promise,
-          publication.then(() => {
-            throw new Error("Publication skipped its queue");
-          }),
-        ]);
+        await withinTest(
+          awaitGateBeforeSettlement(queued.promise, publication, "Publication skipped its queue"),
+          signal,
+        );
         close =
           owner === "agent"
             ? closeOpenClawAgentDatabaseByPathAsync(database.path)
             : closeOpenClawStateDatabaseByPathAsync(resolveOpenClawStateSqlitePath(testState.env));
-        await withTestTimeout(close, 5_000, "close waited on an unrelated queue owner");
-        expect(await observed).toMatchObject({ message: expect.stringMatching(/revok/i) });
+        await withinTest(close, signal);
+        expect(await withinTest(observed, signal)).toMatchObject({
+          message: expect.stringMatching(/revok/i),
+        });
       } finally {
         release.resolve();
         await Promise.allSettled([publication, blocker, close]);
@@ -606,13 +720,10 @@ describe("SQLite transcript archive sessions", () => {
   it.each(["path", "agent"] as const)(
     "refuses a prepared archive reply with a different physical %s owner",
     async (changed) => {
-      const sessionId = "archive-reply-owner";
-      const sessionKey = "agent:main:archive-reply-owner";
-      const scope = { sessionKey, sessionId, storePath };
-      await replaceSessionEntry(scope, { sessionId, updatedAt: 1 });
-      await replaceTranscriptEvents(scope, [createTranscriptEvent(sessionId, "original archive")]);
-      await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
-      const database = openLifecycleTestDatabase(storePath);
+      const { sessionId, sessionKey, database } = await prepareSession(
+        "archive-reply-owner",
+        "original archive",
+      );
       const otherPath = path.join(tempDir, "different-owner.sqlite");
       const reclaim = reclamation.runSqliteSessionReclamation;
       let changedPlans = 0;
@@ -636,13 +747,7 @@ describe("SQLite transcript archive sessions", () => {
         });
       const workers = observeArchiveSessionWorkers();
       try {
-        await expect(
-          deleteSessionEntryLifecycle({
-            archiveTranscript: true,
-            storePath,
-            target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
-          }),
-        ).rejects.toThrow(/database owner/);
+        await expect(deleteArchivedSession(sessionKey)).rejects.toThrow(/database owner/);
       } finally {
         prepareObserver.mockRestore();
         workers.stop();
@@ -667,13 +772,10 @@ describe("SQLite transcript archive sessions", () => {
   it.runIf(process.platform !== "win32").each(["before file", "before record"] as const)(
     "refuses a physical database replacement %s without publishing to its successor",
     async (boundary) => {
-      const sessionId = "replaced-archive-owner";
-      const sessionKey = "agent:main:replaced-archive-owner";
-      const scope = { sessionKey, sessionId, storePath };
-      await replaceSessionEntry(scope, { sessionId, updatedAt: 1 });
-      await replaceTranscriptEvents(scope, [createTranscriptEvent(sessionId, "original source")]);
-      await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
-      const database = openLifecycleTestDatabase(storePath);
+      const { sessionId, sessionKey, database } = await prepareSession(
+        "replaced-archive-owner",
+        "original source",
+      );
       const replacementPath = path.join(tempDir, "replacement.sqlite");
       const replacement = openOpenClawAgentDatabase({
         agentId: "main",
@@ -720,11 +822,7 @@ describe("SQLite transcript archive sessions", () => {
           }
           return result;
         });
-      const deletion = deleteSessionEntryLifecycle({
-        archiveTranscript: true,
-        storePath,
-        target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
-      });
+      const deletion = deleteArchivedSession(sessionKey);
       const heldPath = `${database.path}.held`;
       let replaced = false;
       try {
@@ -788,13 +886,7 @@ describe("SQLite transcript archive sessions", () => {
         await replaceTranscriptEvents({ sessionKey, sessionId, storePath }, [
           createTranscriptEvent(sessionId, "publish before releasing the claim"),
         ]);
-        requested = (
-          await deleteSessionEntryLifecycle({
-            archiveTranscript: true,
-            storePath,
-            target: { canonicalKey: sessionKey, storeKeys: [sessionKey] },
-          })
-        ).archivedTranscripts;
+        requested = (await deleteArchivedSession(sessionKey)).archivedTranscripts;
         expect(requested).toHaveLength(1);
         await waitForSessionTranscriptIndexReconcilesInStateDir(tempDir);
         await closeOpenClawAgentDatabasesAsync(tempDir);

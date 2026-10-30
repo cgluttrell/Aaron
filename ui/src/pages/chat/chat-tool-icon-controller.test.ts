@@ -380,8 +380,7 @@ describe("chat tool icon ownership", () => {
     await vi.waitFor(() => expect(revoke).toHaveBeenCalledWith("blob:plugin-icon"));
     expect(controller.icons.get("meeting_status")).toBeUndefined();
   });
-  // Release-only omission: unresolved revocation-count failure before the late-error callback.
-  it.skip("ignores a removed image's late error after its owner has been replaced", async () => {
+  it("ignores a removed image's late error after its owner has been replaced", async () => {
     const { controller, context, revoke, fetch } = setup();
     controller.hostUpdate();
     await vi.waitFor(() => expect(controller.icons.get("meeting_status")).toBeDefined());

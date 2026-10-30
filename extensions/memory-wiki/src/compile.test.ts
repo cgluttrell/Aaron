@@ -806,13 +806,11 @@ describe("compileMemoryWikiVault", () => {
     expect(bradPage.relationshipCount).toBe(1);
     expect(claims.flatMap((claim) => claim.evidenceKinds ?? [])).toContain("maintainer-whois");
   });
-
   it("ignores generated related links when computing backlinks on repeated compile", async () => {
     const { rootDir, config } = await createVault({
       rootDir: nextCaseRoot(),
       initialize: true,
     });
-
     await writePage(path.join(rootDir, "entities", "beta.md"), {
       frontmatter: { pageType: "entity", id: "entity.beta", title: "Beta" },
       body: "# Beta\n",
@@ -875,5 +873,57 @@ describe("compileMemoryWikiVault", () => {
     } finally {
       readFileSpy.mockRestore();
     }
+  });
+
+  it.each(["entities/router.md", "index.md", "reports/open-questions.md"])(
+    "refuses to rewrite malformed UTF-8 in %s and leaves it unchanged",
+    async (relativePath) => {
+      const { rootDir, config } = await createVault({
+        rootDir: nextCaseRoot(),
+        initialize: true,
+      });
+      const pagePath = path.join(rootDir, relativePath);
+      await fs.mkdir(path.dirname(pagePath), { recursive: true });
+      const malformed = Buffer.concat([
+        Buffer.from(
+          "---\npageType: entity\nid: entity.router\ntitle: Router\nstatus: active\n---\n# Router\n\n## Human Notes\n\nlatin1: caf",
+          "utf8",
+        ),
+        Buffer.from([0xff]),
+        Buffer.from(" keeps dropping\n", "utf8"),
+      ]);
+      await fs.writeFile(pagePath, malformed);
+
+      await expect(compileMemoryWikiVault(config)).rejects.toMatchObject({
+        name: "WikiPageNotUtf8Error",
+        message: expect.stringContaining(relativePath),
+      });
+      expect(await fs.readFile(pagePath)).toEqual(malformed);
+    },
+  );
+
+  it("compiles valid non-ASCII pages including a literal replacement character", async () => {
+    const { rootDir, config } = await createVault({
+      rootDir: nextCaseRoot(),
+      initialize: true,
+    });
+    const entityDir = path.join(rootDir, "entities");
+    await fs.mkdir(entityDir, { recursive: true });
+    const entityPath = path.join(entityDir, "router.md");
+    const notesLine = "- 中文 🦀 \uFFFD tail";
+    await writePage(entityPath, {
+      frontmatter: {
+        pageType: "entity",
+        id: "entity.router",
+        title: "Router",
+      },
+      body: `# Router\n\n## Human Notes\n\n${notesLine}\n`,
+    });
+
+    await compileMemoryWikiVault(config);
+
+    const after = await fs.readFile(entityPath, "utf8");
+    expect(after).toContain(notesLine);
+    expect(after).toContain("<!-- openclaw:wiki:related:start -->");
   });
 });

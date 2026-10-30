@@ -12,6 +12,7 @@ export function createHostedGatewayTools(
   embedded: boolean,
   sessionAgentId: string,
   options?: OpenClawToolsOptions,
+  preparedDelegateTools?: AnyAgentTool[],
 ): AnyAgentTool[] {
   if (embedded) {
     return [];
@@ -23,8 +24,12 @@ export function createHostedGatewayTools(
       senderIsOwner: options?.senderIsOwner,
       requesterSenderId: options?.requesterSenderId,
     }),
-    createPluginsTool(),
-    ...createOpenClawDelegateToolsForRun({ ...options, sessionAgentId }),
+    createPluginsTool({
+      sessionId: options?.sessionId,
+      runId: options?.runId,
+      onYield: options?.onYield,
+    }),
+    ...(preparedDelegateTools ?? createOpenClawDelegateToolsForRun({ ...options, sessionAgentId })),
     ...(hasMultipleSessionSharingIdentities()
       ? [createPersonalInstructionsTool(sessionAgentId)]
       : []),

@@ -124,11 +124,14 @@ places it beside the correct reply. Stopping a call drains finalized speech,
 skips unfinished transcriptions, and records a browser console warning for
 missing transcriptions or unresolved conversation links.
 
-Google Live saves complete utterances during the call, including Gemini 3.1
-transcriptions that omit an explicit transcription-finished flag. Partial text
-stays provisional until the provider's completion boundary.
+Google Live saves complete utterances during the call, including Gemini 3.1 and
+3.8 transcriptions that omit an explicit transcription-finished flag. This also
+applies to Gemini 3.8 Extended Thinking. Partial text from older models stays
+provisional until the provider's completion boundary.
 
 Voice-originated consult runs require a new, exact spoken confirmation before high-impact actions such as sending messages, controlling nodes, browser/computer actions, service changes, destructive shell commands, or publication. The gate applies to runs started through `talk.client.toolCall`, the Gateway relay, and GPT-Live sideband delegations. The confirmation applies only to the canonical final execution arguments and is consumed once; if a policy or hook rewrites the approved action, OpenClaw blocks it until the rewritten action is confirmed. Unrelated concurrent runs remain unaffected. When a call closes, OpenClaw can send a compact **Voice call changes** digest for mutating tools to the session's last non-WebChat delivery target.
+
+Gateway shutdown joins accepted voice transcripts, final tool outcomes, and provider-close summaries before releasing persistence resources. Accepted consults keep their persistence ownership until all queued and deferred work finishes, including when diagnostics are disabled. Queued summaries keep their original physical stores while waiting for a delivery slot. Recipient lookup honors `session.store`; voice metadata and delivery markers remain in their separate per-agent store. A missing conversation is reported as a failed digest attempt instead of silently dropping its summary. Provider cleanup failures do not bypass that persistence drain. Stored formats and retry limits are unchanged. Confirmed deliveries retry only their completion marker; partial or uncertain deliveries are not resent. Unresolved outcomes retain a fence for the lifetime of the delivery owner within its existing bounded retry capacity.
 
 After a confirmation prompt, say **yes** to confirm the pending action or **no**
 to cancel it. Each confirmation permits one matching action; another action may
@@ -164,6 +167,12 @@ If session creation fails, Talk releases the microphone before reporting the err
 If OpenAI cannot transcribe an utterance, browser Talk shows the provider's error
 without ending the call or inventing a transcript. You can speak again; audio
 responses continue independently of input transcription.
+
+iOS and macOS Gateway-relay Talk tolerate slow audio acknowledgments while
+keeping at most three seconds of microphone audio in flight. Excess frames are
+dropped, and iOS shows a notice asking you to repeat the last part. If one audio
+append receives no acknowledgment for 30 seconds, Talk ends. Explicit Gateway
+errors or a lost connection still end the call immediately.
 
 If the microphone disconnects or its permission is revoked, browser Talk ends
 the call and shows an error. Choose an available **Microphone input**, restore

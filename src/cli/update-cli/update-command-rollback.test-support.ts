@@ -194,6 +194,18 @@ export function expectDoctorRollback(
   });
 }
 
+export const ACTIVE_ROLLBACK_IDENTITY_FAILURES = [
+  "source-failed",
+  "restored-shims-failed",
+  "partial-restore",
+  "restart-unhealthy",
+  "restart-refused",
+  "restart-threw",
+  "restart-cleanup",
+  "restart-timeout",
+  "restart-verified",
+] as const;
+
 export async function expectActiveRollbackIdentity(params: {
   failure: string;
   candidateRoot: string;
@@ -392,7 +404,18 @@ export function registerRollbackReportTests(
       await printResult(result, { json: true, run });
       expect(json).toHaveBeenCalledWith(
         expect.objectContaining({
-          ...(outcome === "thrown" ? {} : { steps: expect.arrayContaining([restored]) }),
+          ...(outcome === "thrown"
+            ? {}
+            : {
+                steps: expect.arrayContaining([
+                  {
+                    ...restored,
+                    ...(outcome === "failed"
+                      ? { failureFacts: [{ check: "update", code: "source-rollback-failed" }] }
+                      : {}),
+                  },
+                ]),
+              }),
           run: expect.objectContaining({
             steps: expect.arrayContaining([
               expect.objectContaining({

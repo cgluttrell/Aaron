@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
 import { createAdmittedHostCapabilityTestFixture } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { getSessionEntry, resolveStorePath } from "openclaw/plugin-sdk/session-store-runtime";
@@ -7,6 +8,7 @@ import { onTestFinished, vi } from "vitest";
 import { ensureCodexAppServerClientRuntime } from "./client-runtime.js";
 import type { CodexInferenceThreadQualification } from "./inference-qualification.js";
 import { createNativeSubagentAssignmentStore } from "./native-subagent-assignment-store.js";
+import type { CodexNativeSubagentHistoryOwner } from "./native-subagent-history-owner.js";
 import { defaultNativeSubagentMonitorRuntime } from "./native-subagent-monitor-runtime.js";
 import { codexNativeSubagentMonitorRuntime } from "./native-subagent-monitor.js";
 import {
@@ -31,7 +33,8 @@ export async function fixture() {
   const identity = {
     kind: "session" as const,
     agentId: "main",
-    sessionId: "physical-1",
+    // Session entry cleanup preserves history, so fixtures need distinct physical transcripts.
+    sessionId: randomUUID(),
     sessionKey: "agent:main:inventory",
   };
   await seedRunSessionOwnerForTest(identity.sessionId, identity.sessionKey, {
@@ -48,8 +51,9 @@ export async function fixture() {
     vi.useRealTimers();
   });
   const lifecycleRevision = entry.lifecycleRevision;
-  const historyOwner = (parentThreadId = "parent-thread") => ({
+  const historyOwner = (parentThreadId = "parent-thread"): CodexNativeSubagentHistoryOwner => ({
     ...nativeHistoryOwner(parentThreadId),
+    sessionId: identity.sessionId,
     lifecycleRevision,
   });
   const binding = {
@@ -185,6 +189,7 @@ export async function fixture() {
   return {
     identity,
     binding,
+    state,
     store,
     deliver,
     register,
@@ -238,4 +243,14 @@ export async function submitFollowup(client: ReturnType<typeof createClient>) {
   await client.notify(
     successfulSendInputOutput({ callId: "followup", submissionId: "followup-turn" }),
   );
+}
+
+export async function startAssignment(observeTurn = true) {
+  const f = await fixture();
+  const client = createClient();
+  const parent = await f.register(client);
+  await parent.ready;
+  parent.bindTurn("parent-turn");
+  await f.spawn(client, observeTurn);
+  return { f, client, parent };
 }

@@ -1,13 +1,17 @@
 import { note } from "../../packages/terminal-core/src/note.js";
-import { readResolvedDeferredPluginMigrationWarnings } from "../infra/deferred-plugin-migration-warnings.js";
+import { readRetiredDeferredPluginMigrationWarnings } from "../infra/deferred-plugin-migration-warnings.js";
+import type { UpdateRunRecord } from "../infra/update-run-record.js";
 import { hasCommandProcessCleanupError } from "../process/exec-result.js";
 import {
   UPDATE_ACTIVATION_TIMEOUT_REASON,
   UPDATE_ENVIRONMENT_FAILURE_REASONS,
 } from "../shared/update-outcome.js";
+import {
+  withArtifactPreservingStateReads,
+  withOpenClawStateDatabaseReadSnapshot,
+} from "../state/openclaw-state-db-readonly.js";
 import type { DB } from "../state/openclaw-state-db.generated.js";
 
-/** Report unfinished or failed update work during Doctor diagnostics. */
 export async function noteStaleUpdateRuns(
   options: {
     migrateState?: boolean;
@@ -15,6 +19,7 @@ export async function noteStaleUpdateRuns(
 ): Promise<void> {
   const warnings = new Set<string>();
   const reportReconciliationError = (error: unknown) => {
+    // An unsettled child may still hold source state; mutations must wait for its owner.
     if (hasCommandProcessCleanupError(error)) {
       throw error;
     }
@@ -30,6 +35,7 @@ export async function noteStaleUpdateRuns(
   }
   if (warnings.size && options.migrateState !== false) {
     try {
+      // Record outside the discovery snapshot, without bootstrapping or migrating state.
       await recordUpdateHistoryWarning([...warnings].join("\n"));
     } catch (error) {
       if (hasCommandProcessCleanupError(error)) {
@@ -74,6 +80,7 @@ async function recordUpdateHistoryWarning(detail: string): Promise<void> {
         status: "completed",
         detail,
       });
+      // An observer's warning is not updater activity: preserve its heartbeat and step times.
       executeSqliteQuerySync(
         db,
         getNodeSqliteKysely<Pick<DB, "update_runs">>(db)
@@ -98,6 +105,7 @@ async function inspectStaleUpdateRuns(
     { updateRunWarningMessages },
     { readInstalledUpdateCandidate, reconcileInterruptedUpdateRuns },
     { isAcknowledgedAbandonedUpdateRun },
+    { readInterruptedUpdateCandidateAsync },
   ] = await Promise.all([
     import("../infra/update-run-activity.js"),
     import("../infra/update-run-reader.js"),
@@ -105,10 +113,31 @@ async function inspectStaleUpdateRuns(
     import("../infra/update-run-step.js"),
     import("../infra/update-run-interruption.js"),
     import("../infra/update-run-record.js"),
+    import("../infra/update-run-interruption-worker.js"),
   ]);
-  if (options.migrateState !== false) {
+  const discovered = await withArtifactPreservingStateReads(() =>
+    withOpenClawStateDatabaseReadSnapshot(async () => {
+      let candidate: UpdateRunRecord | undefined;
+      if (options.migrateState !== false) {
+        try {
+          candidate = await readInterruptedUpdateCandidateAsync({});
+        } catch (error) {
+          reportReconciliationError(error);
+        }
+      }
+      return {
+        candidate,
+        active: await listUpdateRunsAsync({ active: true, limit: 100 }),
+        history: await listUpdateRunsAsync({ limit: 100 }),
+      };
+    }),
+  );
+  let { active, history } = discovered;
+  let reconciled: UpdateRunRecord[] = [];
+  if (discovered.candidate) {
     try {
-      for (const run of await reconcileInterruptedUpdateRuns()) {
+      reconciled = await reconcileInterruptedUpdateRuns({ candidate: discovered.candidate });
+      for (const run of reconciled) {
         note(
           `Update ${run.runId}: recorded succeeded after verifying the installed and serving candidate build ${run.after.buildId}; its updater exited before recording completion.`,
           "Update history",
@@ -118,13 +147,17 @@ async function inspectStaleUpdateRuns(
       reportReconciliationError(error);
     }
   }
-  for (const run of await listUpdateRunsAsync({ active: true, limit: 100 })) {
+  if (reconciled.length) {
+    // Reconciliation writes live state; notes must not use its discovery snapshot.
+    active = await listUpdateRunsAsync({ active: true, limit: 100 });
+    history = await listUpdateRunsAsync({ limit: 100 });
+  }
+  for (const run of active) {
     const guidance = staleUpdateRunGuidance(run);
     if (guidance) {
       note(`Update ${run.runId}: ${guidance}`, "Update history");
     }
   }
-  const history = await listUpdateRunsAsync({ limit: 100 });
   for (const run of history) {
     if (
       run.status === "failed" &&
@@ -150,16 +183,10 @@ async function inspectStaleUpdateRuns(
     ) {
       note(`Update ${latest.runId}: ${renderUpdateRunReport(latest).markdown}`, "Update history");
     }
-    const resolvedWarnings = await readResolvedDeferredPluginMigrationWarnings(
+    const retiredWarnings = await readRetiredDeferredPluginMigrationWarnings(
       latest.steps.map((step) => step.detail),
     );
-    const warningSteps = latest.steps.filter((step) => {
-      const completedAtMs = step.detail ? resolvedWarnings.get(step.detail) : undefined;
-      return (
-        completedAtMs === undefined ||
-        completedAtMs < (step.endedAtMs ?? latest.finishedAtMs ?? latest.createdAtMs)
-      );
-    });
+    const warningSteps = latest.steps.filter((step) => !retiredWarnings.has(step.detail ?? ""));
     const warnings = updateRunWarningMessages(warningSteps);
     if (warnings.length) {
       note(

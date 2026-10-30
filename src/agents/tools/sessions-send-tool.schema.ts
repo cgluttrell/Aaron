@@ -1,7 +1,9 @@
 import { Type } from "typebox";
 import { SESSION_LABEL_MAX_LENGTH } from "../../sessions/session-label.js";
+import { requesterProfileSchema } from "../schema/typebox.js";
 
 export const SessionsSendToolSchema = Type.Object({
+  user: requesterProfileSchema(),
   sessionKey: Type.Optional(Type.String()),
   label: Type.Optional(Type.String({ minLength: 1, maxLength: SESSION_LABEL_MAX_LENGTH })),
   agentId: Type.Optional(Type.String({ minLength: 1, maxLength: 64 })),
@@ -98,6 +100,8 @@ export const SessionsSendOutputSchema = Type.Union([
       sessionKey: Type.String(),
       delivery: SessionsSendDeliverySchema,
       reply: Type.String(),
+      replyTruncated: Type.Optional(Type.Literal(true)),
+      note: Type.Optional(Type.String()),
       watched: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false },

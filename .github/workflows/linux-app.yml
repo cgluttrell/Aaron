@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - "apps/linux/**"
+      - "scripts/lib/openclaw-bun.json"
+      - "scripts/stage-openclaw-bun.sh"
+      - "test/scripts/stage-openclaw-bun.test.ts"
       - ".github/workflows/linux-app.yml"
       - ".github/workflows/linux-app-release.yml"
   workflow_dispatch:
@@ -23,7 +26,8 @@ jobs:
     name: Build Linux companion
     # Match the release build base for native tests and manually built bundles.
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
+    # Leave room for cold source packaging and the native desktop proof afterward.
+    timeout-minutes: 105
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -61,6 +65,7 @@ jobs:
             mesa-utils \
             openbox \
             patchelf \
+            unzip \
             pciutils \
             procps \
             psmisc \
@@ -93,8 +98,12 @@ jobs:
           cache-mode: restore
           install-bun: "false"
 
-      - name: Test native dashboard authentication bridge
-        run: node --test apps/linux/scripts/test-native-control-auth.mjs
+      - name: Test native dashboard authentication and runtime boundaries
+        run: |
+          node --test \
+            apps/linux/scripts/test-native-control-auth.mjs \
+            apps/linux/scripts/test-runtime-boundary.mjs \
+            apps/linux/scripts/test-stage-runtime.mjs
 
       - name: Test packaged runtime ABI scanner
         run: |
@@ -105,6 +114,11 @@ jobs:
         run: |
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
             -s apps/linux/tests -p 'test_desktop_sharing_reports.py'
+
+      - name: Test native first-run accessibility role matching
+        run: |
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover \
+            -s apps/linux/tests -p 'test_first_run.py'
 
       - name: Check Rust formatting
         working-directory: apps/linux/src-tauri
@@ -121,7 +135,12 @@ jobs:
 
       - name: Build native inline browser candidate
         working-directory: apps/linux/src-tauri
-        run: cargo +stable build --locked
+        env:
+          # Cold Linux declarations also exceed the package builder's 45-minute default.
+          OPENCLAW_DOCKER_PACKAGE_BUILD_TIMEOUT_MS: "3600000"
+        run: |
+          node ../scripts/stage-runtime.mjs
+          cargo +stable build --locked
 
       - name: Test native inline browser
         id: inline-browser

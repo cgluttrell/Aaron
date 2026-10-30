@@ -1,6 +1,6 @@
 import { vi } from "vitest";
 import type { ConfigFileSnapshot } from "../../config/types.openclaw.js";
-import { createFreeBsdPkgOwnershipInspection } from "../../infra/update-freebsd-pkg-ownership.js";
+import { createSystemPackageOwnershipInspection } from "../../infra/update-system-package-ownership.js";
 import type { UpdateCommandOptions } from "./shared.js";
 
 const command = vi.hoisted(() => ({
@@ -130,7 +130,7 @@ export async function runNativeMaintenanceUpdate(
     discoveredRoot: root,
     installKind: "package",
     servicePlan: serviceRoot ? { rootRedirect: null, serviceRoot } : undefined,
-    pkgOwnership: createFreeBsdPkgOwnershipInspection(),
+    pkgOwnership: createSystemPackageOwnershipInspection(),
   });
   command.admit.mockResolvedValue(run);
   command.target.mockResolvedValue({
@@ -164,7 +164,8 @@ export async function runNativeMaintenanceUpdate(
     packageUpdateNodeRunner: undefined,
     devTarget: undefined,
   });
-  command.finish.mockReset().mockImplementation(async ({ result }) => {
+  command.finish.mockReset().mockImplementation(async ({ result }, options) => {
+    await options?.beforeFinalization?.();
     if (result.status === "error") {
       throw new Error(`${result.reason}: ${result.steps.at(-1)?.stderrTail}`);
     }
