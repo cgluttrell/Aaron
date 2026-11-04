@@ -227,7 +227,12 @@ export function createExecTool(defaults?: ExecToolDefaults) {
       let params = requestPreparation.normalizeParams(args);
       // A required command remains an owned tool call until its terminal result is collected.
       // Explicit detached services retain their existing independent process lifetime.
-      const allowBackground = backgroundAvailable && params.awaitResults !== true;
+      // A cron run ends with its turn, so ordinary commands must return their terminal
+      // result in that turn. Explicit services remain independent of the cron run.
+      const awaitResults =
+        params.awaitResults === true ||
+        (defaults?.trigger === "cron" && params.background !== true);
+      const allowBackground = backgroundAvailable && !awaitResults;
       const resolveExecEnvPrepared = requestPreparation.isResolveExecEnvPrepared(
         args as ExecToolArgs,
       );
