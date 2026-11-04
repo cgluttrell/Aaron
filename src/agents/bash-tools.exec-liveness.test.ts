@@ -360,4 +360,70 @@ describe("registered exec deadline handoff", () => {
       exitReason: "overall-timeout",
     });
   });
+
+  it.each([
+    { trigger: "cron", expectedAtYield: false },
+    { trigger: "user", expectedAtYield: true },
+  ] as const)(
+    "$trigger exec keeps a 15-second command owned by its turn only for cron",
+    async ({ trigger, expectedAtYield }) => {
+      const child = createAdapter();
+      const spawned = createDeferred();
+      mocks.createChildAdapter.mockImplementationOnce(async () => {
+        spawned.resolve();
+        return child.adapter;
+      });
+      const tool = createExecTool({
+        host: "gateway",
+        security: "full",
+        ask: "off",
+        allowBackground: true,
+        notifyOnExit: false,
+        trigger,
+        scopeKey: `fifteen-second-${trigger}`,
+      });
+      const settled = vi.fn();
+      const execution = tool.execute(`fifteen-second-${trigger}`, {
+        command: "sleep 15",
+        yieldMs: 10_000,
+        timeoutSeconds: 30,
+      });
+      void execution.then(settled);
+      await spawned.promise;
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(settled).toHaveBeenCalledTimes(expectedAtYield ? 1 : 0);
+      if (expectedAtYield) {
+        expect((await execution).details).toMatchObject({ status: "running" });
+      }
+      await vi.advanceTimersByTimeAsync(5_000);
+      child.completed.resolve({ code: 0, signal: null });
+      if (expectedAtYield) {
+        await waitForExecScope(`fifteen-second-${trigger}`);
+      } else {
+        expect((await execution).details).toMatchObject({ status: "completed", exitCode: 0 });
+      }
+    },
+  );
+
+  it("allows an explicitly independent service in a cron turn", async () => {
+    const child = createAdapter();
+    mocks.createChildAdapter.mockResolvedValueOnce(child.adapter);
+    const scopeKey = "cron-independent-service";
+    const tool = createExecTool({
+      host: "gateway",
+      security: "full",
+      ask: "off",
+      allowBackground: true,
+      notifyOnExit: false,
+      trigger: "cron",
+      scopeKey,
+    });
+    const result = await tool.execute("cron-service", {
+      command: "service start",
+      background: true,
+    });
+    expect(result.details).toMatchObject({ status: "running" });
+    child.completed.resolve({ code: 0, signal: null });
+    await waitForExecScope(scopeKey);
+  });
 });
