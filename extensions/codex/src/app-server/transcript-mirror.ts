@@ -11,6 +11,7 @@ import type {
   TranscriptEntryAnchor,
   SessionTranscriptWriteLockParams,
 } from "openclaw/plugin-sdk/session-transcript-runtime";
+import { redactTranscriptMessage } from "openclaw/plugin-sdk/session-transcript-runtime";
 import { normalizeOptionalString } from "openclaw/plugin-sdk/string-coerce-runtime";
 import type { AttemptSettlementWarning, EmbeddedRunAttemptResult } from "./attempt-terminal.js";
 import type { CodexAsyncDeliverySettlement } from "./event-projector-options.js";
@@ -35,6 +36,7 @@ import {
   attachCodexMirrorIdentity,
   attachUpstreamUserText,
   readMirrorIdentity,
+  readUpstreamUserText,
 } from "./upstream-prompt-provenance.js";
 import {
   buildResolvedCodexUserPromptMessage,
@@ -256,13 +258,29 @@ export async function mirrorPromptAtTurnStartBestEffort(params: {
       });
       const annotate = params.params.hostCapabilities.annotateCurrentUserTurn;
       if (annotate) {
+        const admittedMessage = params.params.userTurnTranscriptRecorder?.getPersistedMessage?.();
+        if (!admittedMessage) {
+          throw new Error("native prompt annotation requires the persisted user message");
+        }
+        const redactedSource = redactTranscriptMessage(userPromptMessage, params.params.config);
+        if (redactedSource.role !== "user") {
+          throw new Error("native prompt annotation requires a redacted user message");
+        }
+        // Sensitive native text cannot be reintroduced as annotation metadata.
+        // The host accepts an empty upstream text while retaining the provenance stamp.
+        const upstreamUserText =
+          readUpstreamUserText(redactedSource) === params.upstreamUserText
+            ? params.upstreamUserText
+            : "";
+        const storedSource = attachUpstreamUserText(admittedMessage, upstreamUserText);
         // Native turn acceptance supplies the identity. Annotate before taking the mirror lock:
         // the anchored writer owns that same queue and must never be nested under it.
         await annotate({
           mirrorIdentity: `${params.turnId}:prompt`,
-          upstreamUserText: params.upstreamUserText,
+          upstreamUserText,
           mirrorOrigin: "codex-app-server",
-          mirrorSourceFingerprint: fingerprintCodexMirrorSourceMessage(userPromptMessage),
+          // The host attests the stored row, including storage-safe native prompt text.
+          mirrorSourceFingerprint: fingerprintCodexMirrorSourceMessage(storedSource),
         });
       }
       const recorder = params.params.userTurnTranscriptRecorder;
