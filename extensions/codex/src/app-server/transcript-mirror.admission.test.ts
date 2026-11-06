@@ -1,4 +1,5 @@
 import path from "node:path";
+import { embeddedAgentLog } from "openclaw/plugin-sdk/agent-harness-runtime";
 import { SessionManager } from "openclaw/plugin-sdk/agent-sessions";
 import {
   createAdmittedHostCapabilityTestFixture,
@@ -25,6 +26,78 @@ import {
 } from "./transcript-mirror.js";
 
 registerCodexEventProjectorTestLifecycle();
+
+it.each([
+  "Review Authorization: Bearer $SYNTHETIC_TEST_TOKEN",
+  "Review sk-abcdef1234567890abcdef1234567890",
+])(
+  "attests an admitted prompt after transcript storage redacts its content: %s",
+  async (prompt) => {
+    const createRecorder = await loadUserTurnTranscriptRecorderFactoryForTest();
+    const base = await createParams();
+    const target = {
+      agentId: "main",
+      sessionId: base.sessionId,
+      sessionKey: "agent:main:redacted-prompt",
+      storePath: path.join(base.workspaceDir, "openclaw-agent.sqlite"),
+    };
+    await upsertSessionEntry({ ...target, entry: { sessionId: target.sessionId, updatedAt: 1 } });
+    const recorder = createRecorder({
+      input: { text: prompt, provenance: { kind: "internal_system", sourceTool: "test" } },
+      target: { ...target, sessionEntry: undefined },
+      beforeMessageWrite: ({ message }) => message,
+    });
+    await recorder.persistApproved();
+    const storedContent = recorder.getPersistedMessage?.()?.content;
+    expect(storedContent).not.toBe(prompt);
+    const attempt = {
+      ...base,
+      ...target,
+      prompt,
+      sessionTarget: target,
+      userTurnTranscriptRecorder: recorder,
+    };
+    const host = await createAdmittedHostCapabilityTestFixture(attempt);
+    const params = { ...attempt, hostCapabilities: host.hostCapabilities };
+    const warn = vi.spyOn(embeddedAgentLog, "warn").mockImplementation(() => undefined);
+    try {
+      await mirrorPromptAtTurnStartBestEffort({
+        params,
+        agentId: target.agentId,
+        sessionKey: target.sessionKey,
+        cwd: base.workspaceDir,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        upstreamUserText: prompt,
+        notifyUserMessagePersisted: createCodexAppServerUserMessagePersistenceNotifier(params),
+      });
+      const prompts = (await readSessionTranscriptEvents(target)).filter(
+        (event) => asOptionalRecord(asOptionalRecord(event)?.message)?.role === "user",
+      );
+      expect(warn).not.toHaveBeenCalledWith(
+        "failed to mirror codex app-server prompt at turn start",
+        expect.anything(),
+      );
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toMatchObject({
+        message: {
+          content: storedContent,
+          __openclaw: {
+            mirrorIdentity: "turn-1:prompt",
+            mirrorOrigin: "codex-app-server",
+            mirrorSourceFingerprint: expect.any(String),
+            upstreamUserText: "",
+          },
+        },
+      });
+      expect(JSON.stringify(prompts[0])).not.toContain(prompt.split(" ").at(-1));
+    } finally {
+      warn.mockRestore();
+      host.closeHost();
+      host.closeAdmission();
+    }
+  },
+);
 
 it.each([
   {

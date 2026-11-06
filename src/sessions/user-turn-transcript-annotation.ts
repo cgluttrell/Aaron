@@ -150,7 +150,14 @@ export function bindUserTurnTranscriptAnnotation(params: {
           throw new Error("native prompt annotation conflicts with recorded provenance");
         }
         const next = { ...admittedMessage, __openclaw: { ...metadata, ...fields } };
-        if (!isDeepStrictEqual(redactTranscriptMessage(next, params.config), next)) {
+        // The admitted row was already redacted for storage. A second pass over its
+        // existing content may not be byte-idempotent; validate only the new fields.
+        const metadataProbe = { ...admittedMessage, content: "", __openclaw: fields };
+        const redactedFields = redactTranscriptMessage(metadataProbe, params.config);
+        if (
+          !("__openclaw" in redactedFields) ||
+          !isDeepStrictEqual(redactedFields["__openclaw"], fields)
+        ) {
           throw new Error("native prompt annotation would restore redacted evidence");
         }
         verified = true;
