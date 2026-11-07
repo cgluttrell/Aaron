@@ -590,7 +590,7 @@ export function registerShortTermPromotionDreaming(api: OpenClawPluginApi): void
       // Plugin replacement stops services, not Gateway hooks. Fence timers and
       // settle their work before the successor can own the same declaration.
       disposeDreaming();
-      const joined = Promise.allSettled([...dreamingTasks]).then(() => true);
+      const joined = Promise.allSettled(dreamingTasks).then(() => true);
       let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
         const finished = await Promise.race([
