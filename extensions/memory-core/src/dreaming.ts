@@ -91,6 +91,7 @@ async function runShortTermDreamingPromotion(params: {
   logger: Logger;
   subagent?: OpenClawPluginApi["runtime"]["subagent"];
   narrativeTimeoutMs: number;
+  deferPhaseSweep?: boolean;
 }): Promise<{ handled: true; reason: string } | undefined> {
   const recencyHalfLifeDays = params.config.recencyHalfLifeDays;
   const fallbackWorkspaceDir = normalizeOptionalString(params.workspaceDir);
@@ -140,6 +141,7 @@ async function runShortTermDreamingPromotion(params: {
   let failedWorkspaces = 0;
   let degradedNarratives = 0;
   let pendingNarratives = 0;
+  const deferPhaseSweep = params.deferPhaseSweep === true && Boolean(params.runInBackground);
   const pluginConfig = params.cfg ? resolveMemoryDreamingPluginConfig(params.cfg) : undefined;
   const [
     { writeDeepDreamingReport },
@@ -156,7 +158,8 @@ async function runShortTermDreamingPromotion(params: {
     import("./dreaming-phases.js"),
     import("./short-term-promotion.js"),
   ]);
-  for (const { agentId, agentIds, workspaceDir } of workspaces) {
+  const runWorkspacePhases = async (workspace: (typeof workspaces)[number]): Promise<boolean> => {
+    const { agentId, workspaceDir } = workspace;
     const sweepNowMs = Date.now();
     try {
       const phaseResult = await runDreamingSweepPhases({
@@ -172,11 +175,20 @@ async function runShortTermDreamingPromotion(params: {
       });
       degradedNarratives += phaseResult.degradedPhases;
       pendingNarratives += phaseResult.pendingNarratives;
+      return true;
     } catch (err) {
       failedWorkspaces += 1;
       params.logger.error(
         `memory-core: dreaming sweep failed for workspace ${workspaceDir}: ${formatErrorMessage(err)}`,
       );
+      return false;
+    }
+  };
+
+  for (const workspace of workspaces) {
+    const { agentId, agentIds, workspaceDir } = workspace;
+    const sweepNowMs = Date.now();
+    if (!deferPhaseSweep && !(await runWorkspacePhases(workspace))) {
       continue;
     }
 
@@ -342,6 +354,28 @@ async function runShortTermDreamingPromotion(params: {
     params.logger.warn(summary);
   } else {
     params.logger.info(summary);
+  }
+
+  if (deferPhaseSweep && params.runInBackground) {
+    // Cron claims only after durable promotion. The light/REM sweep can spend longer
+    // than the claiming-hook budget; service-owned background work joins at stop.
+    void params
+      .runInBackground(async () => {
+        for (const workspace of workspaces) {
+          await runWorkspacePhases(workspace);
+        }
+        const phaseSummary = `memory-core: dreaming phase sweep complete (workspaces=${workspaces.length}, failed=${failedWorkspaces}, degraded=${degradedNarratives}, narrativesPending=${pendingNarratives}).`;
+        if (failedWorkspaces > 0 || degradedNarratives > 0) {
+          params.logger.warn(phaseSummary);
+        } else {
+          params.logger.info(phaseSummary);
+        }
+      })
+      .catch((error: unknown) => {
+        params.logger.error(
+          `memory-core: dreaming phase sweep failed: ${formatErrorMessage(error)}`,
+        );
+      });
   }
 
   return {
@@ -604,6 +638,7 @@ export function registerShortTermPromotionDreaming(api: OpenClawPluginApi): void
         }
         return await runShortTermDreamingPromotion({
           runInBackground: ctx.trigger === "cron" ? trackDreamingTask : undefined,
+          deferPhaseSweep: ctx.trigger === "cron",
           agentId: ctx.agentId,
           workspaceDir: ctx.workspaceDir,
           cfg: currentConfig,

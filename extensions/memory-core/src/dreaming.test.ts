@@ -13,7 +13,11 @@ import {
   createTestPluginApi,
   createTestPluginServiceScheduler,
 } from "openclaw/plugin-sdk/plugin-test-api";
-import { createPluginRuntimeMock } from "openclaw/plugin-sdk/plugin-test-runtime";
+import {
+  createHookRunner,
+  createMockPluginRegistry,
+  createPluginRuntimeMock,
+} from "openclaw/plugin-sdk/plugin-test-runtime";
 import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
 import { resetSystemEventsForTest } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -900,9 +904,59 @@ describe("dreaming service reconciliation", () => {
 
     expect(result).toEqual({
       handled: true,
-      reason: "memory-core: short-term dreaming degraded",
+      reason: "memory-core: short-term dreaming processed",
     });
-    expectLogContains(logger.warn, "failed=0, degraded=1, narrativesPending=0");
+    await triggerDreamingServiceStop(api);
+    expectLogContains(logger.warn, "phase sweep complete (workspaces=1, failed=0, degraded=1");
+  });
+
+  it("claims a cron turn after recording promotion while a slow phase sweep remains pending", async () => {
+    const workspaceDir = await createTempWorkspace("openclaw-dreaming-slow-sweep-");
+    runDreamingSweepPhasesMock.mockClear();
+    let finishSweep: (() => void) | undefined;
+    runDreamingSweepPhasesMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishSweep = () => resolve({ degradedPhases: 0, pendingNarratives: 0 });
+        }),
+    );
+    const { api, harness, logger } = createDreamingTestContext({
+      config: createDreamingConfig(
+        { enabled: true, limit: 1 },
+        { agents: { defaults: { workspace: workspaceDir } } },
+      ),
+    });
+    registerShortTermPromotionDreamingForTest(api);
+    await triggerDreamingServiceStart(api, { config: api.config, getCron: () => harness.cron });
+    const handler = getBeforeAgentReplyHandler(api.on);
+    const runner = createHookRunner(
+      createMockPluginRegistry([{ hookName: "before_agent_reply", handler }]),
+    );
+    let claimDeadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const claim = runner.runBeforeAgentReply(
+        { cleanedBody: constants.DREAMING_SYSTEM_EVENT_TEXT },
+        { trigger: "cron", agentId: "main", workspaceDir },
+      );
+      const result = await Promise.race([
+        claim,
+        new Promise<"pending">((resolve) => {
+          claimDeadline = setTimeout(() => resolve("pending"), 5_000);
+        }),
+      ]);
+      expect(result).toEqual({
+        handled: true,
+        reason: "memory-core: short-term dreaming processed",
+      });
+      expectLogContains(logger.info, "promotion complete (workspaces=1, candidates=0, applied=0");
+      expect(runDreamingSweepPhasesMock).toHaveBeenCalledOnce();
+      expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining("phase sweep complete"));
+    } finally {
+      clearTimeout(claimDeadline);
+      finishSweep?.();
+    }
+    await triggerDreamingServiceStop(api);
+    expectLogContains(logger.info, "phase sweep complete (workspaces=1");
   });
 
   it.each([{ label: "mixed outcomes", rejected: 1, promoted: 1 }])(
