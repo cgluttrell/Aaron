@@ -28,6 +28,7 @@ import { resolveMemoryPromotionFileMaxChars } from "./memory-budget.js";
 import type { PromotionRejectionCategory } from "./short-term-promotion-types.js";
 
 const RUNTIME_CRON_RECONCILE_INTERVAL_MS = 60_000;
+const DREAMING_STOP_JOIN_TIMEOUT_MS = 120_000;
 const HEARTBEAT_ISOLATED_SESSION_SUFFIX = ":heartbeat";
 
 type Logger = Pick<OpenClawPluginApi["logger"], "info" | "warn" | "error">;
@@ -589,7 +590,22 @@ export function registerShortTermPromotionDreaming(api: OpenClawPluginApi): void
       // Plugin replacement stops services, not Gateway hooks. Fence timers and
       // settle their work before the successor can own the same declaration.
       disposeDreaming();
-      await Promise.allSettled(dreamingTasks);
+      const joined = Promise.allSettled([...dreamingTasks]).then(() => true);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const finished = await Promise.race([
+          joined,
+          new Promise<false>((resolve) => {
+            timeout = setTimeout(() => resolve(false), DREAMING_STOP_JOIN_TIMEOUT_MS);
+            timeout.unref?.();
+          }),
+        ]);
+        if (!finished) {
+          api.logger.warn("memory-core: dreaming stop timed out waiting for background tasks");
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
     },
   });
 

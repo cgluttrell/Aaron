@@ -17,6 +17,7 @@ import {
   createHookRunner,
   createMockPluginRegistry,
   createPluginRuntimeMock,
+  type PluginHookRegistration,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { enqueueSystemEvent } from "openclaw/plugin-sdk/system-event-runtime";
 import { resetSystemEventsForTest } from "openclaw/plugin-sdk/test-fixtures";
@@ -41,6 +42,7 @@ const constants = {
   MANAGED_DREAMING_CRON_TAG: MANAGED_MEMORY_DREAMING_CRON_TAG,
   DREAMING_SYSTEM_EVENT_TEXT: MEMORY_DREAMING_SYSTEM_EVENT_TEXT,
   RUNTIME_CRON_RECONCILE_INTERVAL_MS: 60_000,
+  DREAMING_STOP_JOIN_TIMEOUT_MS: 120_000,
 };
 const { createTempWorkspace } = createMemoryCoreTestHarness();
 
@@ -267,10 +269,7 @@ function getBeforeAgentReplyHandler(onMock: ReturnType<typeof vi.fn>) {
     onMock.mock.calls.find(([eventName]) => eventName === "before_agent_reply"),
     "before_agent_reply hook was not registered",
   );
-  return call[1] as (
-    event: { cleanedBody: string },
-    ctx: { agentId?: string; trigger?: string; workspaceDir?: string; sessionKey?: string },
-  ) => Promise<unknown>;
+  return call[1] as PluginHookRegistration<"before_agent_reply">["handler"];
 }
 
 function getDreamingService(api: DreamingPluginApiTestDouble) {
@@ -929,9 +928,15 @@ describe("dreaming service reconciliation", () => {
     registerShortTermPromotionDreamingForTest(api);
     await triggerDreamingServiceStart(api, { config: api.config, getCron: () => harness.cron });
     const handler = getBeforeAgentReplyHandler(api.on);
-    const runner = createHookRunner(
-      createMockPluginRegistry([{ hookName: "before_agent_reply", handler }]),
-    );
+    const registry = createMockPluginRegistry([]);
+    registry.typedHooks.push({
+      pluginId: "test-plugin",
+      hookName: "before_agent_reply",
+      handler,
+      priority: 0,
+      source: "test",
+    } satisfies PluginHookRegistration<"before_agent_reply">);
+    const runner = createHookRunner(registry);
     let claimDeadline: ReturnType<typeof setTimeout> | undefined;
     try {
       const claim = runner.runBeforeAgentReply(
@@ -957,6 +962,52 @@ describe("dreaming service reconciliation", () => {
     }
     await triggerDreamingServiceStop(api);
     expectLogContains(logger.info, "phase sweep complete (workspaces=1");
+  });
+
+  it("does not block service stop when a background sweep never settles", async () => {
+    const workspaceDir = await createTempWorkspace("openclaw-dreaming-wedged-sweep-");
+    runDreamingSweepPhasesMock.mockClear();
+    let finishSweep: (() => void) | undefined;
+    runDreamingSweepPhasesMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishSweep = () => resolve({ degradedPhases: 0, pendingNarratives: 0 });
+        }),
+    );
+    const { api, harness, logger } = createDreamingTestContext({
+      config: createDreamingConfig(
+        { enabled: true, limit: 1 },
+        { agents: { defaults: { workspace: workspaceDir } } },
+      ),
+    });
+    registerShortTermPromotionDreamingForTest(api);
+    await triggerDreamingServiceStart(api, { config: api.config, getCron: () => harness.cron });
+    const claim = await getBeforeAgentReplyHandler(api.on)(
+      { cleanedBody: constants.DREAMING_SYSTEM_EVENT_TEXT },
+      { trigger: "cron", agentId: "main", workspaceDir },
+    );
+    expect(claim).toEqual({
+      handled: true,
+      reason: "memory-core: short-term dreaming processed",
+    });
+    expect(runDreamingSweepPhasesMock).toHaveBeenCalledOnce();
+
+    vi.useFakeTimers();
+    try {
+      let stopped = false;
+      const stopping = triggerDreamingServiceStop(api).then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(constants.DREAMING_STOP_JOIN_TIMEOUT_MS - 1);
+      expect(stopped).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(stopped).toBe(true);
+      await stopping;
+      expectLogContains(logger.warn, "dreaming stop timed out waiting for background tasks");
+    } finally {
+      finishSweep?.();
+      vi.useRealTimers();
+    }
   });
 
   it.each([{ label: "mixed outcomes", rejected: 1, promoted: 1 }])(
