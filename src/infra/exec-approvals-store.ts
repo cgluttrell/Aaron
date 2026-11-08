@@ -15,6 +15,7 @@ import {
   isStateDatabaseReadAdmissionInvalidatedError,
 } from "../state/openclaw-state-db-async-lifecycle.js";
 import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db-contract.js";
+import { assertExistingOpenClawStateRuntimeSchema } from "../state/openclaw-state-db-existing-schema.js";
 import { prepareOpenClawStateDirectReader } from "../state/openclaw-state-db-read-connection.js";
 import {
   executeExistingOpenClawStateRead,
@@ -60,6 +61,7 @@ import {
   snapshotFromExecApprovalsRow,
   writeExecApprovalsConfigRow,
 } from "./exec-approvals-sqlite.js";
+import { readSqliteSchemaCookie } from "./sqlite-schema-contract.js";
 import { hasSqliteWorkerOutcomeUnknown } from "./sqlite-worker-contract.js";
 import { createSqliteWorkerOperationAdmission } from "./sqlite-worker-operation-admission.js";
 import { createSqliteWorkerWriteAdmission } from "./sqlite-worker-store.js";
@@ -157,6 +159,10 @@ export function prepareExecApprovalsCurrentRead(
   context.admission.assertCurrent();
   assertNoPendingLegacyExecApprovals({ env: context.environment });
   const reader = prepareOpenClawStateDirectReader(context);
+  const schemaCookie = reader.read(({ db }) => readSqliteSchemaCookie(db));
+  if (typeof schemaCookie !== "number") {
+    throw new Error("Exec approvals schema admission has no schema cookie");
+  }
   const displayPath = resolveExecApprovalsDisplayPath(context.environment);
   const originalIdentity = { ...context.admission.identity };
   let active = { context, reader };
@@ -170,6 +176,7 @@ export function prepareExecApprovalsCurrentRead(
       return read(active.context, active.reader);
     } catch (error) {
       let staleAdmission = isStateDatabaseReadAdmissionInvalidatedError(error);
+      let staleIntegrity = false;
       if (
         !staleAdmission &&
         error instanceof Error &&
@@ -177,6 +184,7 @@ export function prepareExecApprovalsCurrentRead(
       ) {
         try {
           active.context.admission.assertCurrent();
+          staleIntegrity = true;
         } catch (admissionError) {
           if (!isStateDatabaseReadAdmissionInvalidatedError(admissionError)) {
             throw admissionError;
@@ -184,13 +192,13 @@ export function prepareExecApprovalsCurrentRead(
           staleAdmission = true;
         }
       }
-      // A schema change without a reseal revokes integrity but not the source
-      // admission; it must not revive an authorization prepared under old schema.
-      if (!staleAdmission) {
+      // A current read admission can still carry retired integrity proof. Only
+      // an unchanged schema can recover it; changed schema remains a denial.
+      if (!staleAdmission && !staleIntegrity) {
         throw error;
       }
-      // A reseal retires the prepared reader. Re-admit only the same physical
-      // policy owner; the caller still validates the freshly read policy before spawn.
+      // Re-admit only the same physical policy owner; the caller still validates
+      // the freshly read policy before spawn.
       const fresh = captureOpenClawStateReadWorkerContext({
         path: active.context.admission.databasePath,
         env: context.environment,
@@ -202,6 +210,26 @@ export function prepareExecApprovalsCurrentRead(
         fresh.existingSchemaPath !== context.existingSchemaPath
       ) {
         throw error;
+      }
+      if (staleIntegrity) {
+        // Only an unchanged catalog can recover a retired integrity revision.
+        // The schema owner re-verifies and publishes the pending proof once.
+        const database = openOpenClawStateDatabase({
+          path: fresh.admission.databasePath,
+          env: context.environment,
+        });
+        if (readSqliteSchemaCookie(database.db) !== schemaCookie || !fresh.stateIntegrity) {
+          throw error;
+        }
+        assertExistingOpenClawStateRuntimeSchema(
+          database.db,
+          database.path,
+          fresh.stateIntegrity,
+          "verify",
+        );
+        if (readSqliteSchemaCookie(database.db) !== schemaCookie) {
+          throw error;
+        }
       }
       const freshReader = prepareOpenClawStateDirectReader(fresh);
       const file = read(fresh, freshReader);
