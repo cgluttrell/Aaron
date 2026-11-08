@@ -11,7 +11,10 @@ import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
 } from "../state/openclaw-state-db.js";
-import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
+import {
+  captureOpenClawStateReadWorkerContext,
+  captureOpenClawStateWorkerContext,
+} from "../state/openclaw-state-worker-context.js";
 import { executeOpenClawStateWorker } from "../state/openclaw-state-worker-store.js";
 import { listProfiles } from "../state/user-profile-reads.js";
 import { commitExecAuthorizationLocked } from "./exec-approvals-authorization.js";
@@ -177,13 +180,31 @@ it("revokes prepared exec authority when a worker actually creates missing schem
   await listAgentProvenance({ env });
   expect(source.db.prepare("PRAGMA schema_version").get()).not.toEqual(before);
   expect(assertCurrent).toThrow("Direct shared-state reader requires current integrity admission");
+  const supervisor = createProcessSupervisor();
+  try {
+    await expect(
+      supervisor.spawn({
+        mode: "child",
+        argv: [process.execPath, "-e", "process.stdout.write('should-not-run')"],
+        beforeSpawn: assertCurrent,
+        cleanupOwnership: "external",
+        exactEnv: true,
+      }),
+    ).rejects.toThrow("Direct shared-state reader requires current integrity admission");
+  } finally {
+    await supervisor.shutdown();
+  }
 });
 
 it("re-admits the real launch guard after a state close reseals its integrity", async () => {
   const { env } = fixture();
   const assertCurrent = await prepareExec();
+  const admitted = captureOpenClawStateReadWorkerContext({ env });
   await closeOpenClawStateDatabaseAsync();
   openOpenClawStateDatabase({ env });
+  expect(() => admitted.admission.assertCurrent()).toThrow(
+    "OpenClaw state database read admission changed",
+  );
   const supervisor = createProcessSupervisor();
   try {
     const run = await supervisor.spawn({
@@ -194,6 +215,58 @@ it("re-admits the real launch guard after a state close reseals its integrity", 
       exactEnv: true,
     });
     expect(await run.wait()).toMatchObject({ reason: "exit", exitCode: 0, stdout: "synthetic" });
+  } finally {
+    await supervisor.shutdown();
+  }
+});
+
+it("launches after an unchanged integrity revision advances with current read admission", async () => {
+  const { env } = fixture();
+  const assertCurrent = await prepareExec();
+  const admitted = captureOpenClawStateReadWorkerContext({ env });
+  expect(admitted.stateIntegrity).toBeDefined();
+  Atomics.add(new BigInt64Array(admitted.stateIntegrity!.revision), 0, 1n);
+  expect(() => admitted.admission.assertCurrent()).not.toThrow();
+  expect(Atomics.load(new BigInt64Array(admitted.stateIntegrity!.revision), 0)).not.toBe(
+    admitted.stateIntegrity!.epoch,
+  );
+  const supervisor = createProcessSupervisor();
+  try {
+    const run = await supervisor.spawn({
+      mode: "child",
+      argv: [process.execPath, "-e", "process.stdout.write('synthetic')"],
+      beforeSpawn: assertCurrent,
+      cleanupOwnership: "external",
+      exactEnv: true,
+    });
+    expect(await run.wait()).toMatchObject({ reason: "exit", exitCode: 0, stdout: "synthetic" });
+  } finally {
+    await supervisor.shutdown();
+  }
+});
+
+it("refuses a revoked policy after recovering an unchanged integrity revision", async () => {
+  const { env } = fixture();
+  const assertCurrent = await prepareExec();
+  const admitted = captureOpenClawStateReadWorkerContext({ env });
+  expect(admitted.stateIntegrity).toBeDefined();
+  Atomics.add(new BigInt64Array(admitted.stateIntegrity!.revision), 0, 1n);
+  const source = openOpenClawStateDatabase({ env });
+  writeExecApprovalsConfigRow({
+    db: source.db,
+    file: { version: 1, defaults: { security: "deny", ask: "on-miss" } },
+  });
+  const supervisor = createProcessSupervisor();
+  try {
+    await expect(
+      supervisor.spawn({
+        mode: "child",
+        argv: [process.execPath, "-e", "process.stdout.write('should-not-run')"],
+        beforeSpawn: assertCurrent,
+        cleanupOwnership: "external",
+        exactEnv: true,
+      }),
+    ).rejects.toThrow("Exec approval changed before execution");
   } finally {
     await supervisor.shutdown();
   }

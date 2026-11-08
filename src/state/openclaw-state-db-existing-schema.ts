@@ -85,7 +85,7 @@ export function assertExistingOpenClawStateRuntimeSchema(
         cached?.unregister();
         validatedSchemas.delete(database);
       }
-      if (cached?.cookie !== currentCookie || integrityPolicy === "require-proof") {
+      if (cached?.cookie !== currentCookie || integrityPolicy !== undefined) {
         publishIntegrity = assertOpenClawStateRuntimeIntegrity(
           database,
           pathname,
