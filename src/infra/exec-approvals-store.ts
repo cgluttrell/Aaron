@@ -10,7 +10,10 @@ import { normalizeAgentId } from "../routing/session-key.js";
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import type { AgentDeletionWorkerAuthority } from "../state/agent-deletion-worker.types.js";
-import { getOpenClawDatabaseMaintenanceScope } from "../state/openclaw-state-db-async-lifecycle.js";
+import {
+  getOpenClawDatabaseMaintenanceScope,
+  isStateDatabaseReadAdmissionInvalidatedError,
+} from "../state/openclaw-state-db-async-lifecycle.js";
 import type { OpenClawStateDatabaseOptions } from "../state/openclaw-state-db-contract.js";
 import { prepareOpenClawStateDirectReader } from "../state/openclaw-state-db-read-connection.js";
 import {
@@ -25,7 +28,10 @@ import {
   resolveDatabasePath,
   resolveOpenClawStateDirForDatabasePath,
 } from "../state/openclaw-state-db.paths.js";
-import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
+import {
+  captureOpenClawStateWorkerContext,
+  captureOpenClawStateReadWorkerContext,
+} from "../state/openclaw-state-worker-context.js";
 import type { OpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.types.js";
 import { runOpenClawStateWorkerOperation } from "../state/openclaw-state-worker-store.js";
 import type { ExecAuthorizationWorkerOperations } from "./exec-approvals-authorization.worker-contract.js";
@@ -152,10 +158,56 @@ export function prepareExecApprovalsCurrentRead(
   assertNoPendingLegacyExecApprovals({ env: context.environment });
   const reader = prepareOpenClawStateDirectReader(context);
   const displayPath = resolveExecApprovalsDisplayPath(context.environment);
-  return () => {
-    context.admission.assertCurrent();
+  const originalIdentity = { ...context.admission.identity };
+  let active = { context, reader };
+  const read = (current: OpenClawStateWorkerContext, currentReader: typeof reader) => {
+    current.admission.assertCurrent();
     assertNoPendingLegacyExecApprovals({ env: context.environment });
-    return reader.read(({ db }) => snapshotFromExecApprovalsDatabase(db, displayPath).file);
+    return currentReader.read(({ db }) => snapshotFromExecApprovalsDatabase(db, displayPath).file);
+  };
+  return () => {
+    try {
+      return read(active.context, active.reader);
+    } catch (error) {
+      let staleAdmission = isStateDatabaseReadAdmissionInvalidatedError(error);
+      if (
+        !staleAdmission &&
+        error instanceof Error &&
+        error.message === "Direct shared-state reader requires current integrity admission"
+      ) {
+        try {
+          active.context.admission.assertCurrent();
+        } catch (admissionError) {
+          if (!isStateDatabaseReadAdmissionInvalidatedError(admissionError)) {
+            throw admissionError;
+          }
+          staleAdmission = true;
+        }
+      }
+      // A schema change without a reseal revokes integrity but not the source
+      // admission; it must not revive an authorization prepared under old schema.
+      if (!staleAdmission) {
+        throw error;
+      }
+      // A reseal retires the prepared reader. Re-admit only the same physical
+      // policy owner; the caller still validates the freshly read policy before spawn.
+      const fresh = captureOpenClawStateReadWorkerContext({
+        path: active.context.admission.databasePath,
+        env: context.environment,
+      });
+      if (
+        fresh.admission.identity.key !== originalIdentity.key ||
+        fresh.admission.identity.birthtime !== originalIdentity.birthtime ||
+        fresh.maintenanceScope !== context.maintenanceScope ||
+        fresh.existingSchemaPath !== context.existingSchemaPath
+      ) {
+        throw error;
+      }
+      const freshReader = prepareOpenClawStateDirectReader(fresh);
+      const file = read(fresh, freshReader);
+      active = { context: fresh, reader: freshReader };
+      return file;
+    }
   };
 }
 

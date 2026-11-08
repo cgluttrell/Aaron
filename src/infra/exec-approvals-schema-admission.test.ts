@@ -4,6 +4,7 @@ import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { AuditWriterRequest } from "../audit/audit-event-writer.types.js";
 import { prepareExecutionIdentityContextAtAdmission } from "../audit/execution-identity.test-support.js";
 import { insertOperatorApproval } from "../gateway/operator-approval-store.js";
+import { createProcessSupervisor } from "../process/supervisor/supervisor.js";
 import { listAgentProvenance } from "../state/agent-provenance.js";
 import {
   closeOpenClawStateDatabaseAsync,
@@ -176,4 +177,49 @@ it("revokes prepared exec authority when a worker actually creates missing schem
   await listAgentProvenance({ env });
   expect(source.db.prepare("PRAGMA schema_version").get()).not.toEqual(before);
   expect(assertCurrent).toThrow("Direct shared-state reader requires current integrity admission");
+});
+
+it("re-admits the real launch guard after a state close reseals its integrity", async () => {
+  const { env } = fixture();
+  const assertCurrent = await prepareExec();
+  await closeOpenClawStateDatabaseAsync();
+  openOpenClawStateDatabase({ env });
+  const supervisor = createProcessSupervisor();
+  try {
+    const run = await supervisor.spawn({
+      mode: "child",
+      argv: [process.execPath, "-e", "process.stdout.write('synthetic')"],
+      beforeSpawn: assertCurrent,
+      cleanupOwnership: "external",
+      exactEnv: true,
+    });
+    expect(await run.wait()).toMatchObject({ reason: "exit", exitCode: 0, stdout: "synthetic" });
+  } finally {
+    await supervisor.shutdown();
+  }
+});
+
+it("still refuses a revoked policy after the launch guard re-admits", async () => {
+  const { env } = fixture();
+  const assertCurrent = await prepareExec();
+  await closeOpenClawStateDatabaseAsync();
+  const source = openOpenClawStateDatabase({ env });
+  writeExecApprovalsConfigRow({
+    db: source.db,
+    file: { version: 1, defaults: { security: "deny", ask: "on-miss" } },
+  });
+  const supervisor = createProcessSupervisor();
+  try {
+    await expect(
+      supervisor.spawn({
+        mode: "child",
+        argv: [process.execPath, "-e", "process.stdout.write('synthetic')"],
+        beforeSpawn: assertCurrent,
+        cleanupOwnership: "external",
+        exactEnv: true,
+      }),
+    ).rejects.toThrow("Exec approval changed before execution");
+  } finally {
+    await supervisor.shutdown();
+  }
 });
