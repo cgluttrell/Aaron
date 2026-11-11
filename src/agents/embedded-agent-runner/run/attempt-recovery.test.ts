@@ -615,6 +615,23 @@ describe("recoverEmbeddedRunAttempt", () => {
     }
   });
 
+  it("surfaces an unsafe post-tool 429 past the configured wait bound without replay or sleep", async () => {
+    vi.mocked(sleepWithAbort).mockClear();
+    const { recovery, continueFromCurrentTranscript, failoverRetryController } =
+      await recoverAfterTransportDrop({
+        config: { agents: { defaults: { retry: { maxUnsafeWaitMs: 600_000 } } } },
+        errorMessage: "429 rate_limit_exceeded; Retry-After: 6581",
+        fallbackConfigured: true,
+        replaySafe: false,
+        providerRetryMaxDelayMs: 60_000,
+        diagnostics: [],
+      });
+    expect(recovery.action).toBe("proceed");
+    expect(sleepWithAbort).not.toHaveBeenCalled();
+    expect(continueFromCurrentTranscript).not.toHaveBeenCalled();
+    expect(failoverRetryController.transientRetryCount).toBe(0);
+  });
+
   it("preserves the larger header floor after an SDK failure becomes an assistant message", async () => {
     vi.mocked(sleepWithAbort).mockClear();
     const projection = projectProviderError(

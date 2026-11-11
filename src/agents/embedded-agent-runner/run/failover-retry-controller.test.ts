@@ -43,6 +43,7 @@ function createController(
   fallbackConfigured = false,
   abortSignal?: AbortSignal,
   onRetryWait?: ControllerInput["runInput"]["runParams"]["onRetryWait"],
+  unsafeWaitCapMs?: number,
 ) {
   return createEmbeddedRunFailoverRetryController({
     runInput: {
@@ -50,6 +51,10 @@ function createController(
         runId: "run:failover-retry-controller-test",
         abortSignal,
         onRetryWait,
+        config:
+          unsafeWaitCapMs === undefined
+            ? undefined
+            : { agents: { defaults: { retry: { maxUnsafeWaitMs: unsafeWaitCapMs } } } },
       } as ControllerInput["runInput"]["runParams"],
       globalLane: "test",
       agentDir: "/tmp/openclaw-failover-retry-controller-test",
@@ -267,6 +272,48 @@ describe("createEmbeddedRunFailoverRetryController", () => {
       }
     },
   );
+
+  it("declines an unsafe 429 floor beyond the configured cap without sleeping or retrying", async () => {
+    const controller = createController(
+      vi.fn(async () => false),
+      true,
+      undefined,
+      undefined,
+      600_000,
+    );
+    const onRetry = vi.fn();
+    await expect(
+      controller.maybeRetryTransient({
+        reason: "rate_limit",
+        retryAfterMs: 6_581_000,
+        maxRetryDelayMs: 60_000,
+        failoverEligible: false,
+        onRetry,
+      }),
+    ).resolves.toBe(false);
+    expect(mocks.sleepWithAbort).not.toHaveBeenCalled();
+    expect(onRetry).not.toHaveBeenCalled();
+    expect(controller.transientRetryCount).toBe(0);
+  });
+
+  it("leaves replay-safe rate limits to the existing fallback cap", async () => {
+    const controller = createController(
+      vi.fn(async () => false),
+      true,
+      undefined,
+      undefined,
+      10_000,
+    );
+    await expect(
+      controller.maybeRetryTransient({
+        reason: "rate_limit",
+        retryAfterMs: 20_000,
+        maxRetryDelayMs: 30_000,
+        failoverEligible: true,
+      }),
+    ).resolves.toBe(true);
+    expect(mocks.sleepWithAbort).toHaveBeenCalledExactlyOnceWith(20_000, undefined);
+  });
 
   it.each([false, true])(
     "declines an unrepresentable provider floor (projected=%s)",
