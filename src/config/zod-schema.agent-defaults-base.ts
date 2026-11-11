@@ -207,6 +207,12 @@ export const AgentDefaultsBaseSchema = z.strictObject({
     })
     .optional(),
   embeddedAgent: EmbeddedAgentConfigSchema.optional(),
+  retry: z
+    .strictObject({
+      /** Maximum same-model 429 wait after replay-unsafe tool activity; unset keeps provider timing. */
+      maxUnsafeWaitMs: z.number().int().positive().optional(),
+    })
+    .optional(),
   thinkingDefault: AgentThinkingLevelSchema.optional(),
   fastModeDefault: z.union([z.boolean(), z.literal("auto"), z.literal("ultrafast")]).optional(),
   verboseDefault: z.union([z.literal("off"), z.literal("on"), z.literal("full")]).optional(),
