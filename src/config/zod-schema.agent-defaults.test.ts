@@ -22,6 +22,12 @@ function expectSchemaFailurePath(result: SchemaParseResult, prefix: string): voi
 }
 
 describe("agent defaults schema", () => {
+  it("accepts a bounded unsafe retry wait and rejects nonpositive bounds", () => {
+    expect(
+      AgentDefaultsSchema.parse({ retry: { maxUnsafeWaitMs: 600_000 } })?.retry?.maxUnsafeWaitMs,
+    ).toBe(600_000);
+    expect(AgentDefaultsSchema.safeParse({ retry: { maxUnsafeWaitMs: 0 } }).success).toBe(false);
+  });
   it("accepts bounded explicit picker runtimes only on exact model refs", () => {
     const models = {
       "openai/gpt-5.6-sol": { agentRuntime: { id: "openclaw" }, pickerRuntimes: ["codex"] },
