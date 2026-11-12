@@ -245,6 +245,31 @@ it("launches after an unchanged integrity revision advances with current read ad
   }
 });
 
+it("launches across two unchanged integrity revisions with an unpublished prepare-time proof and warm worker", async () => {
+  const { env } = fixture();
+  await useFeature("roster", env, "warm-worker");
+  const warm = captureOpenClawStateReadWorkerContext({ env });
+  expect(warm.stateIntegrity).toBeDefined();
+  Atomics.add(new BigInt64Array(warm.stateIntegrity!.revision), 0, 1n);
+  const firstBump = captureOpenClawStateReadWorkerContext({ env });
+  expect(Atomics.load(new BigInt64Array(firstBump.stateIntegrity!.proof), 0)).toBe(-1n);
+  const assertCurrent = await prepareExec();
+  Atomics.add(new BigInt64Array(firstBump.stateIntegrity!.revision), 0, 1n);
+  const supervisor = createProcessSupervisor();
+  try {
+    const run = await supervisor.spawn({
+      mode: "child",
+      argv: [process.execPath, "-e", "process.stdout.write('synthetic')"],
+      beforeSpawn: assertCurrent,
+      cleanupOwnership: "external",
+      exactEnv: true,
+    });
+    expect(await run.wait()).toMatchObject({ reason: "exit", exitCode: 0, stdout: "synthetic" });
+  } finally {
+    await supervisor.shutdown();
+  }
+});
+
 it("refuses a revoked policy after recovering an unchanged integrity revision", async () => {
   const { env } = fixture();
   const assertCurrent = await prepareExec();
