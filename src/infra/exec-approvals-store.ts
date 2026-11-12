@@ -159,10 +159,12 @@ export function prepareExecApprovalsCurrentRead(
   context.admission.assertCurrent();
   assertNoPendingLegacyExecApprovals({ env: context.environment });
   const reader = prepareOpenClawStateDirectReader(context);
-  const schemaCookie = reader.read(({ db }) => readSqliteSchemaCookie(db));
-  if (typeof schemaCookie !== "number") {
-    throw new Error("Exec approvals schema admission has no schema cookie");
-  }
+  // A published integrity proof already binds the verified schema cookie.
+  // New sources may not have one yet; they cannot recover retired integrity.
+  const integrity = context.stateIntegrity;
+  const proof = integrity && Atomics.load(new BigInt64Array(integrity.proof), 0);
+  const schemaCookie =
+    proof !== undefined && proof !== -1n ? Number(BigInt.asUintN(32, proof)) : undefined;
   const displayPath = resolveExecApprovalsDisplayPath(context.environment);
   const originalIdentity = { ...context.admission.identity };
   let active = { context, reader };
@@ -218,7 +220,11 @@ export function prepareExecApprovalsCurrentRead(
           path: fresh.admission.databasePath,
           env: context.environment,
         });
-        if (readSqliteSchemaCookie(database.db) !== schemaCookie || !fresh.stateIntegrity) {
+        if (
+          schemaCookie === undefined ||
+          readSqliteSchemaCookie(database.db) !== schemaCookie ||
+          !fresh.stateIntegrity
+        ) {
           throw error;
         }
         assertExistingOpenClawStateRuntimeSchema(
