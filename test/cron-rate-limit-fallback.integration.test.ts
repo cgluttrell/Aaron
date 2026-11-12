@@ -40,7 +40,8 @@ vi.mock("../src/process/dispatch-pressure-guard.js", async (importOriginal) => (
 }));
 
 // Attached devices are outside these scheduled model journeys.
-vi.mock("../src/agents/node-exec-availability.js", () => ({
+vi.mock("../src/agents/node-exec-availability.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/agents/node-exec-availability.js")>()),
   loadNodeExecAvailability: async () => ({ cacheKey: "no-nodes", isAvailable: () => false }),
 }));
 
