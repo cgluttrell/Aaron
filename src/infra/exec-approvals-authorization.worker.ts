@@ -1,4 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
+import { getSqliteWorkerStateIntegrityAdmission } from "../infra/sqlite-worker-state-context.js";
+import { assertExistingOpenClawStateRuntimeSchema } from "../state/openclaw-state-db-existing-schema.js";
 import type {
   WorkerOperationHandlers,
   WorkerWriteOperationContext,
@@ -57,6 +59,15 @@ function applyAuthorizationBatch(
   return { snapshot: current, outcomes };
 }
 
+function publishMissingIntegrityProof(db: DatabaseSync, pathname: string): void {
+  const integrity = getSqliteWorkerStateIntegrityAdmission();
+  if (integrity && Atomics.load(new BigInt64Array(integrity.proof), 0) === -1n) {
+    // A warm worker can retain its handle across epochs. Verify on that worker
+    // before the caller prepares a launch guard; preparation itself stays SQL-free.
+    assertExistingOpenClawStateRuntimeSchema(db, pathname, integrity, "verify");
+  }
+}
+
 export function commitExecAuthorizationsInWorker(
   input: { items: ExecAuthorizationCommitInput[] },
   context: WorkerWriteOperationContext,
@@ -70,7 +81,8 @@ export function commitExecAuthorizationsInWorker(
       (item.allowAlwaysDecision !== undefined && item.allowAlwaysDecision.kind !== "one-shot"),
   );
   if (!mayWrite) {
-    const { db } = context.open();
+    const { db, path } = context.open();
+    publishMissingIntegrityProof(db, path);
     return applyAuthorizationBatch(
       db,
       snapshotFromExecApprovalsDatabase(db, displayPath),
@@ -78,7 +90,8 @@ export function commitExecAuthorizationsInWorker(
     ).outcomes;
   }
   return context.write(
-    ({ db }) => {
+    ({ db, path }) => {
+      publishMissingIntegrityProof(db, path);
       requestSqliteWorkerOperationAdmission({ stage: "transaction", facts: undefined });
       const current = snapshotFromExecApprovalsDatabase(db, displayPath);
       const committed = applyAuthorizationBatch(db, current, input.items);
