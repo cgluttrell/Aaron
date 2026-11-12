@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const logMocks = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn() }));
-vi.mock("../logging/subsystem.js", () => ({
+vi.mock("../logging/subsystem.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../logging/subsystem.js")>()),
   createSubsystemLogger: () => ({
     info: logMocks.info,
     warn: logMocks.warn,
