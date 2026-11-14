@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+import { createDeferred } from "../../test/helpers/promise.js";
+import { withAgentDatabaseStartupAdmission } from "../state/agent-database-startup.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { CronService } from "./service.js";
-import { setupCronServiceSuite } from "./service.test-harness.js";
+import { allowDispatchPressureForTest, setupCronServiceSuite } from "./service.test-harness.js";
+import { stop } from "./service/ops-lifecycle.js";
+import { remove, update } from "./service/ops-mutations.js";
 import { createCronServiceState, type CronServiceDeps } from "./service/state.js";
+import { onTimer } from "./service/timer-scheduler.js";
 import { runMissedJobs } from "./service/timer.js";
 import { loadCronStore, saveCronStore } from "./store.js";
 import type { CronJob } from "./types.js";
@@ -13,6 +18,367 @@ const { logger, makeStorePath } = setupCronServiceSuite({
 });
 const time = (value: string) => Date.parse(value);
 
+describe("pending agent admission for missed command occurrences", () => {
+  const restart = time("2025-12-13T17:00:00Z");
+  const schedules = [
+    {
+      id: "digest",
+      expr: "45 7 * * *",
+      last: "2025-12-12T07:45:00Z",
+      next: "2025-12-14T07:45:00Z",
+    },
+    { id: "drift", expr: "0 8 * * *", last: "2025-12-12T08:00:00Z", next: "2025-12-14T08:00:00Z" },
+    {
+      id: "sweep",
+      expr: "5 9,17 * * *",
+      last: "2025-12-12T17:05:00Z",
+      next: "2025-12-13T17:05:00Z",
+    },
+  ] as const;
+  const command = (entry: (typeof schedules)[number]) =>
+    job({
+      id: entry.id,
+      agentId: "main",
+      schedule: { kind: "cron", expr: entry.expr, tz: "UTC" },
+      sessionTarget: "isolated",
+      wakeMode: "now",
+      payload: { kind: "command", argv: ["echo", entry.id] },
+      state: {
+        nextRunAtMs: time(entry.next),
+        lastRunAtMs: time(entry.last),
+        lastRunStatus: "ok",
+      },
+    });
+
+  it("holds all three exact occurrences until admission, then executes each once", async () => {
+    vi.setSystemTime(restart);
+    const { store, deps } = await fixture(schedules.map(command), { nowMs: () => restart });
+    const pending = createDeferred<void>();
+    const preparationEntered = createDeferred<"preparation">();
+    const commandEntered = createDeferred<"command">();
+    try {
+      await withAgentDatabaseStartupAdmission(async (admission) => {
+        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation(() => {
+          preparationEntered.resolve("preparation");
+          return pending.promise;
+        });
+        const runCommandJob = vi.fn(
+          async (_input: Parameters<NonNullable<CronServiceDeps["runCommandJob"]>>[0]) => {
+            commandEntered.resolve("command");
+            return { status: "ok" as const };
+          },
+        );
+        deps.runCommandJob = runCommandJob;
+        const state = createCronServiceState(deps);
+        const catchup = runMissedJobs(state, { deferAgentWork: true });
+        // Stable executes a command before consulting admission. Race the two
+        // observable events so that failure is deterministic and timer-free.
+        expect(await Promise.race([preparationEntered.promise, commandEntered.promise])).toBe(
+          "preparation",
+        );
+        // Drive a full scheduler turn while preparation remains unresolved.
+        // A reservation alone is insufficient proof: stable can run immediately.
+        await onTimer(state);
+        expect(deps.runCommandJob).not.toHaveBeenCalled();
+        const waitingJobs = (await loadCronStore(store.storePath)).jobs;
+        expect(waitingJobs.every((entry) => entry.state.queuedAtMs !== undefined)).toBe(true);
+        for (const entry of waitingJobs) {
+          expect(entry.state.nextRunAtMs).toBe(
+            time(schedules.find((item) => item.id === entry.id)!.next),
+          );
+          expect(entry.state.lastRunStatus).toBe("ok");
+        }
+        pending.resolve();
+        await catchup;
+        const jobs = (await loadCronStore(store.storePath)).jobs;
+        expect(deps.runCommandJob).toHaveBeenCalledTimes(3);
+        expect(runCommandJob.mock.calls.map(([input]) => input.job.id).toSorted()).toEqual(
+          schedules.map((entry) => entry.id).toSorted(),
+        );
+        for (const entry of schedules) {
+          const current = jobs.find((item) => item.id === entry.id);
+          expect(current?.state).toMatchObject({
+            lastRunAtMs: restart,
+            lastRunStatus: "ok",
+            nextRunAtMs: time(entry.next),
+          });
+        }
+        stop(state);
+      });
+    } finally {
+      pending.resolve();
+      await store.cleanup();
+    }
+  });
+
+  it("keeps unrelated timed command jobs runnable during the admission wait", async () => {
+    vi.setSystemTime(restart);
+    let now = restart;
+    const healthy = job({
+      id: "healthy",
+      agentId: "other",
+      schedule: { kind: "every", everyMs: 60_000, anchorMs: restart + 60_000 },
+      sessionTarget: "isolated",
+      payload: { kind: "command", argv: ["echo", "healthy"] },
+      state: { nextRunAtMs: restart + 60_000 },
+    });
+    const { store, deps } = await fixture([command(schedules[0]), healthy], {
+      nowMs: () => now,
+    });
+    const pending = createDeferred<void>();
+    try {
+      await withAgentDatabaseStartupAdmission(async (admission) => {
+        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation((agentId) =>
+          agentId === "main" ? pending.promise : undefined,
+        );
+        const state = createCronServiceState(deps);
+        const catchup = runMissedJobs(state, { deferAgentWork: true });
+        await vi.waitFor(async () => {
+          expect(
+            (await loadCronStore(store.storePath)).jobs.find((entry) => entry.id === "digest")
+              ?.state.queuedAtMs,
+          ).toBeDefined();
+        });
+        now += 60_000;
+        await onTimer(state);
+        expect(deps.runCommandJob).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({ job: expect.objectContaining({ id: "healthy" }) }),
+        );
+        pending.resolve();
+        await catchup;
+        expect(deps.runCommandJob).toHaveBeenCalledTimes(2);
+        stop(state);
+      });
+    } finally {
+      pending.resolve();
+      await store.cleanup();
+    }
+  });
+
+  it("does not let a still-pending overdue command run from a timer tick", async () => {
+    vi.setSystemTime(restart);
+    const overdue = command(schedules[0]);
+    overdue.state.nextRunAtMs = time("2025-12-13T07:45:00Z");
+    const { store, deps } = await fixture([overdue], { nowMs: () => restart });
+    const pending = createDeferred<void>();
+    try {
+      await withAgentDatabaseStartupAdmission(async (admission) => {
+        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation(() => pending.promise);
+        const state = createCronServiceState(deps);
+        const catchup = runMissedJobs(state, { deferAgentWork: true });
+        await vi.waitFor(async () => {
+          expect((await loadCronStore(store.storePath)).jobs[0]?.state.queuedAtMs).toBeDefined();
+        });
+        await onTimer(state);
+        expect(deps.runCommandJob).not.toHaveBeenCalled();
+        pending.resolve();
+        await catchup;
+        expect(deps.runCommandJob).toHaveBeenCalledOnce();
+        stop(state);
+      });
+    } finally {
+      pending.resolve();
+      await store.cleanup();
+    }
+  });
+
+  it("settles unreserved overflow before opening the timer during admission", async () => {
+    vi.setSystemTime(restart);
+    const pendingJob = command(schedules[0]);
+    pendingJob.state.nextRunAtMs = time("2025-12-13T07:45:00Z");
+    const overflow = command(schedules[1]);
+    overflow.agentId = "other";
+    overflow.state.nextRunAtMs = time("2025-12-13T08:00:00Z");
+    const { store, deps } = await fixture([pendingJob, overflow], {
+      nowMs: () => restart,
+      maxMissedJobsPerRestart: 0,
+      missedJobStaggerMs: 5_000,
+    });
+    const pending = createDeferred<void>();
+    try {
+      await withAgentDatabaseStartupAdmission(async (admission) => {
+        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation((agentId) =>
+          agentId === "main" ? pending.promise : undefined,
+        );
+        const state = createCronServiceState(deps);
+        const catchup = runMissedJobs(state, { deferAgentWork: true });
+        await vi.waitFor(async () => {
+          const jobs = (await loadCronStore(store.storePath)).jobs;
+          expect(jobs.find((entry) => entry.id === "digest")?.state.queuedAtMs).toBeDefined();
+          expect(jobs.find((entry) => entry.id === "drift")?.state.startupCatchupAtMs).toBe(
+            restart + 5_000,
+          );
+        });
+        await onTimer(state);
+        expect(deps.runCommandJob).not.toHaveBeenCalled();
+        pending.resolve();
+        await catchup;
+        expect(deps.runCommandJob).toHaveBeenCalledOnce();
+        stop(state);
+      });
+    } finally {
+      pending.resolve();
+      await store.cleanup();
+    }
+  });
+
+  it("admits one pending agent without waiting for another", async () => {
+    vi.setSystemTime(restart);
+    const second = { ...command(schedules[1]), agentId: "second" };
+    const { store, deps } = await fixture([command(schedules[0]), second], {
+      nowMs: () => restart,
+    });
+    const firstReady = createDeferred<void>();
+    const secondReady = createDeferred<void>();
+    try {
+      await withAgentDatabaseStartupAdmission(async (admission) => {
+        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation((agentId) =>
+          agentId === "second" ? secondReady.promise : firstReady.promise,
+        );
+        const state = createCronServiceState(deps);
+        const catchup = runMissedJobs(state, { deferAgentWork: true });
+        await vi.waitFor(async () => {
+          expect(
+            (await loadCronStore(store.storePath)).jobs.every(
+              (entry) => entry.state.queuedAtMs !== undefined,
+            ),
+          ).toBe(true);
+        });
+        secondReady.resolve();
+        await vi.waitFor(() => expect(deps.runCommandJob).toHaveBeenCalledOnce());
+        expect(deps.runCommandJob).toHaveBeenCalledWith(
+          expect.objectContaining({ job: expect.objectContaining({ id: "drift" }) }),
+        );
+        firstReady.resolve();
+        await catchup;
+        expect(deps.runCommandJob).toHaveBeenCalledTimes(2);
+        stop(state);
+      });
+    } finally {
+      firstReady.resolve();
+      secondReady.resolve();
+      await store.cleanup();
+    }
+  });
+
+  it.each(["disabled", "deleted"] as const)(
+    "does not revive a %s command while admission waits",
+    async (change) => {
+      vi.setSystemTime(restart);
+      const { store, deps } = await fixture([command(schedules[0])], { nowMs: () => restart });
+      const pending = createDeferred<void>();
+      try {
+        await withAgentDatabaseStartupAdmission(async (admission) => {
+          vi.spyOn(admission, "waitForAgentPreparation").mockImplementation(() => pending.promise);
+          const state = createCronServiceState(deps);
+          const catchup = runMissedJobs(state, { deferAgentWork: true });
+          await vi.waitFor(async () => {
+            expect((await loadCronStore(store.storePath)).jobs[0]?.state.queuedAtMs).toBeDefined();
+          });
+          if (change === "disabled") {
+            await update(state, "digest", { enabled: false });
+          } else {
+            await remove(state, "digest");
+          }
+          pending.resolve();
+          await catchup;
+          expect(deps.runCommandJob).not.toHaveBeenCalled();
+          const jobs = (await loadCronStore(store.storePath)).jobs;
+          expect(change === "deleted" ? jobs.length === 0 : jobs[0]?.enabled === false).toBe(true);
+          stop(state);
+        });
+      } finally {
+        pending.resolve();
+        await store.cleanup();
+      }
+    },
+  );
+
+  it.each(["failure", "schedule-edit", "stop"] as const)(
+    "handles admission wait %s without running the retired command",
+    async (scenario) => {
+      vi.setSystemTime(restart);
+      let available = true;
+      let now = restart;
+      const { store, deps } = await fixture([command(schedules[0])], {
+        nowMs: () => now,
+        isAgentAvailable: () => available,
+      });
+      const pending = createDeferred<void>();
+      try {
+        await withAgentDatabaseStartupAdmission(async (admission) => {
+          let waiting = true;
+          vi.spyOn(admission, "waitForAgentPreparation").mockImplementation((_agentId, options) => {
+            if (!waiting) {
+              return undefined;
+            }
+            options?.signal?.addEventListener(
+              "abort",
+              () => pending.reject(options?.signal?.reason),
+              { once: true },
+            );
+            return pending.promise;
+          });
+          const state = createCronServiceState(deps);
+          const catchup = runMissedJobs(state, { deferAgentWork: true });
+          await vi.waitFor(async () => {
+            expect((await loadCronStore(store.storePath)).jobs[0]?.state.queuedAtMs).toBeDefined();
+          });
+          if (scenario === "schedule-edit") {
+            await update(state, "digest", {
+              schedule: { kind: "cron", expr: "30 10 * * *", tz: "UTC" },
+            });
+            pending.resolve();
+          } else if (scenario === "stop") {
+            stop(state);
+            waiting = false;
+          } else {
+            available = false;
+            pending.reject(new Error("database preparation failed"));
+          }
+          await catchup;
+          expect(deps.runCommandJob).not.toHaveBeenCalled();
+          const current = (await loadCronStore(store.storePath)).jobs[0];
+          if (scenario === "failure") {
+            expect(current?.state.lastRunStatus).toBe("error");
+            expect(current?.state.lastError).toContain("database preparation failed");
+            expect(current?.state.consecutiveErrors).toBe(1);
+            expect(current?.state.nextRunAtMs).toBe(restart + 60_000);
+            expect(current?.state.startupCatchupAtMs).toBe(restart + 60_000);
+            stop(state);
+            waiting = false;
+            available = true;
+            const restarted = createCronServiceState(deps);
+            await runMissedJobs(restarted);
+            expect(deps.runCommandJob).not.toHaveBeenCalled();
+            now += 60_000;
+            await onTimer(restarted);
+            await onTimer(restarted);
+            expect(deps.runCommandJob).toHaveBeenCalledOnce();
+            expect((await loadCronStore(store.storePath)).jobs[0]?.state.lastRunStatus).toBe("ok");
+            stop(restarted);
+          } else {
+            expect(current?.state.lastRunStatus).toBe("ok");
+          }
+          if (scenario === "schedule-edit") {
+            expect(current?.schedule).toMatchObject({ expr: "30 10 * * *" });
+          }
+          if (scenario === "stop") {
+            const restarted = createCronServiceState(deps);
+            await runMissedJobs(restarted);
+            expect(deps.runCommandJob).toHaveBeenCalledOnce();
+            expect((await loadCronStore(store.storePath)).jobs[0]?.state.lastRunStatus).toBe("ok");
+            stop(restarted);
+          }
+          stop(state);
+        });
+      } finally {
+        pending.resolve();
+        await store.cleanup();
+      }
+    },
+  );
+});
 function job(overrides: Partial<CronJob>): CronJob {
   return {
     id: "restart-job",
@@ -43,6 +409,7 @@ async function fixture(jobs: CronJob[], overrides: Partial<CronServiceDeps> = {}
     onEvent: vi.fn(),
     runCommandJob: vi.fn(async () => ({ status: "ok" as const })),
     runIsolatedAgentJob: vi.fn(async () => ({ status: "ok" as const })),
+    dispatchPressureGuard: allowDispatchPressureForTest,
     ...overrides,
   };
   return { store, deps };

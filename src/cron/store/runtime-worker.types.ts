@@ -53,6 +53,12 @@ export type CronReservationReleasePolicy =
     }
   | { kind: "manual-abandon" }
   | { kind: "scheduled-ineligible" }
+  | {
+      kind: "startup-preparation-failure";
+      configRevision: string;
+      error: string;
+      retryDelayMs: number;
+    }
   | { kind: "startup-settlement"; deferredJobs: StartupDeferredJob[]; staggerMs: number };
 
 type CronSkippedRunChange =

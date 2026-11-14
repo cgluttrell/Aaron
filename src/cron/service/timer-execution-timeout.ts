@@ -104,6 +104,9 @@ export type StartupCatchupCandidate = {
   job: CronJob;
   reservedAtMs: number;
   reservationIdentity: object;
+  /** Agent startup admission captured for this exact reserved occurrence. */
+  agentPreparation?: Promise<void>;
+  configRevision?: string;
 };
 
 export type StartupCatchupPlan = {
