@@ -95,13 +95,16 @@ describe("pending agent admission for missed command occurrences", () => {
     const pending = createDeferred();
     const entered = createDeferred();
     const release = createDeferred();
-    deps.runCommandJob = vi.fn(async ({ job: runningJob }) => {
-      if (runningJob.id === "drift") {
-        entered.resolve();
-        await release.promise;
-      }
-      return { status: "ok" as const };
-    });
+    const runCommandJob = vi.fn(
+      async (input: Parameters<NonNullable<CronServiceDeps["runCommandJob"]>>[0]) => {
+        if (input.job.id === "drift") {
+          entered.resolve();
+          await release.promise;
+        }
+        return { status: "ok" as const };
+      },
+    );
+    deps.runCommandJob = runCommandJob;
     const state = createCronServiceState(deps);
     try {
       await withAgentDatabaseStartupAdmission(async (admission) => {
@@ -116,9 +119,9 @@ describe("pending agent admission for missed command occurrences", () => {
         pending.resolve();
         await catchup;
         await onTimer(state);
-        expect(
-          vi.mocked(deps.runCommandJob).mock.calls.filter(([input]) => input.job.id === "drift"),
-        ).toHaveLength(1);
+        expect(runCommandJob.mock.calls.filter(([input]) => input.job.id === "drift")).toHaveLength(
+          1,
+        );
       });
     } finally {
       release.resolve();
