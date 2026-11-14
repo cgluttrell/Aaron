@@ -1,6 +1,7 @@
 import { getSqliteWorkerStateContext } from "../../infra/sqlite-worker-state-context.js";
 import type { OpenClawStateDatabase } from "../../state/openclaw-state-db-contract.js";
 import { runOpenClawStateWriteTransaction } from "../../state/openclaw-state-db.js";
+import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { tryCronScheduleIdentity } from "../schedule-identity.js";
 import { isJobEnabled, resolveNextRunAtMsOrDisable } from "../service/jobs-scheduling.js";
 import { resolveCronNotificationQueueOwner } from "../service/notification-intents.js";
@@ -157,7 +158,35 @@ export function releaseSchedulerReservationsInWorker(
           } else {
             for (const reservation of preparation.reservations) {
               const job = jobs.get(reservation.jobId);
-              if (policy.kind === "scheduled-ineligible") {
+              if (policy.kind === "startup-preparation-failure") {
+                const ownsOccurrence =
+                  job !== undefined &&
+                  reservation.markerAtMs === job.state.queuedAtMs &&
+                  resolveCronJobConfigRevision(job) === policy.configRevision &&
+                  isJobEnabled(job);
+                finishCronRunReceiptInDatabase({
+                  receiptSchema,
+                  database: db,
+                  handle: reservation.runReceipt,
+                  status: ownsOccurrence ? "error" : "superseded",
+                  finishedAtMs: preparation.nowMs,
+                  error: policy.error,
+                });
+                if (!job || !clearMatchingReservationMarkers(job, reservation)) {
+                  continue;
+                }
+                if (ownsOccurrence) {
+                  const retryAtMs = preparation.nowMs + policy.retryDelayMs;
+                  job.state.lastRunAtMs = preparation.nowMs;
+                  job.state.lastRunStatus = "error";
+                  job.state.lastStatus = "error";
+                  job.state.lastError = policy.error;
+                  job.state.lastDurationMs = 0;
+                  job.state.consecutiveErrors = (job.state.consecutiveErrors ?? 0) + 1;
+                  job.state.nextRunAtMs = retryAtMs;
+                  job.state.startupCatchupAtMs = retryAtMs;
+                }
+              } else if (policy.kind === "scheduled-ineligible") {
                 if (!job || reservation.markerAtMs !== job.state.queuedAtMs) {
                   continue;
                 }
@@ -193,6 +222,7 @@ export function releaseSchedulerReservationsInWorker(
       operationLabel: {
         "manual-abandon": "cron.manual-reservation-cleanup",
         "scheduled-ineligible": "cron.skipped-reservation-cleanup",
+        "startup-preparation-failure": "cron.startup-preparation-failure",
         "startup-settlement": "cron.startup-catchup-state",
       }[policy.kind],
     },

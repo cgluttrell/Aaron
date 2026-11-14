@@ -1,3 +1,8 @@
+import pLimit from "p-limit";
+import { getAgentDatabaseStartupAdmission } from "../../state/agent-database-startup.js";
+import { describeUnavailableCronAgent } from "../agent-availability.js";
+import { tryResolveCronJobEffectiveAgentId } from "../agent-id.js";
+import { resolveCronJobConfigRevision } from "../config-revision.js";
 import { isHeartbeatTaskCronJob } from "../heartbeat-task.js";
 import { tryCronScheduleIdentity } from "../schedule-identity.js";
 import type { StartupDeferredJob } from "../store/runtime-worker.types.js";
@@ -26,11 +31,45 @@ import {
 } from "./timer-execution-timeout.js";
 import { maybeNotifyIsolatedAgentSetupTimeout } from "./timer-notifications.js";
 import { createCompletedCronRunOutcomeDrain } from "./timer-outcome-finalization.js";
+import { armTimer } from "./timer-scheduler.js";
 
 type StartupMutationContext = {
   source: ReturnType<typeof captureCronServiceMutationSource>;
   nonRetryableReservations: Set<object>;
 };
+
+const STARTUP_PREPARATION_RETRY_DELAY_MS = 60_000;
+
+async function recordStartupPreparationFailure(
+  state: CronServiceState,
+  candidate: StartupCatchupCandidate,
+  error: string,
+  mutation: StartupMutationContext,
+): Promise<void> {
+  const owner = state.queuedRunReservationsByJobId.get(candidate.jobId);
+  if (owner?.identity !== candidate.reservationIdentity || !candidate.configRevision) {
+    return;
+  }
+  await releaseReservedCronRuns({
+    state,
+    context: owner.runReceiptContext,
+    storeKey: mutation.source.storeKey,
+    reservations: [candidate],
+    nowMs: state.deps.nowMs(),
+    policy: {
+      kind: "startup-preparation-failure",
+      configRevision: candidate.configRevision,
+      error,
+      retryDelayMs: STARTUP_PREPARATION_RETRY_DELAY_MS,
+    },
+    assertCurrent: mutation.source.assertStorageCurrent,
+    onSettled(outcome) {
+      if (outcome !== "not-committed") {
+        mutation.nonRetryableReservations.add(candidate.reservationIdentity);
+      }
+    },
+  });
+}
 
 async function commitStartupCatchupRows(
   params: {
@@ -124,6 +163,33 @@ export async function runMissedJobs(
       discardWhenStopped: true,
       repairFutureCronNextRunAtMs: false,
     });
+    // Settle unreserved overflow/agent deferrals before opening the timer fence;
+    // otherwise a due timer could run them without their startup pacing.
+    if (plan.candidates.some((candidate) => candidate.agentPreparation)) {
+      if (plan.deferredJobs.length > 0) {
+        const staggerMs = Math.max(
+          0,
+          state.deps.missedJobStaggerMs ?? DEFAULT_MISSED_JOB_STAGGER_MS,
+        );
+        try {
+          await commitStartupCatchupRows(
+            { state, reservations: [], deferredJobs: plan.deferredJobs, staggerMs },
+            mutation,
+          );
+          plan.deferredJobs = [];
+        } catch (error) {
+          await releaseStartupCatchupReservationsAfterFailure(state, plan, [], mutation);
+          throw error;
+        }
+      }
+      if (state.stopped || state.lifecycleGeneration !== plan.lifecycleGeneration) {
+        return;
+      }
+      // Receipt-backed reservations own exact missed occurrences during the wait.
+      state.startupCatchup = undefined;
+      state.schedulerStarted = true;
+      armTimer(state);
+    }
     const execution = await executeStartupCatchupPlan(state, plan, completedOutcomeDrain, mutation);
     let finalizedOutcomes: TimedCronRunOutcome[];
     try {
@@ -212,7 +278,24 @@ async function planStartupCatchup(
     );
     const deferredAgentJobs: CronJob[] = [];
     const startupEligible: CronJob[] = [];
+    const pendingAgentJobs: CronJob[] = [];
+    const preparationByJobId = new Map<string, Promise<void>>();
+    const admission = getAgentDatabaseStartupAdmission();
     for (const job of sorted) {
+      const agentId = tryResolveCronJobEffectiveAgentId(
+        job,
+        state.deps.resolveDefaultAgentId?.() ?? state.deps.defaultAgentId,
+      );
+      const preparation = agentId
+        ? admission?.waitForAgentPreparation(agentId, { signal: state.schedulerScope.signal })
+        : undefined;
+      if (preparation) {
+        // Attach a rejection observer immediately: ready jobs may run first.
+        void preparation.catch(() => undefined);
+        preparationByJobId.set(job.id, preparation);
+        pendingAgentJobs.push(job);
+        continue;
+      }
       const waitsForAgent =
         job.payload.kind === "agentTurn" ||
         job.payload.kind === "heartbeat" ||
@@ -222,7 +305,7 @@ async function planStartupCatchup(
           job.wakeMode === "now");
       (opts?.deferAgentWork && waitsForAgent ? deferredAgentJobs : startupEligible).push(job);
     }
-    const startupCandidates = startupEligible.slice(0, maxImmediate);
+    const startupCandidates = [...startupEligible.slice(0, maxImmediate), ...pendingAgentJobs];
     const deferredOverflow = startupEligible.slice(maxImmediate);
     const deferredAgentDelayMs = Math.max(
       0,
@@ -291,6 +374,10 @@ async function planStartupCatchup(
           runReceiptContext,
           lifecycleGeneration,
         }),
+        agentPreparation: preparationByJobId.get(job.id),
+        configRevision: preparationByJobId.has(job.id)
+          ? resolveCronJobConfigRevision(job)
+          : undefined,
       })),
       deferredJobs: deferred,
     };
@@ -304,16 +391,60 @@ async function executeStartupCatchupPlan(
   mutation: StartupMutationContext,
 ): Promise<StartupCatchupExecution> {
   const outcomes: TimedCronRunOutcome[] = [];
-  try {
-    for (const candidate of plan.candidates) {
-      if (state.stopped || state.lifecycleGeneration !== plan.lifecycleGeneration) {
-        break;
+  // Admission waits run in parallel; execution retains the restart burst cap.
+  const limitPendingExecution = pLimit(
+    Math.max(1, state.deps.maxMissedJobsPerRestart ?? DEFAULT_MAX_MISSED_JOBS_PER_RESTART),
+  );
+  const runCandidate = async (candidate: StartupCatchupCandidate): Promise<void> => {
+    if (state.stopped || state.lifecycleGeneration !== plan.lifecycleGeneration) {
+      return;
+    }
+    let setupError: string | undefined;
+    if (candidate.agentPreparation) {
+      try {
+        await candidate.agentPreparation;
+      } catch (error) {
+        if (state.schedulerScope.signal.aborted || state.stopped) {
+          return;
+        }
+        // A genuine preparation failure owns an error receipt and one bounded
+        // retry of the same missed occurrence, not a skipped completion.
+        state.deps.log.error(
+          { err: String(error), jobId: candidate.jobId },
+          "cron: agent startup preparation failed before missed run",
+        );
+        setupError = `Agent startup preparation failed: ${String(error)}`;
       }
-      const execution = await executeQueuedCronRun({
+    }
+    if (state.stopped || state.lifecycleGeneration !== plan.lifecycleGeneration) {
+      return;
+    }
+    if (candidate.agentPreparation && !setupError) {
+      const agentId = tryResolveCronJobEffectiveAgentId(
+        candidate.job,
+        state.deps.resolveDefaultAgentId?.() ?? state.deps.defaultAgentId,
+      );
+      if (agentId && state.deps.isAgentAvailable?.(agentId) === false) {
+        setupError = describeUnavailableCronAgent(agentId);
+      }
+    }
+    if (setupError) {
+      await recordStartupPreparationFailure(state, candidate, setupError, mutation);
+      return;
+    }
+    const executeReserved = () =>
+      executeQueuedCronRun({
         state,
         jobId: candidate.jobId,
         reservedAtMs: candidate.reservedAtMs,
         reservationIdentity: candidate.reservationIdentity,
+        isUnavailable: () => {
+          if (candidate.configRevision === undefined) {
+            return false;
+          }
+          const current = state.store?.jobs.find((job) => job.id === candidate.jobId);
+          return !current || resolveCronJobConfigRevision(current) !== candidate.configRevision;
+        },
         runnableOptions: {
           skipAtIfAlreadyRan: true,
           allowCronMissedRunByLastRun: true,
@@ -322,17 +453,36 @@ async function executeStartupCatchupPlan(
           await commitStartupCatchupRows({ state, reservations: [candidate] }, mutation);
         },
       });
-      if (execution.kind === "stopped") {
+    const execution = candidate.agentPreparation
+      ? await limitPendingExecution(executeReserved)
+      : await executeReserved();
+    if (execution.kind === "stopped") {
+      return;
+    }
+    if (execution.kind === "completed") {
+      // Completed outcomes persist in coalesced batches while slower siblings drain.
+      outcomes.push(execution.outcome);
+      completedOutcomeDrain.enqueue(execution.outcome);
+    }
+  };
+  const pending = Promise.allSettled(
+    plan.candidates.filter((entry) => entry.agentPreparation).map(runCandidate),
+  );
+  try {
+    for (const candidate of plan.candidates.filter((entry) => !entry.agentPreparation)) {
+      if (state.stopped || state.lifecycleGeneration !== plan.lifecycleGeneration) {
         break;
       }
-      if (execution.kind === "completed") {
-        // Catch-up execution stays sequential, while completed outcomes
-        // persist in coalesced batches before slower siblings have to drain.
-        outcomes.push(execution.outcome);
-        completedOutcomeDrain.enqueue(execution.outcome);
-      }
+      await runCandidate(candidate);
+    }
+    // Admission waits are independent: a slow agent must not hold a ready sibling.
+    const settled = await pending;
+    const failed = settled.find((result) => result.status === "rejected");
+    if (failed?.status === "rejected") {
+      throw failed.reason;
     }
   } catch (error) {
+    await pending;
     return { ok: false, outcomes, error };
   }
   return { ok: true, outcomes };
