@@ -50,10 +50,88 @@ describe("pending agent admission for missed command occurrences", () => {
       },
     });
 
+  it("returns from cron.start while agent admission is pending", async () => {
+    vi.setSystemTime(restart);
+    const overdue = command(schedules[0]);
+    overdue.state.nextRunAtMs = time("2025-12-13T07:45:00Z");
+    const { store, deps } = await fixture([overdue], { nowMs: () => restart });
+    const pending = createDeferred();
+    const ran = createDeferred();
+    try {
+      await withAgentDatabaseStartupAdmission(async (admission) => {
+        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation(() => pending.promise);
+        deps.runCommandJob = vi.fn(async () => {
+          ran.resolve();
+          return { status: "ok" as const };
+        });
+        const cron = new CronService(deps);
+        try {
+          await cron.start();
+          expect(deps.runCommandJob).not.toHaveBeenCalled();
+          expect((await loadCronStore(store.storePath)).jobs[0]?.state.queuedAtMs).toBeDefined();
+          pending.resolve();
+          await ran.promise;
+          await vi.waitFor(async () => {
+            expect((await loadCronStore(store.storePath)).jobs[0]?.state.lastRunStatus).toBe("ok");
+          });
+          expect(deps.runCommandJob).toHaveBeenCalledOnce();
+        } finally {
+          cron.stop();
+        }
+      });
+    } finally {
+      pending.resolve();
+      await store.cleanup();
+    }
+  });
+
+  it("runs a ready startup candidate once when a timer tick races it", async () => {
+    vi.setSystemTime(restart);
+    const pendingJob = command(schedules[0]);
+    pendingJob.state.nextRunAtMs = time("2025-12-13T07:45:00Z");
+    const readyJob = { ...command(schedules[1]), agentId: "other" };
+    readyJob.state.nextRunAtMs = time("2025-12-13T08:00:00Z");
+    const { store, deps } = await fixture([pendingJob, readyJob], { nowMs: () => restart });
+    const pending = createDeferred();
+    const entered = createDeferred();
+    const release = createDeferred();
+    deps.runCommandJob = vi.fn(async ({ job: runningJob }) => {
+      if (runningJob.id === "drift") {
+        entered.resolve();
+        await release.promise;
+      }
+      return { status: "ok" as const };
+    });
+    const state = createCronServiceState(deps);
+    try {
+      await withAgentDatabaseStartupAdmission(async (admission) => {
+        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation((agentId) =>
+          agentId === "main" ? pending.promise : undefined,
+        );
+        const catchup = runMissedJobs(state, { deferAgentWork: true });
+        await entered.promise;
+        await onTimer(state);
+        expect(deps.runCommandJob).toHaveBeenCalledOnce();
+        release.resolve();
+        pending.resolve();
+        await catchup;
+        await onTimer(state);
+        expect(
+          vi.mocked(deps.runCommandJob).mock.calls.filter(([input]) => input.job.id === "drift"),
+        ).toHaveLength(1);
+      });
+    } finally {
+      release.resolve();
+      pending.resolve();
+      stop(state);
+      await store.cleanup();
+    }
+  });
+
   it("holds all three exact occurrences until admission, then executes each once", async () => {
     vi.setSystemTime(restart);
     const { store, deps } = await fixture(schedules.map(command), { nowMs: () => restart });
-    const pending = createDeferred<void>();
+    const pending = createDeferred();
     const preparationEntered = createDeferred<"preparation">();
     const commandEntered = createDeferred<"command">();
     try {
@@ -125,7 +203,7 @@ describe("pending agent admission for missed command occurrences", () => {
     const { store, deps } = await fixture([command(schedules[0]), healthy], {
       nowMs: () => now,
     });
-    const pending = createDeferred<void>();
+    const pending = createDeferred();
     try {
       await withAgentDatabaseStartupAdmission(async (admission) => {
         vi.spyOn(admission, "waitForAgentPreparation").mockImplementation((agentId) =>
@@ -160,7 +238,7 @@ describe("pending agent admission for missed command occurrences", () => {
     const overdue = command(schedules[0]);
     overdue.state.nextRunAtMs = time("2025-12-13T07:45:00Z");
     const { store, deps } = await fixture([overdue], { nowMs: () => restart });
-    const pending = createDeferred<void>();
+    const pending = createDeferred();
     try {
       await withAgentDatabaseStartupAdmission(async (admission) => {
         vi.spyOn(admission, "waitForAgentPreparation").mockImplementation(() => pending.promise);
@@ -194,7 +272,7 @@ describe("pending agent admission for missed command occurrences", () => {
       maxMissedJobsPerRestart: 0,
       missedJobStaggerMs: 5_000,
     });
-    const pending = createDeferred<void>();
+    const pending = createDeferred();
     try {
       await withAgentDatabaseStartupAdmission(async (admission) => {
         vi.spyOn(admission, "waitForAgentPreparation").mockImplementation((agentId) =>
@@ -228,8 +306,8 @@ describe("pending agent admission for missed command occurrences", () => {
     const { store, deps } = await fixture([command(schedules[0]), second], {
       nowMs: () => restart,
     });
-    const firstReady = createDeferred<void>();
-    const secondReady = createDeferred<void>();
+    const firstReady = createDeferred();
+    const secondReady = createDeferred();
     try {
       await withAgentDatabaseStartupAdmission(async (admission) => {
         vi.spyOn(admission, "waitForAgentPreparation").mockImplementation((agentId) =>
@@ -266,7 +344,7 @@ describe("pending agent admission for missed command occurrences", () => {
     async (change) => {
       vi.setSystemTime(restart);
       const { store, deps } = await fixture([command(schedules[0])], { nowMs: () => restart });
-      const pending = createDeferred<void>();
+      const pending = createDeferred();
       try {
         await withAgentDatabaseStartupAdmission(async (admission) => {
           vi.spyOn(admission, "waitForAgentPreparation").mockImplementation(() => pending.promise);
@@ -304,7 +382,7 @@ describe("pending agent admission for missed command occurrences", () => {
         nowMs: () => now,
         isAgentAvailable: () => available,
       });
-      const pending = createDeferred<void>();
+      const pending = createDeferred();
       try {
         await withAgentDatabaseStartupAdmission(async (admission) => {
           let waiting = true;

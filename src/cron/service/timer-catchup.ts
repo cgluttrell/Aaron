@@ -1,4 +1,5 @@
 import pLimit from "p-limit";
+import { runInDetachedAsyncContext } from "../../shared/detached-async-context.js";
 import { getAgentDatabaseStartupAdmission } from "../../state/agent-database-startup.js";
 import { describeUnavailableCronAgent } from "../agent-availability.js";
 import { tryResolveCronJobEffectiveAgentId } from "../agent-id.js";
@@ -142,7 +143,11 @@ async function releaseStartupCatchupReservationsAfterFailure(
 /** Runs or defers missed startup jobs using restart catch-up limits. */
 export async function runMissedJobs(
   state: CronServiceState,
-  opts?: { skipJobIds?: ReadonlySet<string>; deferAgentWork?: boolean },
+  opts?: {
+    skipJobIds?: ReadonlySet<string>;
+    deferAgentWork?: boolean;
+    detachPendingAdmission?: boolean;
+  },
 ): Promise<void> {
   if (state.stopped) {
     return;
@@ -159,13 +164,9 @@ export async function runMissedJobs(
       return;
     }
 
-    const completedOutcomeDrain = createCompletedCronRunOutcomeDrain(state, {
-      discardWhenStopped: true,
-      repairFutureCronNextRunAtMs: false,
-    });
     // Settle unreserved overflow/agent deferrals before opening the timer fence;
     // otherwise a due timer could run them without their startup pacing.
-    if (plan.candidates.some((candidate) => candidate.agentPreparation)) {
+    if (plan.candidates.some((candidate) => candidate.agentPreparation !== undefined)) {
       if (plan.deferredJobs.length > 0) {
         const staggerMs = Math.max(
           0,
@@ -190,53 +191,81 @@ export async function runMissedJobs(
       state.schedulerStarted = true;
       armTimer(state);
     }
-    const execution = await executeStartupCatchupPlan(state, plan, completedOutcomeDrain, mutation);
-    let finalizedOutcomes: TimedCronRunOutcome[];
-    try {
-      let completedOutcomes: TimedCronRunOutcome[];
-      try {
-        completedOutcomes = await completedOutcomeDrain.flush();
-      } catch (drainError) {
-        // Preserve overflow wake times and release every unstarted reservation
-        // even when a completed sibling's terminal store write has failed.
-        await applyStartupCatchupOutcomes(state, plan, execution.outcomes, mutation);
-        throw drainError;
-      }
-      finalizedOutcomes = await applyStartupCatchupOutcomes(
-        state,
-        plan,
-        completedOutcomes,
-        mutation,
+    if (opts?.detachPendingAdmission) {
+      const pendingCandidates = plan.candidates.filter(
+        (candidate) => candidate.agentPreparation !== undefined,
       );
-    } catch (finalizationError) {
-      try {
-        await releaseStartupCatchupReservationsAfterFailure(
-          state,
-          plan,
-          execution.outcomes,
-          mutation,
-        );
-      } catch (cleanupError) {
-        state.deps.log.warn(
-          { err: String(cleanupError) },
-          execution.ok
-            ? "cron: failed to release startup catch-up reservations after finalization error"
-            : "cron: failed to release startup catch-up reservations after execution error",
+      if (pendingCandidates.length > 0) {
+        // Reservations remain owned by this exact occurrence until preparation
+        // completes. The gateway startup path does not wait for agent databases.
+        const pendingPlan = { ...plan, candidates: pendingCandidates, deferredJobs: [] };
+        void runInDetachedAsyncContext(() =>
+          finishStartupCatchupPlan(state, pendingPlan, mutation),
+        ).catch((error: unknown) => {
+          state.deps.log.error(
+            { err: String(error) },
+            "cron: failed to finish pending startup catch-up",
+          );
+        });
+        plan.candidates = plan.candidates.filter(
+          (candidate) => candidate.agentPreparation === undefined,
         );
       }
-      throw execution.ok ? finalizationError : execution.error;
     }
-    for (const outcome of finalizedOutcomes) {
-      maybeNotifyIsolatedAgentSetupTimeout(state, outcome);
-    }
-    if (!execution.ok) {
-      throw execution.error;
-    }
+    await finishStartupCatchupPlan(state, plan, mutation);
   } finally {
     // A stopped/replaced startup cannot release a newer catch-up's timer fence.
     if (state.startupCatchup === catchup) {
       state.startupCatchup = undefined;
     }
+  }
+}
+
+async function finishStartupCatchupPlan(
+  state: CronServiceState,
+  plan: StartupCatchupPlan,
+  mutation: StartupMutationContext,
+): Promise<void> {
+  const completedOutcomeDrain = createCompletedCronRunOutcomeDrain(state, {
+    discardWhenStopped: true,
+    repairFutureCronNextRunAtMs: false,
+  });
+  const execution = await executeStartupCatchupPlan(state, plan, completedOutcomeDrain, mutation);
+  let finalizedOutcomes: TimedCronRunOutcome[];
+  try {
+    let completedOutcomes: TimedCronRunOutcome[];
+    try {
+      completedOutcomes = await completedOutcomeDrain.flush();
+    } catch (drainError) {
+      // Preserve overflow wake times and release every unstarted reservation
+      // even when a completed sibling's terminal store write has failed.
+      await applyStartupCatchupOutcomes(state, plan, execution.outcomes, mutation);
+      throw drainError;
+    }
+    finalizedOutcomes = await applyStartupCatchupOutcomes(state, plan, completedOutcomes, mutation);
+  } catch (finalizationError) {
+    try {
+      await releaseStartupCatchupReservationsAfterFailure(
+        state,
+        plan,
+        execution.outcomes,
+        mutation,
+      );
+    } catch (cleanupError) {
+      state.deps.log.warn(
+        { err: String(cleanupError) },
+        execution.ok
+          ? "cron: failed to release startup catch-up reservations after finalization error"
+          : "cron: failed to release startup catch-up reservations after execution error",
+      );
+    }
+    throw execution.ok ? finalizationError : execution.error;
+  }
+  for (const outcome of finalizedOutcomes) {
+    maybeNotifyIsolatedAgentSetupTimeout(state, outcome);
+  }
+  if (!execution.ok) {
+    throw execution.error;
   }
 }
 
@@ -407,8 +436,8 @@ async function executeStartupCatchupPlan(
         if (state.schedulerScope.signal.aborted || state.stopped) {
           return;
         }
-        // A genuine preparation failure owns an error receipt and one bounded
-        // retry of the same missed occurrence, not a skipped completion.
+        // A genuine preparation failure records an error receipt and retries
+        // the same missed occurrence after a 60-second delay, not as a skip.
         state.deps.log.error(
           { err: String(error), jobId: candidate.jobId },
           "cron: agent startup preparation failed before missed run",
@@ -466,7 +495,7 @@ async function executeStartupCatchupPlan(
     }
   };
   const pending = Promise.allSettled(
-    plan.candidates.filter((entry) => entry.agentPreparation).map(runCandidate),
+    plan.candidates.filter((entry) => entry.agentPreparation !== undefined).map(runCandidate),
   );
   try {
     for (const candidate of plan.candidates.filter((entry) => !entry.agentPreparation)) {
