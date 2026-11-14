@@ -306,6 +306,7 @@ async function startOnce(state: CronServiceState): Promise<void> {
     await runMissedJobs(state, {
       skipJobIds: skipJobIds.size > 0 ? skipJobIds : undefined,
       deferAgentWork: true,
+      detachPendingAdmission: true,
     });
   } catch (err) {
     if (err instanceof SqliteWorkerAdmissionTimeoutError) {
