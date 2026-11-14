@@ -54,17 +54,35 @@ describe("pending agent admission for missed command occurrences", () => {
     vi.setSystemTime(restart);
     const { store, deps } = await fixture(schedules.map(command), { nowMs: () => restart });
     const pending = createDeferred<void>();
+    const preparationEntered = createDeferred<"preparation">();
+    const commandEntered = createDeferred<"command">();
     try {
       await withAgentDatabaseStartupAdmission(async (admission) => {
-        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation(() => pending.promise);
+        vi.spyOn(admission, "waitForAgentPreparation").mockImplementation(() => {
+          preparationEntered.resolve("preparation");
+          return pending.promise;
+        });
+        const runCommandJob = vi.fn(
+          async (_input: Parameters<NonNullable<CronServiceDeps["runCommandJob"]>>[0]) => {
+            commandEntered.resolve("command");
+            return { status: "ok" as const };
+          },
+        );
+        deps.runCommandJob = runCommandJob;
         const state = createCronServiceState(deps);
         const catchup = runMissedJobs(state, { deferAgentWork: true });
-        await vi.waitFor(async () => {
-          const jobs = (await loadCronStore(store.storePath)).jobs;
-          expect(jobs.every((entry) => entry.state.queuedAtMs !== undefined)).toBe(true);
-        });
+        // Stable executes a command before consulting admission. Race the two
+        // observable events so that failure is deterministic and timer-free.
+        expect(await Promise.race([preparationEntered.promise, commandEntered.promise])).toBe(
+          "preparation",
+        );
+        // Drive a full scheduler turn while preparation remains unresolved.
+        // A reservation alone is insufficient proof: stable can run immediately.
+        await onTimer(state);
         expect(deps.runCommandJob).not.toHaveBeenCalled();
-        for (const entry of (await loadCronStore(store.storePath)).jobs) {
+        const waitingJobs = (await loadCronStore(store.storePath)).jobs;
+        expect(waitingJobs.every((entry) => entry.state.queuedAtMs !== undefined)).toBe(true);
+        for (const entry of waitingJobs) {
           expect(entry.state.nextRunAtMs).toBe(
             time(schedules.find((item) => item.id === entry.id)!.next),
           );
@@ -74,6 +92,9 @@ describe("pending agent admission for missed command occurrences", () => {
         await catchup;
         const jobs = (await loadCronStore(store.storePath)).jobs;
         expect(deps.runCommandJob).toHaveBeenCalledTimes(3);
+        expect(runCommandJob.mock.calls.map(([input]) => input.job.id).toSorted()).toEqual(
+          schedules.map((entry) => entry.id).toSorted(),
+        );
         for (const entry of schedules) {
           const current = jobs.find((item) => item.id === entry.id);
           expect(current?.state).toMatchObject({
