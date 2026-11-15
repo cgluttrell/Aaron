@@ -173,6 +173,81 @@ function evaluate(routes: Record<string, unknown> = {}, mode = "enforce", deadli
 }
 
 describe("combined security review entry point", () => {
+  const shard = { name: "test shard", status: "completed", conclusion: "success" };
+  const jobPages = {
+    [`${jobsPath}?per_page=100&page=1`]: {
+      total_count: 258,
+      jobs: Array.from({ length: 100 }, () => shard),
+    },
+    [`${jobsPath}?per_page=100&page=2`]: {
+      total_count: 258,
+      jobs: Array.from({ length: 100 }, () => shard),
+    },
+    [`${jobsPath}?per_page=100&page=3`]: {
+      total_count: 258,
+      jobs: [...Array.from({ length: 57 }, () => shard), jobs.jobs[0]],
+    },
+  };
+
+  it("reads all 258 jobs over three bounded pages before accepting the CI gate", () => {
+    const result = evaluate({
+      [jobsPath]: jobPages[`${jobsPath}?per_page=100&page=1`],
+      ...jobPages,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.combined.at(-1)).toBe("success");
+    expect(
+      result.requests.filter((entry) => `${entry.method} ${entry.path}` === jobsPath),
+    ).toHaveLength(3);
+  });
+
+  it("restarts the full review after one job page times out, then reads all pages", () => {
+    const result = evaluate({
+      [jobsPath]: jobPages[`${jobsPath}?per_page=100&page=1`],
+      ...jobPages,
+      [`${jobsPath}?per_page=100&page=2`]: {
+        responses: [{ requestTimeout: "fetch" }, jobPages[`${jobsPath}?per_page=100&page=2`]],
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.waits).toEqual([1_000]);
+    expect(result.combined.at(-1)).toBe("success");
+    expect(
+      result.requests.filter((entry) => `${entry.method} ${entry.path}` === jobsPath),
+    ).toHaveLength(5);
+  });
+
+  it("does not mask a failed CI gate on the last page", () => {
+    const failedGate = { ...jobs.jobs[0], conclusion: "failure" };
+    const result = evaluate({
+      [jobsPath]: jobPages[`${jobsPath}?per_page=100&page=1`],
+      ...jobPages,
+      [`${jobsPath}?per_page=100&page=3`]: {
+        total_count: 258,
+        jobs: [...Array.from({ length: 57 }, () => shard), failedGate],
+      },
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.combined.at(-1)).toBe("failure");
+  });
+
+  it.each([
+    { name: "short middle page", secondPage: { total_count: 258, jobs: [shard] } },
+    {
+      name: "changing total count",
+      secondPage: { total_count: 200, jobs: Array.from({ length: 100 }, () => shard) },
+    },
+  ])("does not accept an incomplete CI job list: $name", ({ secondPage }) => {
+    const result = evaluate({
+      [jobsPath]: jobPages[`${jobsPath}?per_page=100&page=1`],
+      ...jobPages,
+      [`${jobsPath}?per_page=100&page=2`]: secondPage,
+    });
+    expect(result.status).toBe(1);
+    expect(result.combined).not.toContain("success");
+    expect(result.stderr).toMatch(/(?:complete|invalid) job list/iu);
+  });
+
   it.each([
     {
       name: "fetch deadline",
