@@ -94,22 +94,7 @@ async function ciState(review) {
   if (!run || run.status !== "completed") {
     return "pending";
   }
-  const jobs = [];
-  for (let page = 1; ; page += 1) {
-    const result = await api.request(
-      `${root}/runs/${run.id}/attempts/${run.run_attempt}/jobs?per_page=100&page=${page}`,
-    );
-    if (!Array.isArray(result.jobs) || !Number.isSafeInteger(result.total_count)) {
-      throw new Error("CI returned an invalid job list.");
-    }
-    jobs.push(...result.jobs);
-    if (jobs.length >= result.total_count) {
-      break;
-    }
-    if (result.jobs.length === 0 || page >= 100) {
-      throw new Error("CI did not return the complete job list.");
-    }
-  }
+  const jobs = await api.paginateJobs(`${root}/runs/${run.id}/attempts/${run.run_attempt}/jobs`);
   const current = await api.request(`${root}/runs/${run.id}`);
   const currentState = ciRunState(current);
   if (current.id !== run.id || current.head_sha !== run.head_sha) {
