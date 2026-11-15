@@ -497,6 +497,7 @@ export function createGitHubApi(token, options = {}) {
     request,
     paginateJobs: async (path) => {
       const jobs = [];
+      const seenIds = new Set();
       let totalCount;
       for (let page = 1; page <= 100; page += 1) {
         // Each request owns its own timeout, including retries and body reading.
@@ -511,11 +512,20 @@ export function createGitHubApi(token, options = {}) {
           throw new Error("CI returned an invalid job list.");
         }
         totalCount = result.total_count;
-        jobs.push(...result.jobs);
-        if (jobs.length === totalCount) {
+        for (const job of result.jobs) {
+          if (!Number.isSafeInteger(job?.id) || job.id <= 0) {
+            throw new Error("CI returned an invalid job list.");
+          }
+          if (seenIds.has(job.id)) {
+            throw new Error("CI did not return the complete job list.");
+          }
+          seenIds.add(job.id);
+          jobs.push(job);
+        }
+        if (seenIds.size === totalCount) {
           return jobs;
         }
-        if (jobs.length > totalCount || result.jobs.length < 100) {
+        if (seenIds.size > totalCount || result.jobs.length < 100) {
           throw new Error("CI did not return the complete job list.");
         }
       }
