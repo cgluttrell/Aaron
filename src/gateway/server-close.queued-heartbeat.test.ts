@@ -2,6 +2,7 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { useAutoCleanupTempDirTracker } from "../../test/helpers/temp-dir.js";
 import type { CliDeps } from "../cli/deps.types.js";
+import { allowDispatchPressureForTest } from "../cron/service.test-harness.js";
 import { waitForActiveCronTaskRuns } from "../cron/service/active-run-cancellation.js";
 import { createCronServiceState } from "../cron/service/state.js";
 import { executeJobCoreWithTimeout } from "../cron/service/timer-job-runner.js";
@@ -68,6 +69,7 @@ it("settles queued heartbeat cron work before joining its shutdown drain", async
       await releaseSibling.promise;
       return { status: "ok" };
     },
+    dispatchPressureGuard: allowDispatchPressureForTest,
   });
   const sibling = executeJobCoreWithTimeout(core, {
     id: "admitted-sibling",

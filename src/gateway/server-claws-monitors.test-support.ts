@@ -23,6 +23,7 @@ import { applyHeartbeatMonitorJobs } from "../cron/heartbeat-monitor.js";
 import { cronJobReadView } from "../cron/job-read-view.js";
 import { normalizeCronJobCreate } from "../cron/normalize.js";
 import { CronService } from "../cron/service.js";
+import { allowDispatchPressureForTest } from "../cron/service.test-harness.js";
 import type { CronServiceDeps } from "../cron/service/state.js";
 import { createTestGatewayScheduler } from "../test-utils/gateway-scheduler-clock.js";
 import { createOpenClawTestState } from "../test-utils/openclaw-test-state.js";
@@ -136,6 +137,7 @@ export function useClawMonitorFixture() {
         return { status: "ran", durationMs: 0 };
       },
       runIsolatedAgentJob: runner ?? vi.fn(async () => ({ status: "ok" as const })),
+      dispatchPressureGuard: allowDispatchPressureForTest,
     };
     const cron = new CronService(cronDeps);
     cleanups.push(async () => {
