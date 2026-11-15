@@ -8,6 +8,7 @@ import { CRON_AGENT_SELECTION_REQUIRED_MESSAGE } from "../cron/agent-id.js";
 import { resolveCronJobConfigRevision } from "../cron/config-revision.js";
 import { makeCronJob } from "../cron/delivery.test-helpers.js";
 import { CronService } from "../cron/service.js";
+import { allowDispatchPressureForTest } from "../cron/service.test-harness.js";
 import { saveCronJobsStore } from "../cron/store.js";
 import { cronStoreKey } from "../cron/store/key.js";
 import { loadCronRows, loadedCronStoreFromRows } from "../cron/store/row-codec.js";
@@ -106,6 +107,7 @@ function createCron(storePath: string, defaultAgentId?: string) {
     enqueueSystemEvent: () => false,
     requestHeartbeat() {},
     runIsolatedAgentJob: execute,
+    dispatchPressureGuard: allowDispatchPressureForTest,
   });
   return { cron, scheduler, execute, clock };
 }
