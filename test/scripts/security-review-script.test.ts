@@ -50,7 +50,7 @@ const run = {
 };
 const jobs = {
   total_count: 1,
-  jobs: [{ name: "openclaw/ci-gate", status: "completed", conclusion: "success" }],
+  jobs: [{ id: 258, name: "openclaw/ci-gate", status: "completed", conclusion: "success" }],
 };
 const rolePath = "GET /repos/openclaw/openclaw/collaborators/maintainer/permission";
 const statusPath = `POST /repos/openclaw/openclaw/statuses/${head}`;
@@ -177,15 +177,18 @@ describe("combined security review entry point", () => {
   const jobPages = {
     [`${jobsPath}?per_page=100&page=1`]: {
       total_count: 258,
-      jobs: Array.from({ length: 100 }, () => shard),
+      jobs: Array.from({ length: 100 }, (_, index) => ({ ...shard, id: index + 1 })),
     },
     [`${jobsPath}?per_page=100&page=2`]: {
       total_count: 258,
-      jobs: Array.from({ length: 100 }, () => shard),
+      jobs: Array.from({ length: 100 }, (_, index) => ({ ...shard, id: index + 101 })),
     },
     [`${jobsPath}?per_page=100&page=3`]: {
       total_count: 258,
-      jobs: [...Array.from({ length: 57 }, () => shard), jobs.jobs[0]],
+      jobs: [
+        ...Array.from({ length: 57 }, (_, index) => ({ ...shard, id: index + 201 })),
+        jobs.jobs[0],
+      ],
     },
   };
 
@@ -199,6 +202,35 @@ describe("combined security review entry point", () => {
     expect(
       result.requests.filter((entry) => `${entry.method} ${entry.path}` === jobsPath),
     ).toHaveLength(3);
+  });
+
+  it("rejects a 100/100/58 response when the middle page repeats page 1 job IDs", () => {
+    const result = evaluate({
+      [jobsPath]: jobPages[`${jobsPath}?per_page=100&page=1`],
+      ...jobPages,
+      [`${jobsPath}?per_page=100&page=2`]: {
+        total_count: 258,
+        jobs: jobPages[`${jobsPath}?per_page=100&page=1`].jobs,
+      },
+    });
+    expect(result.combined).not.toContain("success");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/complete job list/iu);
+  });
+
+  it("rejects a missing last page even when the CI gate appears on an earlier page", () => {
+    const result = evaluate({
+      [jobsPath]: jobPages[`${jobsPath}?per_page=100&page=1`],
+      ...jobPages,
+      [`${jobsPath}?per_page=100&page=1`]: {
+        total_count: 258,
+        jobs: [...jobPages[`${jobsPath}?per_page=100&page=1`].jobs.slice(0, 99), jobs.jobs[0]],
+      },
+      [`${jobsPath}?per_page=100&page=3`]: { total_count: 258, jobs: [] },
+    });
+    expect(result.combined).not.toContain("success");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/complete job list/iu);
   });
 
   it("restarts the full review after one job page times out, then reads all pages", () => {
@@ -224,7 +256,10 @@ describe("combined security review entry point", () => {
       ...jobPages,
       [`${jobsPath}?per_page=100&page=3`]: {
         total_count: 258,
-        jobs: [...Array.from({ length: 57 }, () => shard), failedGate],
+        jobs: [
+          ...Array.from({ length: 57 }, (_, index) => ({ ...shard, id: index + 201 })),
+          failedGate,
+        ],
       },
     });
     expect(result.status, result.stderr).toBe(0);
@@ -232,7 +267,7 @@ describe("combined security review entry point", () => {
   });
 
   it.each([
-    { name: "short middle page", secondPage: { total_count: 258, jobs: [shard] } },
+    { name: "short middle page", secondPage: { total_count: 258, jobs: [{ ...shard, id: 101 }] } },
     {
       name: "changing total count",
       secondPage: { total_count: 200, jobs: Array.from({ length: 100 }, () => shard) },
@@ -1412,13 +1447,14 @@ describe("combined security review entry point", () => {
           responses: [
             {
               total_count: 101,
-              jobs: Array.from({ length: 100 }, () => ({
+              jobs: Array.from({ length: 100 }, (_, index) => ({
+                id: index + 1,
                 name: "test shard",
                 status: "completed",
                 conclusion: "success",
               })),
             },
-            { ...jobs, total_count: 101 },
+            { ...jobs, total_count: 101, jobs: [{ ...jobs.jobs[0], id: 101 }] },
           ],
         },
       },
