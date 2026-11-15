@@ -55,6 +55,7 @@ import {
   readPrivateCompletionRecorder,
   registerSessionsSendPrivateCompletionTests,
 } from "./server.private-completion.sessions-send.test-support.js";
+import { registerVisibilityTest } from "./server.private-completion.visibility.test-support.js";
 import * as lifecycleState from "./session-lifecycle-state.js";
 import { createPreparedLifecycleWriteTracker } from "./session-lifecycle-state.test-support.js";
 import { loadSessionEntry } from "./session-utils.js";
@@ -165,6 +166,8 @@ describe("private subagent completion processing receipts", () => {
     await recorder(input).persistApproved();
     return { payloads: [{ text: "NO_REPLY", mediaUrl: null }], meta: { durationMs: 1 } };
   }
+
+  registerVisibilityTest(() => ({ ...scope(), harness, kernel, dispatch }));
 
   it("binds a settle handoff to the source accepted by pending-input replay", async () => {
     const sourceSessionKeys = ["agent:main:subagent:first", "agent:main:subagent:second"] as const;
