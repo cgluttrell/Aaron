@@ -41,6 +41,7 @@ import {
   setPreRestartDeferralCheck,
 } from "../infra/restart.js";
 import { PluginRuntimeApplicationError } from "../plugins/lifecycle.js";
+import { withPluginLifecycleLease } from "../plugins/plugin-lifecycle-lease.js";
 import {
   captureActivePluginRegistrySnapshot,
   requireActivePluginChannelRegistry,
@@ -83,6 +84,7 @@ import {
   getActiveSecretsRuntimeSnapshotRevision,
   type PreparedSecretsRuntimeSnapshot,
 } from "../secrets/runtime.js";
+import * as leaseStorage from "../state/openclaw-state-lease-worker-storage.js";
 import { createChannelTestPluginBase, createTestRegistry } from "../test-utils/channel-plugins.js";
 import {
   createGatewaySchedulerClock,
@@ -4257,12 +4259,13 @@ describe("gateway Gmail hot reload handlers", () => {
     }
   });
 
-  // T4873 uninstrumented CI control: preserve the original shutdown schedule.
   it.each(["completion", "AbortError"] as const)(
     "joins admitted config restart %s after managed shutdown starts",
     async (outcome) => {
       vi.useFakeTimers();
       const harness = await createManagedRestartSequenceHarness();
+      // Another worker can hold the real lease after this test's fake timer advance.
+      const leaseClock = createPluginLifecycleLeaseTestClock();
       const { promise: preflightStarted, resolve: markPreflightStarted } = createDeferred();
       const { promise: preflightBlocked, resolve: releasePreflight } = createDeferred();
       harness.activateRuntimeSecrets.prepareSnapshot.mockImplementationOnce(async ({ config }) => {
@@ -4281,7 +4284,7 @@ describe("gateway Gmail hot reload handlers", () => {
         harness.writeConfig(harness.deferredConfig, "shutdown-restart", 1);
         expect(harness.reloader.isConfigReloadSettled()).toBe(false);
         await vi.advanceTimersByTimeAsync(0);
-        await preflightStarted;
+        await leaseClock.waitFor(preflightStarted);
         expect(harness.reloader.isConfigReloadSettled()).toBe(false);
 
         let stopped = false;
@@ -4292,7 +4295,7 @@ describe("gateway Gmail hot reload handlers", () => {
         expect(stopped).toBe(false);
         expect(harness.reloader.isConfigReloadSettled()).toBe(false);
         releasePreflight?.();
-        await stopPromise;
+        await leaseClock.waitFor(stopPromise);
         expect(harness.reloader.isConfigReloadSettled()).toBe(false);
 
         expect(harness.requestRecoveryRestart).not.toHaveBeenCalled();
@@ -4308,10 +4311,62 @@ describe("gateway Gmail hot reload handlers", () => {
         }
       } finally {
         releasePreflight?.();
-        await harness.reloader.stop();
+        await leaseClock.waitFor(harness.reloader.stop());
       }
     },
   );
+
+  it("joins a restart after a competing lifecycle lease releases under fake timers", async ({
+    signal,
+  }) => {
+    vi.useFakeTimers();
+    const harness = await createManagedRestartSequenceHarness();
+    const { promise: holderEntered, resolve: markHolderEntered } = createDeferred();
+    const { promise: holderReleased, resolve: releaseHolder } = createDeferred();
+    const holder = withPluginLifecycleLease({ signal }, async () => {
+      markHolderEntered?.();
+      await holderReleased;
+    });
+    const { promise: contentionObserved, resolve: markContentionObserved } = createDeferred();
+    const acquire = leaseStorage.acquireLease;
+    const acquisition = vi
+      .spyOn(leaseStorage, "acquireLease")
+      .mockImplementation(async (...args) => {
+        const result = await acquire(...args);
+        if (result.kind !== "acquired") {
+          markContentionObserved?.();
+        }
+        return result;
+      });
+    const leaseClock = createPluginLifecycleLeaseTestClock();
+    const { promise: preflightStarted, resolve: markPreflightStarted } = createDeferred();
+    const { promise: preflightBlocked, resolve: releasePreflight } = createDeferred();
+    harness.activateRuntimeSecrets.prepareSnapshot.mockImplementationOnce(async ({ config }) => {
+      markPreflightStarted?.();
+      await preflightBlocked;
+      return makePreparedSecretsSnapshot(config);
+    });
+
+    try {
+      await withinTest(Promise.race([holderEntered, holder]), signal);
+      harness.writeConfig(harness.deferredConfig, "contended-shutdown-restart", 1);
+      await vi.advanceTimersByTimeAsync(0);
+      await withinTest(contentionObserved, signal);
+      releaseHolder?.();
+      await holder;
+      await withinTest(leaseClock.waitFor(preflightStarted), signal);
+      const stopping = harness.reloader.stop();
+      releasePreflight?.();
+      await withinTest(leaseClock.waitFor(stopping), signal);
+      expect(harness.requestRecoveryRestart).not.toHaveBeenCalled();
+    } finally {
+      releaseHolder?.();
+      releasePreflight?.();
+      await holder;
+      await leaseClock.waitFor(harness.reloader.stop());
+      acquisition.mockRestore();
+    }
+  });
 
   it("pauses deferred restart A before external hot config B fails SecretRef preflight", async () => {
     vi.useFakeTimers();
