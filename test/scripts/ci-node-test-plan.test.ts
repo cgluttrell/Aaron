@@ -76,6 +76,7 @@ import { createPluginSdkLightVitestConfig } from "../vitest/vitest.plugin-sdk-li
 import { createPluginSdkVitestConfig } from "../vitest/vitest.plugin-sdk.config.ts";
 import { createPluginsVitestConfig } from "../vitest/vitest.plugins.config.ts";
 import { createRuntimeConfigVitestConfig } from "../vitest/vitest.runtime-config.config.ts";
+import { resolveRepoRootPath } from "../vitest/vitest.shared.config.ts";
 import { startupCorpusTestFiles } from "../vitest/vitest.startup-corpus-paths.mjs";
 import { fullSuiteVitestShards } from "../vitest/vitest.test-shards.mjs";
 import { createToolingVitestConfig } from "../vitest/vitest.tooling.config.ts";
@@ -3739,7 +3740,18 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     }
     for (const previous of [core, server, methods]) {
       expect(worker.test?.runner).toBe(previous.test?.runner);
-      expect(worker.test?.setupFiles).toEqual(previous.test?.setupFiles);
+    }
+    const baseSetupFiles = ["test/setup.ts", "test/setup-openclaw-runtime.ts"].map(
+      resolveRepoRootPath,
+    );
+    expect(core.test?.setupFiles).toEqual(baseSetupFiles);
+    expect(worker.test?.setupFiles).toEqual([
+      baseSetupFiles[0],
+      resolveRepoRootPath("test/setup.cron-non-pressure.ts"),
+      baseSetupFiles[1],
+    ]);
+    for (const project of [server, methods]) {
+      expect(project.test?.setupFiles).toEqual(worker.test?.setupFiles);
     }
     expect(listMatchedTestFiles(worker)).toEqual(gatewayDatabaseWorkerTestFiles);
     expect(listMatchedTestFiles(worker)).toEqual(
@@ -3783,7 +3795,15 @@ describe("scripts/lib/ci-node-test-plan.mts", () => {
     const support = createAgentsSupportVitestConfig({});
     expect(infra.test?.pool).toBe(diagnosticForksPool);
     expect(infra.test?.isolate).toBe(true);
-    expect(infra.test?.setupFiles).toEqual(support.test?.setupFiles);
+    const baseSetupFiles = ["test/setup.ts", "test/setup-openclaw-runtime.ts"].map(
+      resolveRepoRootPath,
+    );
+    expect(support.test?.setupFiles).toEqual(baseSetupFiles);
+    expect(infra.test?.setupFiles).toEqual([
+      baseSetupFiles[0],
+      resolveRepoRootPath("test/setup.cron-non-pressure.ts"),
+      baseSetupFiles[1],
+    ]);
     const admitted = new Set(listMatchedTestFiles(infra));
     for (const file of [
       "src/agents/embedded-agent-runner/run/attempt-bootstrap-prepare.test.ts",
