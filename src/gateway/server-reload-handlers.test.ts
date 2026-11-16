@@ -4257,21 +4257,17 @@ describe("gateway Gmail hot reload handlers", () => {
     }
   });
 
+  // T4873 uninstrumented CI control: preserve the original shutdown schedule.
   it.each(["completion", "AbortError"] as const)(
     "joins admitted config restart %s after managed shutdown starts",
     async (outcome) => {
-      const trace = (stage: string) => console.info(`[T4873 ${outcome}] ${stage}`);
-      trace("test-start");
       vi.useFakeTimers();
       const harness = await createManagedRestartSequenceHarness();
-      trace("harness-ready");
       const { promise: preflightStarted, resolve: markPreflightStarted } = createDeferred();
       const { promise: preflightBlocked, resolve: releasePreflight } = createDeferred();
       harness.activateRuntimeSecrets.prepareSnapshot.mockImplementationOnce(async ({ config }) => {
-        trace("preflight-entered");
         markPreflightStarted?.();
         await preflightBlocked;
-        trace("preflight-released");
         if (outcome === "AbortError") {
           const error = new Error("admitted secret read aborted");
           error.name = "AbortError";
@@ -4283,27 +4279,20 @@ describe("gateway Gmail hot reload handlers", () => {
       try {
         expect(harness.reloader.isConfigReloadSettled()).toBe(true);
         harness.writeConfig(harness.deferredConfig, "shutdown-restart", 1);
-        trace("config-written");
         expect(harness.reloader.isConfigReloadSettled()).toBe(false);
         await vi.advanceTimersByTimeAsync(0);
-        trace("initial-timers-advanced");
         await preflightStarted;
-        trace("preflight-start-observed");
         expect(harness.reloader.isConfigReloadSettled()).toBe(false);
 
         let stopped = false;
         const stopPromise = harness.reloader.stop().then(() => {
           stopped = true;
         });
-        trace("stop-called");
         await vi.advanceTimersByTimeAsync(0);
-        trace("stop-timers-advanced");
         expect(stopped).toBe(false);
         expect(harness.reloader.isConfigReloadSettled()).toBe(false);
         releasePreflight?.();
-        trace("preflight-release-signaled");
         await stopPromise;
-        trace("stop-joined");
         expect(harness.reloader.isConfigReloadSettled()).toBe(false);
 
         expect(harness.requestRecoveryRestart).not.toHaveBeenCalled();
@@ -4318,10 +4307,8 @@ describe("gateway Gmail hot reload handlers", () => {
           );
         }
       } finally {
-        trace("finally-entered");
         releasePreflight?.();
         await harness.reloader.stop();
-        trace("finally-stopped");
       }
     },
   );
