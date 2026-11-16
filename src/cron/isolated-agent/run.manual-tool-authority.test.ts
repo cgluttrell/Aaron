@@ -30,7 +30,7 @@ import { getPluginToolMeta } from "../../plugins/tool-metadata.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { CronService, type CronEvent } from "../service.js";
-import { createNoopLogger } from "../service.test-harness.js";
+import { allowDispatchPressureForTest, createNoopLogger } from "../service.test-harness.js";
 import {
   ensureAgentWorkspaceMock,
   loadRunCronIsolatedAgentTurn,
@@ -162,6 +162,7 @@ describe("manual run tool authority after the initiating invocation closes", () 
       });
     });
     const execution = new CronService({
+      dispatchPressureGuard: allowDispatchPressureForTest,
       scheduler: createTestGatewayScheduler(),
       storePath: path.join(stateDir, "cron", "jobs.json"),
       cronEnabled: true,

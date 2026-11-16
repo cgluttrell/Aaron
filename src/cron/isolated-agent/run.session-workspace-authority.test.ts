@@ -37,7 +37,7 @@ import {
 } from "../../plugins/runtime/gateway-request-scope.js";
 import { createTestGatewayScheduler } from "../../test-utils/gateway-scheduler-clock.js";
 import { CronService } from "../service.js";
-import { createNoopLogger } from "../service.test-harness.js";
+import { allowDispatchPressureForTest, createNoopLogger } from "../service.test-harness.js";
 import { resolveCronSessionTargetSessionKey } from "../session-target.js";
 import {
   ensureAgentWorkspaceMock,
@@ -237,6 +237,7 @@ describe("scheduled workspace authority through creator, storage, scheduler and 
       });
     });
     const execution = new CronService({
+      dispatchPressureGuard: allowDispatchPressureForTest,
       scheduler: createTestGatewayScheduler(),
       storePath: path.join(stateDir, "cron", "jobs.json"),
       cronEnabled: true,
