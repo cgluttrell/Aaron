@@ -374,11 +374,12 @@ describe("scoped vitest configs", () => {
         const { exclude: ownerExclusions, ...ownerCoverage } = resolvedOwner.test.coverage;
         expect(coverage).toEqual(ownerCoverage);
         expect(exclusions).toEqual(expect.arrayContaining(ownerExclusions));
-        expect(
-          exclusions
-            .filter((pattern) => !ownerExclusions.includes(pattern))
-            .every((pattern) => /\.test\.[cm]?[jt]sx?$/u.test(pattern)),
-        ).toBe(true);
+        const additionalNonTestExclusions = exclusions
+          .filter((pattern) => !ownerExclusions.includes(pattern))
+          .filter((pattern) => !/\.test\.[cm]?[jt]sx?$/u.test(pattern));
+        expect(additionalNonTestExclusions).toEqual(
+          root === "src/agents" ? ["test/setup.cron-non-pressure.ts"] : [],
+        );
         expect(projects.map((project) => project.name)).toEqual(names);
         expect(projects.map((project) => project.pool)).toEqual([
           process.platform === "win32" ? "forks" : "threads",
