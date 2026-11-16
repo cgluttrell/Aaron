@@ -47,7 +47,11 @@ import {
   createGatewaySchedulerClock,
   createTestGatewayScheduler,
 } from "../../test-utils/gateway-scheduler-clock.js";
-import { createCronServiceWithStateForTest, createNoopLogger } from "../service.test-harness.js";
+import {
+  allowDispatchPressureForTest,
+  createCronServiceWithStateForTest,
+  createNoopLogger,
+} from "../service.test-harness.js";
 import { onTimer } from "../service/timer.test-support.js";
 import { resolveCronSessionTargetSessionKey } from "../session-target.js";
 import {
@@ -363,6 +367,7 @@ describe("same-conversation scheduled operator continuation", () => {
     });
     const finished = createDeferredCore();
     const { cron: execution, state: schedulerState } = createCronServiceWithStateForTest({
+      dispatchPressureGuard: allowDispatchPressureForTest,
       onEvent: (event) => {
         if (event.action === "finished" && event.jobId === job.id) {
           finished.resolve();
