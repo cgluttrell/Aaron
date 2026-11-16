@@ -158,9 +158,14 @@ describe("projects vitest config", () => {
       expect(projects.map((project) => project.pool)).toEqual(["forks", "forks"]);
       const original = requireTestConfig(createGatewayVitestConfig(env));
       expect(original.pool).toBe(defaultPool);
+      const originalSetupFiles = normalizeConfigPaths(original.setupFiles);
       for (const project of projects) {
         expect(project.runner).toBe(original.runner);
-        expect(project.setupFiles).toEqual(original.setupFiles);
+        expect(normalizeConfigPaths(project.setupFiles)).toEqual(
+          project.name === "gateway-database-workers"
+            ? ["test/setup.ts", "test/setup.cron-non-pressure.ts", "test/setup-openclaw-runtime.ts"]
+            : originalSetupFiles,
+        );
       }
       const filesByProject = projects.map((project) => {
         const exclude = project.exclude.map((pattern) =>
