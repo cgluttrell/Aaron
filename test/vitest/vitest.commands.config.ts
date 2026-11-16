@@ -9,6 +9,7 @@ export function createCommandsVitestConfig(env?: Record<string, string | undefin
     env,
     exclude: [...commandsLightTestFiles, ...databaseWorkerCoreTestFiles],
     name: "commands",
+    setupFiles: ["test/setup.cron-non-pressure.ts"],
     pool: "forks",
   });
 }

@@ -10,6 +10,7 @@ export function createInfraVitestConfig(env?: Record<string, string | undefined>
     exclude: [...boundaryTestFiles, ...cliProcessTestFiles],
     isolate: true,
     name: "infra",
+    setupFiles: ["test/setup.cron-non-pressure.ts"],
     passWithNoTests: true,
     pool: "forks",
   });

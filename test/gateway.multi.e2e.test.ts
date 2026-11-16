@@ -205,6 +205,7 @@ const cron = new CronService({
   enqueueSystemEvent() {},
   requestHeartbeat() {},
   async runIsolatedAgentJob() { return { status: "ok", summary: "scheduler canary completed" }; },
+  dispatchPressureGuard: () => ({ status: "allow", reason: "below_threshold" }),
 });
 try {
   await cron.start();

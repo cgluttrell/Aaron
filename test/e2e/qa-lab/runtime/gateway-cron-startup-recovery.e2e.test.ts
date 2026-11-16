@@ -5,6 +5,7 @@ import { clearConfigCache, clearRuntimeConfigSnapshot } from "../../../../src/co
 import { resetConfigOverrides } from "../../../../src/config/runtime-overrides.js";
 import { clearSessionStoreCacheForTest } from "../../../../src/config/sessions/store-writer-state.js";
 import type { OpenClawConfig } from "../../../../src/config/types.openclaw.js";
+import { allowDispatchPressureForTest } from "../../../../src/cron/service.test-harness.js";
 import { createCronRunHandle, finishCronRun } from "../../../../src/cron/service/run-history.js";
 import { createCronServiceState } from "../../../../src/cron/service/state.js";
 import { saveCronStore } from "../../../../src/cron/store.js";
@@ -147,6 +148,7 @@ describe("Gateway cron startup recovery", () => {
       enqueueSystemEvent: vi.fn(),
       requestHeartbeat: vi.fn(),
       runIsolatedAgentJob: vi.fn(),
+      dispatchPressureGuard: allowDispatchPressureForTest,
     });
 
     for (const job of jobs) {

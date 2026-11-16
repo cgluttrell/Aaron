@@ -31,6 +31,7 @@ export function createGatewayServerVitestConfig(
     // The real Gateway owns its SQLite broker on the process main thread.
     pool: "forks" as const,
     name: "gateway-server",
+    setupFiles: ["test/setup.cron-non-pressure.ts"],
   };
   const config = createScopedVitestConfig(
     ["src/gateway/**/*server*.test.ts", ...gatewayServerBackedHttpTestFiles],
