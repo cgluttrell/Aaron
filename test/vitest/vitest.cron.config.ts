@@ -11,6 +11,7 @@ export function createCronVitestConfig(
     name: "cron",
     pool: "forks",
     passWithNoTests: true,
+    setupFiles: ["test/setup.cron-non-pressure.ts"],
   });
   return {
     ...config,
