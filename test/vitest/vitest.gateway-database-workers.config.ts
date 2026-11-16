@@ -9,6 +9,7 @@ export function createGatewayDatabaseWorkersVitestConfig(env?: Record<string, st
     intersectIncludeFile: true,
     isolate: false,
     name: "gateway-database-workers",
+    setupFiles: ["test/setup.cron-non-pressure.ts"],
     passWithNoTests: true,
     pool: "forks",
     useNonIsolatedRunner: true,

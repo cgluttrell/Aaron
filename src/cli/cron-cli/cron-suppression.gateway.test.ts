@@ -9,7 +9,7 @@ import { resolveCronDeliveryPlan } from "../../cron/delivery-plan.js";
 import { dispatchCronDelivery } from "../../cron/isolated-agent/delivery-dispatch.js";
 import { readCronRunHistoryPageForTests } from "../../cron/run-history.test-support.js";
 import { CronService, type CronEvent } from "../../cron/service.js";
-import { createNoopLogger } from "../../cron/service.test-harness.js";
+import { allowDispatchPressureForTest, createNoopLogger } from "../../cron/service.test-harness.js";
 import type { CronServiceDeps } from "../../cron/service/state.js";
 import { loadCronStore } from "../../cron/store.js";
 import { cronStoreKey } from "../../cron/store/key.js";
@@ -190,6 +190,7 @@ describe("cron CLI delivery suppression readback", () => {
           enqueueSystemEvent: vi.fn(),
           requestHeartbeat: vi.fn(),
           runIsolatedAgentJob,
+          dispatchPressureGuard: allowDispatchPressureForTest,
           onEvent: (event) => {
             if (event.action === "finished") {
               events.push(event);
