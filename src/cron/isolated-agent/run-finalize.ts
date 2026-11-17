@@ -69,7 +69,7 @@ function findAgentTurnFailureMarker(text: string | undefined, markers: readonly 
       const remainder = unwrappedDeclaration
         .slice(candidate.length)
         .replace(/^(?:\*\*|__|\*|_)/, "");
-      return /^(?:$|[\s:—–-])/.test(remainder) && !/^[:\s—–-]+none\b/i.test(remainder);
+      return /^(?:$|[\s:—–/-])/.test(remainder) && !/^[:\s—–-]+none\b/i.test(remainder);
     });
     if (marker) {
       return marker;
