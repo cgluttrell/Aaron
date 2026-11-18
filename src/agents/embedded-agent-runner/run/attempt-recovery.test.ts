@@ -26,7 +26,10 @@ import {
   type TransportDropScenario,
 } from "./attempt-recovery.test-support.js";
 import { createEmbeddedRunContextRecoveryState } from "./context-recovery-state.js";
-import { resolveEmbeddedRunAttemptTerminalState } from "./terminal-outcome.js";
+import {
+  resolveEmbeddedRunAttemptTerminalOutcome,
+  resolveEmbeddedRunAttemptTerminalState,
+} from "./terminal-outcome.js";
 
 vi.mock("../../../infra/backoff.js", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../../infra/backoff.js")>()),
@@ -133,6 +136,28 @@ function recoveryCases(
 }
 
 describe("recoverEmbeddedRunAttempt", () => {
+  it("hands an over-bound replay-unsafe 429 to the visible terminal error outcome", async () => {
+    vi.mocked(sleepWithAbort).mockClear();
+    const fixture = await recoverAfterTransportDrop({
+      config: { agents: { defaults: { retry: { maxUnsafeWaitMs: 600_000 } } } },
+      errorMessage: "429 rate_limit_exceeded; Retry-After: 6581",
+      fallbackConfigured: true,
+      replaySafe: false,
+      diagnostics: [],
+    });
+    expect(fixture.recovery.action).toBe("proceed");
+    expect(sleepWithAbort).not.toHaveBeenCalled();
+    expect(await handleAssistantFailureAfterRecovery(fixture, "rate_limit")).toMatchObject({
+      action: "proceed",
+    });
+    expect(
+      resolveEmbeddedRunAttemptTerminalOutcome({
+        attempt: fixture.attempt,
+        assistant: fixture.erroredAssistant,
+      }),
+    ).toMatchObject({ status: "error", error: expect.stringContaining("429") });
+  });
+
   it.each([
     { retryAvailable: true, decision: "accepted", reason: "transient_retry" },
     { retryAvailable: false, decision: "rejected", reason: "replay_unsafe" },

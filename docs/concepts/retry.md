@@ -51,6 +51,8 @@ If a Responses request reaches its output-token limit while generating a tool ca
 
 Exhausted subscription, daily, weekly, or monthly usage windows go directly to eligible auth-profile or model fallback. A `Retry-After` value alone does not establish usage-window exhaustion: temporary throttles still honor the provider's minimum wait up to the saved `retry.provider.maxRetryDelayMs` (default 60 seconds). A rate-limit floor longer than that cap goes directly to fallback when one is configured, since the operator has already said how long a server-requested wait may hold the run; with no fallback configured the floor is honored in full, and `maxRetryDelayMs: 0` disables the cap.
 
+For an attempt that may have already produced tool effects, fallback cannot safely replay the request. Set `agents.defaults.retry.maxUnsafeWaitMs` to a positive number of milliseconds to stop an unsafe same-model 429 wait when the provider's retry floor exceeds that bound. The run then surfaces the existing terminal error for recovery instead of sleeping or replaying effects. This setting is optional; leaving it unset preserves the existing wait behavior.
+
 The [model failover controller](/concepts/model-failover#model-fallback) owns this recovery budget. Once it is exhausted, OpenClaw follows eligible auth-profile or model fallback paths, or surfaces the final failure. Native harnesses may retry individual requests internally before returning a terminal failure to OpenClaw; those internal retries are separate from OpenClaw's continuation budget.
 
 ChatGPT SSE errors preserve HTTP status and `Retry-After` together, so a transient HTTP response remains retryable even when its message or provider code is unfamiliar. The ChatGPT transport separately reconnects once for `websocket_connection_limit_reached` before streaming; this is not an SSE HTTP-response retry.
@@ -93,7 +95,7 @@ policy does not wrap arbitrary Git commands run by agents or setup scripts.
 
 Discord and Telegram channel retry timings are built in and are not configurable in `openclaw.json`.
 
-The embedded runtime's existing session setting `retry.provider.maxRetries` overrides its recovery retry budget; `0` disables retries, and rate limits remain capped at 10 total attempts. This is an embedded session setting, not an `openclaw.json` key, and it does not configure native harness request retries. Automatic recovery requires no new configuration.
+The embedded runtime's existing session setting `retry.provider.maxRetries` overrides its recovery retry budget; `0` disables retries, and rate limits remain capped at 10 total attempts. This is an embedded session setting, not an `openclaw.json` key, and it does not configure native harness request retries. Automatic recovery requires no new configuration. The optional `agents.defaults.retry.maxUnsafeWaitMs` bounds only replay-unsafe rate-limit waits.
 
 ## Notes
 
