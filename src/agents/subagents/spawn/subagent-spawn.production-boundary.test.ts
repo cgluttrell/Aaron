@@ -91,6 +91,10 @@ import { registerManagedWorktreeSpawnCases } from "./subagent-spawn.worktree.tes
 vi.mock("../announce/subagent-announce.js", { spy: true });
 vi.mock("../../../gateway/call.js", { spy: true });
 vi.mock("../registry/subagent-registry-state.js", { spy: true });
+vi.mock("../../../process/dispatch-pressure-guard.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../../../process/dispatch-pressure-guard.js")>()),
+  decideDispatchPressure: () => ({ status: "allow", reason: "below_threshold" }),
+}));
 
 const runEmbeddedAgent = vi.hoisted(() =>
   vi.fn<typeof import("../../embedded-agent.js").runEmbeddedAgent>(),

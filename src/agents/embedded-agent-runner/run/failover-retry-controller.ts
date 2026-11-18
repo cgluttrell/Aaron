@@ -281,6 +281,7 @@ export function createEmbeddedRunFailoverRetryController(input: {
           | "retry_budget_exhausted"
           | "retry_delay_unavailable"
           | "retry_delay_exceeds_cap"
+          | "retry_delay_exceeds_unsafe_cap"
           | "wait_interrupted"
           | "backoff_completed",
       ) =>
@@ -317,7 +318,7 @@ export function createEmbeddedRunFailoverRetryController(input: {
         return false;
       }
       // Honor the SDK's retry-delay cap when replay-safe fallback is available.
-      // Otherwise a long Retry-After must wait: declining would end the turn.
+      // An unsafe attempt waits unless the configured unsafe cap opts into ending the turn.
       const retryDelayCapMs =
         retry.maxRetryDelayMs !== undefined &&
         Number.isFinite(retry.maxRetryDelayMs) &&
@@ -335,6 +336,20 @@ export function createEmbeddedRunFailoverRetryController(input: {
         recordDecision("rejected", "retry_delay_exceeds_cap");
         log.warn(
           `rate-limit retry floor ${retry.retryAfterMs === Infinity ? "exceeds representable time" : `${retry.retryAfterMs}ms`} exceeds retry.provider.maxRetryDelayMs=${retryDelayCapMs} for ${sanitizeForLog(provider)}/${sanitizeForLog(modelId)}; failing over`,
+        );
+        return false;
+      }
+      const unsafeWaitCapMs = params.config?.agents?.defaults?.retry?.maxUnsafeWaitMs;
+      if (
+        rateLimit &&
+        retry.failoverEligible === false &&
+        unsafeWaitCapMs !== undefined &&
+        retry.retryAfterMs !== undefined &&
+        retry.retryAfterMs > unsafeWaitCapMs
+      ) {
+        recordDecision("rejected", "retry_delay_exceeds_unsafe_cap");
+        log.warn(
+          `replay-unsafe rate-limit retry floor ${retry.retryAfterMs === Infinity ? "exceeds representable time" : `${retry.retryAfterMs}ms`} exceeds agents.defaults.retry.maxUnsafeWaitMs=${unsafeWaitCapMs} for ${sanitizeForLog(provider)}/${sanitizeForLog(modelId)}; stopping same-model retries`,
         );
         return false;
       }
