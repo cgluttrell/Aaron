@@ -506,6 +506,9 @@ export async function applyShortTermPromotions(
         if (toAppend.length > 0) {
           // Model absence or rejected output preserves the shipped append-only
           // promotion contract, so a deep sweep never loses eligible memories.
+          // The loss fraction guards semantic consolidation, not retention of
+          // older generated display sections. Rotate those sections to keep
+          // new promotions visible when MEMORY.md reaches its file budget.
           const appendPlan = buildBudgetedMemoryAppend({
             existingMemory,
             newSection: buildPromotionSection(
@@ -515,7 +518,6 @@ export async function applyShortTermPromotions(
               options.maxPromotedSnippetTokens,
             ),
             budgetChars,
-            maxPriorEntryLossFraction,
           });
           const { content, droppedDates } = appendPlan;
           if (budgetChars > 0 && content.length > budgetChars) {
