@@ -1,5 +1,6 @@
 import { DEFAULT_CRON_MAX_CONCURRENT_RUNS } from "../../config/cron-limits.js";
 import { runOutsideOperatorToolGatewayAuthority } from "../../gateway/operator-tool-gateway-authority.js";
+import { isAbortError } from "../../infra/abort-signal.js";
 import { hasSqliteWorkerOutcomeUnknown } from "../../infra/sqlite-worker-contract.js";
 import { createSqliteWorkerWriteAdmission } from "../../infra/sqlite-worker-store.js";
 import { runWithGatewayDetachedWorkContinuation } from "../../process/gateway-work-admission.js";
@@ -18,6 +19,7 @@ import type {
   CronRunRequestContext,
   CronSkippedRequest,
 } from "../store/run-queue.types.js";
+import { parseCronScheduledRunId } from "../store/run-request-id.js";
 import type { CronJob } from "../types.js";
 import { normalizeCronRunErrorText } from "./execution-errors.js";
 import { locked } from "./locked.js";
@@ -223,7 +225,7 @@ function publishSkipped(state: CronServiceState, skipped: CronSkippedRequest) {
       jobId: skipped.runReceipt.jobId,
       job: skipped.job ?? pending.job,
       action: "finished",
-      status: "skipped",
+      status: skipped.status ?? "skipped",
       error: skipped.error,
       runId: pending.options.runId,
       runAtMs: skipped.runReceipt.startedAtMs,
@@ -258,6 +260,7 @@ async function cancelCronRunRequests(
   state: CronServiceState,
   receiptIds: string[],
   reason: string,
+  status?: "error",
 ) {
   if (receiptIds.length === 0) {
     return;
@@ -273,6 +276,7 @@ async function cancelCronRunRequests(
         receiptIds,
         nowMs: state.deps.nowMs(),
         reason,
+        status,
       },
     }),
   );
@@ -464,19 +468,13 @@ export async function launchCronRunQueueResult(
           runOutsideOperatorToolGatewayAuthority(() => {
             const run = async () => {
               if (preparation) {
-                try {
-                  await waitForAgentDatabasePreparation(preparation.agentId, {
-                    env: state.deps.env,
-                    signal: AbortSignal.any([
-                      state.schedulerScope.signal,
-                      preparation.controller.signal,
-                    ]),
-                  });
-                } catch (error) {
-                  // Observation only rejects on lifecycle cancellation.
-                  preparation.controller.abort();
-                  throw error;
-                }
+                await waitForAgentDatabasePreparation(preparation.agentId, {
+                  env: state.deps.env,
+                  signal: AbortSignal.any([
+                    state.schedulerScope.signal,
+                    preparation.controller.signal,
+                  ]),
+                });
                 assertAgentDatabaseAdmitted(preparation.agentId, { env: state.deps.env });
                 // A stale readiness snapshot can settle immediately; wake after this drain unlocks.
                 await state.op;
@@ -500,9 +498,12 @@ export async function launchCronRunQueueResult(
           return;
         }
         try {
-          if (preparation?.controller.signal.aborted) {
-            // Keep durable custody for recovery; terminal inspection failures
-            // instead wake the queue and pass through ordinary eligibility.
+          if (
+            preparation?.controller.signal.aborted ||
+            state.schedulerScope.signal.aborted ||
+            (preparation && isAbortError(error))
+          ) {
+            // Lifecycle cancellation keeps durable custody for recovery.
             launch.completion.resolve({ ok: true, ran: false, reason: "stopped" });
             return;
           }
@@ -516,6 +517,9 @@ export async function launchCronRunQueueResult(
               state,
               [entry.runReceipt.receiptId],
               normalizeCronRunErrorText(error),
+              preparation && parseCronScheduledRunId(entry.runReceipt.receiptId)
+                ? "error"
+                : undefined,
             );
           }
         } catch (cleanupError) {
