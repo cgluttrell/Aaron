@@ -140,6 +140,8 @@ async function ciState(review) {
     return "pending";
   }
   const jobs = [];
+  const seenJobIds = new Set();
+  let totalCount;
   // GitHub can persistently fail a large job page while smaller pages of the same
   // range succeed. Larger sizes skip server-error retries, which would spend the
   // request deadline, and request that range again at half size. The smallest
@@ -160,14 +162,30 @@ async function ciState(review) {
       page = 2 * page - 2;
       continue;
     }
-    if (!Array.isArray(result.jobs) || !Number.isSafeInteger(result.total_count)) {
+    if (
+      !Array.isArray(result.jobs) ||
+      !Number.isSafeInteger(result.total_count) ||
+      result.total_count < 0 ||
+      result.jobs.length > perPage ||
+      (totalCount !== undefined && result.total_count !== totalCount)
+    ) {
       throw new Error("CI returned an invalid job list.");
     }
-    jobs.push(...result.jobs);
-    if (jobs.length >= result.total_count) {
+    totalCount = result.total_count;
+    for (const job of result.jobs) {
+      if (!Number.isSafeInteger(job?.id) || job.id <= 0) {
+        throw new Error("CI returned an invalid job list.");
+      }
+      if (seenJobIds.has(job.id)) {
+        throw new Error("CI did not return the complete job list.");
+      }
+      seenJobIds.add(job.id);
+      jobs.push(job);
+    }
+    if (jobs.length === totalCount) {
       break;
     }
-    if (result.jobs.length === 0 || page >= 100) {
+    if (jobs.length > totalCount || result.jobs.length < perPage || page >= 100) {
       throw new Error("CI did not return the complete job list.");
     }
   }
