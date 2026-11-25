@@ -50,7 +50,7 @@ const run = {
 };
 const jobs = {
   total_count: 1,
-  jobs: [{ name: "openclaw/ci-gate", status: "completed", conclusion: "success" }],
+  jobs: [{ id: 1, name: "openclaw/ci-gate", status: "completed", conclusion: "success" }],
 };
 const rolePath = "GET /repos/openclaw/openclaw/collaborators/maintainer/permission";
 const statusPath = `POST /repos/openclaw/openclaw/statuses/${head}`;
@@ -1276,10 +1276,37 @@ describe("combined security review entry point", () => {
   const jobPage = (from: number, count: number, total: number) => ({
     total_count: total,
     jobs: Array.from({ length: count }, (_, index) => ({
+      id: from + index + 1,
       name: from + index === total - 1 ? "openclaw/ci-gate" : `job ${from + index}`,
       status: "completed",
       conclusion: "success",
     })),
+  });
+
+  it.each([
+    {
+      name: "a changing total count",
+      firstTotal: 201,
+      second: jobPage(100, 100, 200),
+    },
+    {
+      name: "duplicate job IDs across pages",
+      firstTotal: 200,
+      second: {
+        ...jobPage(0, 100, 100),
+        total_count: 200,
+      },
+    },
+  ])("rejects incomplete paged CI jobs with $name", ({ firstTotal, second }) => {
+    const first = jobPage(0, 100, firstTotal);
+    const result = evaluate({
+      [jobsPath]: { httpError: 404 },
+      [`${jobsPath}?per_page=100&page=1`]: first,
+      [`${jobsPath}?per_page=100&page=2`]: second,
+    });
+    expect(result.combined).not.toContain("success");
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/(?:complete|invalid) job list/iu);
   });
 
   function ciCase(
