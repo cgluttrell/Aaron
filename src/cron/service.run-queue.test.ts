@@ -224,6 +224,77 @@ it("finishes cron initialization while missed command jobs await their agents", 
   });
 });
 
+it.for(["at", "every"] as const)(
+  "failed startup preparation records and retries the missed occurrence: %s",
+  async (kind, { signal }) => {
+    const job = {
+      ...commandJob(`failed-startup-${kind}`, NOW - 1_000),
+      ...(kind === "every"
+        ? { schedule: { kind: "every" as const, everyMs: 60_000, anchorMs: NOW - 1_000 } }
+        : {}),
+      agentId: "preparing",
+    };
+    const storePath = await storeJobs([job]);
+    let now = NOW;
+    const receipts = () =>
+      runOpenClawStateWriteTransaction(({ db }) =>
+        db
+          .prepare("SELECT status FROM cron_run_receipts WHERE store_key = ? ORDER BY cursor_id")
+          .all(storePath),
+      );
+    await withAgentDatabaseStartupAdmission(async (admission) => {
+      const { lifetime, env, inspection } = deferAdmission(admission, [job.agentId]);
+      const runCommandJob = successfulCommand();
+      const { cron, state } = service(storePath, { runCommandJob, nowMs: () => now });
+      const starting = cron.start();
+      try {
+        await withinTest(starting, signal);
+        expect((await loadCronStore(storePath)).jobs[0]?.state.queuedAtMs).toBe(NOW);
+        inspection.reject(new Error("database preparation failed"));
+        await withinTest(waitForCronRunQueue(state), signal);
+        const failed = (await loadCronStore(storePath)).jobs[0]?.state;
+        expect(failed?.lastRunStatus).toBe("error");
+        expect(failed?.lastError).toContain("database preparation failed");
+        expect(failed?.consecutiveErrors).toBe(1);
+        expect(failed?.nextRunAtMs).toBe(NOW + 60_000);
+        expect(receipts()).toEqual([{ status: "error" }]);
+        now += 59_999;
+        await onTimer(state);
+        expect(receipts()).toEqual([{ status: "error" }]);
+        expect(runCommandJob).not.toHaveBeenCalled();
+      } finally {
+        inspection.resolve(ready);
+        cron.stop();
+        await Promise.all([starting, cron.waitForIdle(), lifetime.stop()]);
+        recordAgentDatabaseAdmissions([], { env, source: "startup" });
+      }
+    });
+    now += 1;
+    await withAgentDatabaseStartupAdmission(async (admission) => {
+      const { lifetime, env, inspection } = deferAdmission(admission, [job.agentId]);
+      const runCommandJob = successfulCommand();
+      const { cron, state } = service(storePath, { runCommandJob, nowMs: () => now });
+      const starting = cron.start();
+      try {
+        await withinTest(starting, signal);
+        inspection.reject(new Error("database preparation failed again"));
+        await withinTest(waitForCronRunQueue(state), signal);
+        const retried = (await loadCronStore(storePath)).jobs[0]?.state;
+        expect(retried?.lastRunStatus).toBe("error");
+        expect(retried?.consecutiveErrors).toBe(2);
+        expect(retried?.nextRunAtMs).toBe(NOW + 120_000);
+        expect(receipts()).toEqual([{ status: "error" }, { status: "error" }]);
+        expect(runCommandJob).not.toHaveBeenCalled();
+      } finally {
+        inspection.resolve(ready);
+        cron.stop();
+        await Promise.all([starting, cron.waitForIdle(), lifetime.stop()]);
+        recordAgentDatabaseAdmissions([], { env, source: "startup" });
+      }
+    });
+  },
+);
+
 it.for(["manual", "scheduled"] as const)(
   "keeps service-scoped preparing jobs queued while a healthy agent runs: %s",
   async (source, { signal }) => {

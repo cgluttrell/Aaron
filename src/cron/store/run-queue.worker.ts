@@ -24,7 +24,11 @@ import {
   readDefaultProactiveJobReceiptInDatabase,
 } from "../proactive-job-receipt.kernel.js";
 import { CRON_ADMISSION_DEFERRED_RECEIPT_ERROR } from "../service/admission-deferred.js";
-import { isJobEnabled, recomputeJobNextRunAtMs } from "../service/jobs-scheduling.js";
+import {
+  isJobEnabled,
+  normalizeConsecutiveErrors,
+  recomputeJobNextRunAtMs,
+} from "../service/jobs-scheduling.js";
 import { retainManualOneShotOccurrence } from "../service/one-shot-schedule.js";
 import type { CronJob, CronStoredJob } from "../types.js";
 import { hasCanonicalCronDeliveryMode } from "./delivery-codec.js";
@@ -84,7 +88,7 @@ function skipRequest(
   job: CronJob | undefined,
   nowMs: number,
   error: string,
-  status: "skipped" | "superseded" = "skipped",
+  status: "skipped" | "superseded" | "error" = "skipped",
   previousEnabled?: boolean,
 ): CronSkippedRequest {
   finishCronRunReceiptInDatabase({
@@ -106,9 +110,19 @@ function skipRequest(
       delete job.state.runningReceiptId;
       delete job.state.runningScheduleChangeId;
     }
+    if (status === "error" && resolveCronJobConfigRevision(job) === handle.configRevision) {
+      job.state.lastRunAtMs = handle.startedAtMs;
+      job.state.lastDurationMs = Math.max(0, nowMs - handle.startedAtMs);
+      job.state.lastRunStatus = "error";
+      job.state.lastStatus = "error";
+      job.state.lastError = error;
+      job.state.consecutiveErrors = normalizeConsecutiveErrors(job.state.consecutiveErrors) + 1;
+      job.state.nextRunAtMs = nowMs + 60_000;
+      job.state.startupCatchupAtMs = job.state.nextRunAtMs;
+    }
     updateCronRuntimeRow(db, handle.storeKey, job, previousEnabled);
   }
-  if (status === "skipped") {
+  if (status === "skipped" || status === "error") {
     recordSkippedCronRequestInDatabase(db, {
       storeKey: handle.storeKey,
       jobId: handle.jobId,
@@ -118,9 +132,10 @@ function skipRequest(
       endedAt: nowMs,
       error,
       nextRunAtMs: job?.state.nextRunAtMs,
+      status,
     });
   }
-  return { job, runReceipt: handle, error };
+  return { job, runReceipt: handle, error, ...(status === "error" ? { status } : {}) };
 }
 
 export function requestCronRunsInWorker(

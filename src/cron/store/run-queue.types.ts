@@ -19,6 +19,7 @@ export type CronSkippedRequest = {
   job?: CronJob;
   runReceipt: CronRunReceiptHandle;
   error: string;
+  status?: "error";
   eventInvalidated?: true;
 };
 
@@ -76,7 +77,7 @@ export type CronRunQueueOperations = {
       receiptIds: string[];
       nowMs: number;
       reason: string;
-      status?: "skipped" | "superseded";
+      status?: "skipped" | "superseded" | "error";
     };
     output: { skipped: CronSkippedRequest[] };
   };

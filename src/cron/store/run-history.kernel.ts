@@ -254,6 +254,7 @@ export function recordSkippedCronRequestInDatabase(
     endedAt: number;
     error: string;
     nextRunAtMs?: number;
+    status?: "skipped" | "error";
   },
 ): void {
   const requestRunId = input.receiptId
@@ -276,7 +277,7 @@ export function recordSkippedCronRequestInDatabase(
         ts: input.endedAt,
         jobId: input.jobId,
         action: "finished",
-        status: "skipped",
+        status: input.status ?? "skipped",
         error: input.error,
         runId: requestRunId ?? undefined,
         runAtMs: input.startedAt,
