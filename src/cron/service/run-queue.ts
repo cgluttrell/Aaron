@@ -499,9 +499,10 @@ export async function launchCronRunQueueResult(
         }
         try {
           if (
-            preparation?.controller.signal.aborted ||
-            state.schedulerScope.signal.aborted ||
-            (preparation && isAbortError(error))
+            preparation &&
+            (preparation.controller.signal.aborted ||
+              state.schedulerScope.signal.aborted ||
+              isAbortError(error))
           ) {
             // Lifecycle cancellation keeps durable custody for recovery.
             launch.completion.resolve({ ok: true, ran: false, reason: "stopped" });
