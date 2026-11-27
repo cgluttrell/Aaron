@@ -69,6 +69,10 @@ function findAgentTurnFailureMarker(text: string | undefined, markers: readonly 
       const remainder = unwrappedDeclaration
         .slice(candidate.length)
         .replace(/^(?:\*\*|__|\*|_)/, "");
+      // A zero-count summary is not a declared failed run.
+      if (candidate === "FAILED" && /^\/0\b/.test(remainder)) {
+        return false;
+      }
       return /^(?:$|[\s:—–/-])/.test(remainder) && !/^[:\s—–-]+none\b/i.test(remainder);
     });
     if (marker) {
