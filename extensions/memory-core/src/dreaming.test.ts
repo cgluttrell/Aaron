@@ -740,6 +740,58 @@ describe("dreaming service reconciliation", () => {
     expect(sweepArgs.workspaceDir).toBe(workspaceDir);
   });
 
+  it("claims a cron after durable promotion even when the phase sweep fails", async () => {
+    const workspaceDir = await createTempWorkspace("openclaw-dreaming-claim-");
+    runDreamingSweepPhasesMock.mockRejectedValueOnce(new Error("phase unavailable"));
+    const { api, harness, logger, reply } = createDreamingTestContext({
+      config: workspaceDreamingConfig(workspaceDir),
+    });
+    await startDreaming(api, harness);
+
+    await expect(reply({ trigger: "cron", agentId: "main", workspaceDir })).resolves.toEqual({
+      handled: true,
+      reason: "memory-core: short-term dreaming processed",
+    });
+    expectLogContains(
+      logger.info,
+      "dreaming promotion complete (workspaces=1, candidates=0, applied=0, failed=0",
+    );
+  });
+
+  it("bounds service stop while a deferred phase sweep remains stuck", async () => {
+    const workspaceDir = await createTempWorkspace("openclaw-dreaming-stuck-phase-");
+    let releaseSweep: (() => void) | undefined;
+    runDreamingSweepPhasesMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseSweep = () => resolve({ narratives: [], failed: false });
+        }),
+    );
+    const { api, harness, logger, reply } = createDreamingTestContext({
+      config: workspaceDreamingConfig(workspaceDir),
+    });
+    await startDreaming(api, harness);
+    await expect(reply({ trigger: "cron", agentId: "main", workspaceDir })).resolves.toMatchObject({
+      handled: true,
+    });
+
+    vi.useFakeTimers();
+    const stopping = triggerDreamingServiceStop(api);
+    try {
+      let stopped = false;
+      void stopping.then(() => {
+        stopped = true;
+      });
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(stopped).toBe(true);
+      expectLogContains(logger.warn, "dreaming stop timed out waiting for background tasks");
+    } finally {
+      releaseSweep?.();
+      vi.useRealTimers();
+      await stopping;
+    }
+  });
+
   it.each([{ label: "mixed outcomes", rejected: 1, promoted: 1 }])(
     "reports bounded rejection counts through the cron hook: $label",
     async ({ rejected, promoted }) => {

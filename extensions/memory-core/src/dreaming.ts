@@ -23,6 +23,7 @@ import { resolveMemoryPromotionFileMaxChars } from "./memory-budget.js";
 import type { PromotionRejectionCategory } from "./short-term-promotion-types.js";
 
 const RUNTIME_CRON_RECONCILE_INTERVAL_MS = 60_000;
+const DREAMING_STOP_JOIN_TIMEOUT_MS = 120_000;
 
 type Logger = Pick<OpenClawPluginApi["logger"], "info" | "warn" | "error">;
 
@@ -122,11 +123,11 @@ async function runShortTermDreamingPromotion(params: {
     import("./dreaming-phases.js"),
     import("./short-term-promotion.js"),
   ]);
+  const deferPhaseSweep = Boolean(params.runInBackground);
   for (const { agentId, agentIds, workspaceDir } of workspaces) {
     const sweepNowMs = Date.now();
-    let phaseResult: Awaited<ReturnType<typeof runDreamingSweepPhases>>;
-    try {
-      phaseResult = await runDreamingSweepPhases({
+    const runPhases = () =>
+      runDreamingSweepPhases({
         agentId,
         workspaceDir,
         pluginConfig,
@@ -134,15 +135,21 @@ async function runShortTermDreamingPromotion(params: {
         logger: params.logger,
         nowMs: sweepNowMs,
       });
-    } catch (err) {
-      failedWorkspaces += 1;
-      params.logger.error(
-        `memory-core: dreaming sweep failed for workspace ${workspaceDir}: ${formatErrorMessage(err)}`,
-      );
-      continue;
+    let phaseResult: Awaited<ReturnType<typeof runDreamingSweepPhases>> | undefined;
+    if (!deferPhaseSweep) {
+      try {
+        phaseResult = await runPhases();
+      } catch (err) {
+        failedWorkspaces += 1;
+        params.logger.error(
+          `memory-core: dreaming sweep failed for workspace ${workspaceDir}: ${formatErrorMessage(err)}`,
+        );
+        continue;
+      }
     }
 
-    const { narratives, failed } = phaseResult;
+    const narratives = phaseResult?.narratives ?? [];
+    const failed = phaseResult?.failed ?? false;
     if (failed) {
       failedWorkspaces += 1;
     } else {
@@ -281,52 +288,79 @@ async function runShortTermDreamingPromotion(params: {
         });
       }
     }
-    // The sweep owns diary publication, not the individual phases. Preserve prepared
-    // Light/REM material even when promotion/reporting failed, and publish only once.
-    const firstNarrative = narratives[0];
-    const lastNarrative = narratives.at(-1);
-    if (!firstNarrative || !lastNarrative) {
-      continue;
-    }
-    const data: NarrativePhaseData = {
-      ...firstNarrative.data,
-      phase: lastNarrative.data.phase,
-      snippets: uniqueStrings(narratives.flatMap(({ data: phaseData }) => phaseData.snippets)),
-      themes: uniqueStrings(narratives.flatMap(({ data: phaseData }) => phaseData.themes ?? [])),
-      promotions: uniqueStrings(
-        narratives.flatMap(({ data: phaseData }) => phaseData.promotions ?? []),
-      ),
-      sourceEntryKeys: uniqueStrings(
-        narratives.flatMap(({ data: phaseData }) => phaseData.sourceEntryKeys ?? []),
-      ),
+    const publishNarrative = async (): Promise<void> => {
+      if (deferPhaseSweep) {
+        try {
+          const deferred = await runPhases();
+          narratives.unshift(...deferred.narratives);
+          if (deferred.failed) {
+            params.logger.warn(
+              `memory-core: dreaming phase sweep degraded [workspace=${workspaceDir}].`,
+            );
+          }
+        } catch (err) {
+          params.logger.error(
+            `memory-core: dreaming sweep failed for workspace ${workspaceDir}: ${formatErrorMessage(err)}`,
+          );
+        }
+      }
+      // The sweep owns diary publication, not the individual phases. Preserve prepared
+      // Light/REM material even when promotion/reporting failed, and publish only once.
+      const firstNarrative = narratives[0];
+      const lastNarrative = narratives.at(-1);
+      if (!firstNarrative || !lastNarrative) {
+        return;
+      }
+      const data: NarrativePhaseData = {
+        ...firstNarrative.data,
+        phase: lastNarrative.data.phase,
+        snippets: uniqueStrings(narratives.flatMap(({ data: phaseData }) => phaseData.snippets)),
+        themes: uniqueStrings(narratives.flatMap(({ data: phaseData }) => phaseData.themes ?? [])),
+        promotions: uniqueStrings(
+          narratives.flatMap(({ data: phaseData }) => phaseData.promotions ?? []),
+        ),
+        sourceEntryKeys: uniqueStrings(
+          narratives.flatMap(({ data: phaseData }) => phaseData.sourceEntryKeys ?? []),
+        ),
+      };
+      if (!params.subagent) {
+        await appendFallbackNarrativeEntry({
+          workspaceDir,
+          data,
+          nowMs: sweepNowMs,
+          timezone: lastNarrative.timezone,
+          logger: params.logger,
+          reason: "subagent runtime is unavailable",
+        });
+      } else {
+        const narrativeOutcome = await runDreamNarrative({
+          agentId,
+          timeoutMs: params.narrativeTimeoutMs,
+          subagent: params.subagent,
+          workspaceDir,
+          data,
+          nowMs: sweepNowMs,
+          timezone: lastNarrative.timezone,
+          model: lastNarrative.model,
+          logger: params.logger,
+          runInBackground: params.runInBackground,
+        });
+        if (narrativeOutcome.status === "degraded") {
+          degradedNarratives += 1;
+        } else if (narrativeOutcome.status === "pending") {
+          pendingNarratives += 1;
+        }
+      }
     };
-    if (!params.subagent) {
-      await appendFallbackNarrativeEntry({
-        workspaceDir,
-        data,
-        nowMs: sweepNowMs,
-        timezone: lastNarrative.timezone,
-        logger: params.logger,
-        reason: "subagent runtime is unavailable",
+    if (deferPhaseSweep && params.runInBackground) {
+      // Cron claims after durable promotion; phase and diary work belongs to the service.
+      void params.runInBackground(publishNarrative).catch((err: unknown) => {
+        params.logger.error(
+          `memory-core: dreaming background sweep failed for workspace ${workspaceDir}: ${formatErrorMessage(err)}`,
+        );
       });
     } else {
-      const narrativeOutcome = await runDreamNarrative({
-        agentId,
-        timeoutMs: params.narrativeTimeoutMs,
-        subagent: params.subagent,
-        workspaceDir,
-        data,
-        nowMs: sweepNowMs,
-        timezone: lastNarrative.timezone,
-        model: lastNarrative.model,
-        logger: params.logger,
-        runInBackground: params.runInBackground,
-      });
-      if (narrativeOutcome.status === "degraded") {
-        degradedNarratives += 1;
-      } else if (narrativeOutcome.status === "pending") {
-        pendingNarratives += 1;
-      }
+      await publishNarrative();
     }
   }
   // A summary that reads identically whether the sweep worked or failed everywhere is how
@@ -549,7 +583,22 @@ export function registerShortTermPromotionDreaming(api: OpenClawPluginApi): void
       // Plugin replacement stops services, not Gateway hooks. Fence timers and
       // settle their work before the successor can own the same declaration.
       disposeDreaming();
-      await Promise.allSettled(dreamingTasks);
+      const joined = Promise.allSettled(dreamingTasks).then(() => true);
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const finished = await Promise.race([
+          joined,
+          new Promise<false>((resolve) => {
+            timeout = setTimeout(() => resolve(false), DREAMING_STOP_JOIN_TIMEOUT_MS);
+            timeout.unref?.();
+          }),
+        ]);
+        if (!finished) {
+          api.logger.warn("memory-core: dreaming stop timed out waiting for background tasks");
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
     },
   });
 
