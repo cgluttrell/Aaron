@@ -289,8 +289,13 @@ export function foreignSessionIngestionSource(
   };
 }
 
+const MC_ACTOR_TOKEN = /\bmcat1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g;
+
 function normalizeSessionCorpusSnippet(value: string): string {
-  return truncateUtf16Safe(value.replace(/\s+/g, " ").trim(), SESSION_INGESTION_MAX_SNIPPET_CHARS);
+  return truncateUtf16Safe(
+    value.replace(MC_ACTOR_TOKEN, "[REDACTED_MC_ACTOR_TOKEN]").replace(/\s+/g, " ").trim(),
+    SESSION_INGESTION_MAX_SNIPPET_CHARS,
+  );
 }
 
 function hashSessionMessageId(value: string): string {
