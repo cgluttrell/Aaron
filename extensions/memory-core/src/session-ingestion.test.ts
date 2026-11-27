@@ -61,6 +61,25 @@ function checkpoint(scan: Awaited<ReturnType<typeof scanSessionIngestionSource>>
 }
 
 describe("session ingestion", () => {
+  it("redacts MC actor tokens in a real transcript scan without changing surrounding text", async () => {
+    const { archiveFile, scan } = await createArchive();
+    const tokens = [
+      "mcat1.00000000-0000-4000-8000-000000000000.exampleOnlyValue",
+      "mcat1.actor_2.key-with_underscores",
+    ];
+    const content = `Dispatch ${tokens[0]} then ${tokens[1]}; keep this useful task context.`;
+    await fs.writeFile(archiveFile, recordLine("dispatch", content));
+
+    const result = await scan();
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.snippet).toBe(
+      "User: Dispatch [REDACTED_MC_ACTOR_TOKEN] then [REDACTED_MC_ACTOR_TOKEN]; keep this useful task context.",
+    );
+    for (const token of tokens) {
+      expect(result.candidates[0]?.rendered).not.toContain(token);
+    }
+  });
+
   it("excludes unknown sessions from memory ingestion", () => {
     expect(corpusSource({ sessionKind: "unknown", transcriptSource: "sqlite" })).toBeNull();
   });
