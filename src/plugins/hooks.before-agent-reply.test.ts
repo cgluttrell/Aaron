@@ -5,6 +5,39 @@ import { createMockPluginRegistry, TEST_PLUGIN_AGENT_CTX } from "./hooks.test-fi
 
 const event = { cleanedBody: "hello world" };
 describe("before_agent_reply", () => {
+  it("bounds an unconfigured claiming hook by default", async () => {
+    let releaseHandler: (() => void) | undefined;
+    const handler = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseHandler = resolve;
+        }),
+    );
+    const logger = { error: vi.fn(), warn: vi.fn() };
+    const runner = createHookRunner(
+      createMockPluginRegistry([{ hookName: "before_agent_reply", handler }]),
+      { logger },
+    );
+    const timer = vi.spyOn(globalThis, "setTimeout");
+    const result = runner.runBeforeAgentReply(event, TEST_PLUGIN_AGENT_CTX);
+    try {
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+      expect(timer).toHaveBeenCalledWith(expect.any(Function), 75_000);
+      const timeout = timer.mock.calls.find(([, delay]) => delay === 75_000)?.[0];
+      if (typeof timeout !== "function") {
+        throw new Error("claiming timeout was not armed");
+      }
+      timeout();
+      await expect(result).resolves.toBeUndefined();
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining("timed out after 75000ms"));
+    } finally {
+      releaseHandler?.();
+      timer.mockRestore();
+      await result;
+    }
+  });
   it("rejects revoked handler authority before accepting a claim", async () => {
     let current = true;
     const first = vi.fn(async () => {

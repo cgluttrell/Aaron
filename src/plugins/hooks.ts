@@ -103,6 +103,9 @@ const DEFAULT_MODIFYING_HOOK_TIMEOUT_MS_BY_HOOK: Partial<Record<PluginHookName, 
       metadata.modifyingTimeoutMs,
     ]),
   );
+const DEFAULT_CLAIMING_HOOK_TIMEOUT_MS_BY_HOOK: Partial<Record<PluginHookName, number>> = {
+  before_agent_reply: 75_000,
+};
 
 type ClaimingHookName = {
   [K in PluginHookName]: [HookResult<K>] extends [never]
@@ -785,7 +788,11 @@ export function createHookRunner(
                 ctx,
               ),
             );
-            const outcome = await awaitHook(current, promise);
+            const outcome = await awaitHook(
+              current,
+              promise,
+              DEFAULT_CLAIMING_HOOK_TIMEOUT_MS_BY_HOOK[hookName],
+            );
             replaced = outcome === HOOK_REPLACED;
             return outcome === HOOK_REPLACED ? undefined : outcome;
           };
