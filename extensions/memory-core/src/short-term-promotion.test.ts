@@ -2788,7 +2788,7 @@ describe("short-term promotion", () => {
       expect((await fs.readFile(memoryPath, "utf-8")).length).toBeLessThanOrEqual(9_000);
     });
 
-    it("leaves prior promotions intact when fitting would exceed the loss limit", async (workspaceDir) => {
+    it("rotates generated sections despite a semantic consolidation loss limit", async (workspaceDir) => {
       await writeDailyMemoryNote(workspaceDir, "2026-04-29", [
         "Keep the Tuesday deployment window in durable memory.",
       ]);
@@ -2821,9 +2821,47 @@ describe("short-term promotion", () => {
         nowMs: Date.parse("2026-04-29T10:00:00.000Z"),
       });
 
-      expect(result).toMatchObject({ applied: 0, compactedSections: 0 });
-      expect(result.rejectedCandidates[0]?.reason).toContain("MEMORY.md budget exceeded");
-      await expect(fs.readFile(memoryPath, "utf-8")).resolves.toBe(existing);
+      expect(result).toMatchObject({ applied: 1, compactedSections: 2 });
+      expect(result.compactedDates).toEqual(["2026-04-01", "2026-04-08"]);
+      const updated = await fs.readFile(memoryPath, "utf-8");
+      expect(updated).toContain("## Promoted From Short-Term Memory (2026-04-15)");
+      expect(updated).toContain("## Promoted From Short-Term Memory (2026-04-22)");
+      expect(updated).toContain("## Promoted From Short-Term Memory (2026-04-29)");
+      expect(updated.length).toBeLessThanOrEqual(1_600);
+    });
+
+    it("lands two successive promotions near the default cap and retires only generated content", async (workspaceDir) => {
+      const handwritten = `# Long-Term Memory\n\nHand-written policy stays.\n${"h".repeat(9_450)}\n`;
+      const memoryPath = path.join(workspaceDir, "MEMORY.md");
+      await fs.writeFile(memoryPath, handwritten, "utf-8");
+      const dates = ["2026-04-28", "2026-04-29"];
+      const snippets = [
+        "Keep the first generated reminder.",
+        "Keep the second generated reminder.",
+      ];
+
+      for (const [index, date] of dates.entries()) {
+        const snippet = snippets[index] ?? "";
+        await writeDailyMemoryNote(workspaceDir, date, [snippet]);
+        await recordMemoryRecalls(
+          workspaceDir,
+          `reminder ${index}`,
+          [memoryRecallResult(`memory/${date}.md`, 1, 1, 0.95, snippet)],
+          { nowMs: Date.parse(`${date}T10:00:00.000Z`) },
+        );
+        const nowMs = Date.parse(`${date}T11:00:00.000Z`);
+        const ranked = await rankAllCandidates(workspaceDir, { nowMs });
+        const result = await applyAllCandidates(workspaceDir, ranked, { nowMs });
+        expect(result.applied).toBe(1);
+        expect(result.compactedDates).toEqual(index === 0 ? [] : [dates[0]]);
+        const content = await fs.readFile(memoryPath, "utf-8");
+        expect(content.startsWith(handwritten)).toBe(true);
+        expect(content.length).toBeLessThanOrEqual(10_000);
+        expect(content).toContain(snippet);
+        if (index === 1) {
+          expect(content).not.toContain(snippets[0]);
+        }
+      }
     });
   });
 

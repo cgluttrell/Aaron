@@ -129,8 +129,8 @@ export type ApplyShortTermPromotionsOptions = PromotionThresholdOptions & {
   /**
    * Maximum size of MEMORY.md on disk after a promotion write, in
    * characters. When the post-write size would exceed this budget, the
-   * oldest auto-promotion sections may be compacted out, within
-   * `maxPriorEntryLossFraction`, so the file stays bounded and bootstrap
+   * oldest fully generated auto-promotion sections may be rotated out, so the
+   * file stays bounded and bootstrap
    * injection keeps reaching new sessions. Pass `0` to disable compaction. Defaults to
    * `DEFAULT_MEMORY_FILE_MAX_CHARS`. See #73691.
    */
@@ -142,7 +142,7 @@ export type ApplyShortTermPromotionsOptions = PromotionThresholdOptions & {
    * metadata.
    */
   maxPromotedSnippetTokens?: number;
-  /** Maximum fraction of prior entries a promotion write may remove. */
+  /** Maximum fraction of prior entries semantic consolidation may remove. */
   maxPriorEntryLossFraction?: number;
   consolidation?: {
     subagent?: import("./dreaming-narrative.js").DreamingCompletion;
