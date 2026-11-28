@@ -570,6 +570,8 @@ export type ChannelMessagingAdapter = {
     hint?: string;
     /** Bare words that are command/session references for this channel, not literal destinations. */
     reservedLiterals?: readonly string[];
+    /** Reject reserved words even when the directory has an exact name. */
+    rejectReservedLiteralMatches?: boolean;
     /**
      * Plugin-owned fallback for explicit/native targets or post-directory-miss
      * resolution. This should complement directory lookup, not duplicate it.

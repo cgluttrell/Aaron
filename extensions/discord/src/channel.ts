@@ -210,7 +210,9 @@ export const discordPlugin: ChannelPlugin<ResolvedDiscordAccount, DiscordProbe, 
         resolveOutboundSessionRoute: resolveDiscordOutboundSessionRoute,
         targetResolver: {
           looksLikeId: looksLikeDiscordTargetId,
-          hint: "<channelId|user:ID|channel:ID>",
+          hint: "<channelId|user:ID|channel:ID>. Use user:<id> or channel:<id> for reserved names.",
+          reservedLiterals: ["me", "self", "owner"],
+          rejectReservedLiteralMatches: true,
           resolveTarget: async ({ cfg, accountId, input, normalized, preferredKind }) => {
             const defaultKind =
               preferredKind === "user" || normalized.startsWith("user:")
