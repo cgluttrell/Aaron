@@ -292,6 +292,13 @@ it.each([
 });
 
 describe("discordPlugin outbound", () => {
+  it("reserves implicit recipient words for explicit Discord addressing", () => {
+    expect(discordPlugin.messaging?.targetResolver).toMatchObject({
+      reservedLiterals: ["me", "self", "owner"],
+      rejectReservedLiteralMatches: true,
+    });
+  });
+
   it("builds tool context with separate native and routable DM targets", () => {
     const buildToolContext = discordPlugin.threading?.buildToolContext;
     assert(buildToolContext);

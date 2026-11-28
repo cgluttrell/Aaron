@@ -221,6 +221,7 @@ export async function resolveChannelTarget(params: {
   preferredKind?: ChannelDirectoryEntryKind;
   runtime?: RuntimeEnv;
   unknownTargetMode?: "error" | "normalized";
+  directoryMatchMode?: "exact" | "substring";
   plugin?: ChannelPlugin;
 }): Promise<ResolveMessagingTargetResult> {
   const raw = params.input.trim();
@@ -237,6 +238,9 @@ export async function resolveChannelTarget(params: {
   const normalizedInput = resolveNormalizedTargetInput(params.channel, raw, plugin);
   const normalized = normalizedInput?.normalized ?? raw;
   const reservedLiteral = resolveReservedTargetLiteral({ raw, plugin });
+  if (reservedLiteral && plugin?.messaging?.targetResolver?.rejectReservedLiteralMatches) {
+    return { ok: false, error: reservedTargetLiteralError(providerLabel, reservedLiteral, hint) };
+  }
   const normalizedResult = (): ResolveMessagingTargetResult => ({
     ok: true,
     target: {
@@ -284,7 +288,9 @@ export async function resolveChannelTarget(params: {
           value ? stripTargetPrefixes(value, params.channel, plugin).toLowerCase() : "",
         );
         return candidates.some((value) =>
-          reservedLiteral ? value === normalizedQuery : value.includes(normalizedQuery),
+          reservedLiteral || params.directoryMatchMode !== "substring"
+            ? value === normalizedQuery
+            : value.includes(normalizedQuery),
         );
       })
     : [];

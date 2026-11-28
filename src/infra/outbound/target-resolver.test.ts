@@ -137,7 +137,7 @@ describe("resolveMessagingTarget (directory fallback)", () => {
   it("does not reuse query-filtered directory misses for later target queries", async () => {
     directPlugin();
     const listMatchingPeers = vi.fn(({ query }: { query?: string }) =>
-      query === "dm" ? [{ kind: "user", id: "+15551234567", name: "ops-dm" }] : [],
+      query === "ops-dm" ? [{ kind: "user", id: "+15551234567", name: "ops-dm" }] : [],
     );
     mocks.listPeers.mockImplementation(listMatchingPeers);
     mocks.listPeersLive.mockImplementation(listMatchingPeers);
@@ -146,7 +146,7 @@ describe("resolveMessagingTarget (directory fallback)", () => {
     const miss = await resolve("alpha");
     expect(miss.ok).toBe(false);
 
-    const hit = await expectOkResolution("dm");
+    const hit = await expectOkResolution("ops-dm");
 
     expect(hit.target).toEqual({
       to: "+15551234567",
@@ -160,7 +160,10 @@ describe("resolveMessagingTarget (directory fallback)", () => {
       1,
       expect.objectContaining({ query: "alpha" }),
     );
-    expect(listMatchingPeers).toHaveBeenNthCalledWith(3, expect.objectContaining({ query: "dm" }));
+    expect(listMatchingPeers).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({ query: "ops-dm" }),
+    );
   });
 
   it("does not fall back to plugin target resolution after directory errors", async () => {
@@ -217,6 +220,45 @@ describe("resolveMessagingTarget (directory fallback)", () => {
     expect(result.error.message).toContain("Telegram");
     expect(mocks.resolveTarget).not.toHaveBeenCalled();
   });
+
+  it("resolves exact channel names but rejects partial names with a target error", async () => {
+    mocks.listGroups.mockResolvedValue([
+      { kind: "group", id: "channel:123", name: "operations" },
+    ] satisfies ChannelDirectoryEntry[]);
+    mocks.resolveTarget.mockResolvedValue(null);
+
+    const exact = await expectOkResolution("operations");
+    expect(exact.target).toMatchObject({ to: "channel:123", source: "directory" });
+
+    const partial = expectFailure(await resolve("operat"));
+    expect(partial.error.message).toContain('Unknown target "operat"');
+    expect(partial.error.message).not.toContain("channel:123");
+  });
+
+  it.each(["me", "self", "owner"])(
+    "rejects Discord reserved word %s even with a same-named or substring channel",
+    async (word) => {
+      setPlugin(
+        {
+          targetResolver: {
+            ...targetResolver,
+            reservedLiterals: ["me", "self", "owner"],
+            rejectReservedLiteralMatches: true,
+          },
+        },
+        directory,
+      );
+      mocks.listGroups.mockResolvedValue([
+        { kind: "group", id: "channel:123", name: word },
+        { kind: "group", id: "channel:456", name: `${word}-archive` },
+      ] satisfies ChannelDirectoryEntry[]);
+      mocks.resolveTarget.mockResolvedValue(null);
+
+      const result = expectFailure(await resolve(word));
+      expect(result.error.message).toContain(`Reserved target "${word}"`);
+      expect(mocks.resolveTarget).not.toHaveBeenCalled();
+    },
+  );
 
   it("does not reuse directory cache entries across prepared plugin runtimes", async () => {
     const groupPlugin = (id: string) => ({
@@ -324,10 +366,10 @@ describe("resolveMessagingTarget (directory fallback)", () => {
     });
   });
 
-  it("fails closed when a name matches more than one directory destination", async () => {
+  it("fails closed when an exact name matches more than one directory destination", async () => {
     mocks.listGroups.mockResolvedValue([
       { kind: "group", id: "channel:1", name: "general" },
-      { kind: "group", id: "channel:2", name: "general-archive" },
+      { kind: "group", id: "channel:2", name: "general" },
     ] satisfies ChannelDirectoryEntry[]);
 
     const result = expectFailure(await resolve("general"));
