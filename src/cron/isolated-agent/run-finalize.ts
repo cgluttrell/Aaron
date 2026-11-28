@@ -42,6 +42,40 @@ import type { CronExecutionResult, RunCronAgentTurnResult } from "./run.types.js
 import { cleanupCronRunSessionAfterRun } from "./session-cleanup.js";
 
 const cronContextRuntimeLoader = createLazyImportLoader(() => import("./run-context.runtime.js"));
+const DEFAULT_AGENT_TURN_FAILURE_MARKERS = ["PARTIAL FAILURE", "BLOCKED", "CRON_FAILURE", "FAILED"];
+
+function findDeclaredCronFailureMarker(text: string | undefined, markers: readonly string[]) {
+  if (!text) {
+    return undefined;
+  }
+  const lines = text.split(/\r?\n/);
+  const firstContentLine = lines.findIndex((line) => line.trim().length > 0);
+  for (const [index, line] of lines.entries()) {
+    // Later prose and quoted examples do not declare this run's status.
+    const declaration =
+      line.match(/^#{1,6} +([^\s].*)$/)?.[1] ??
+      (index === firstContentLine ? line.match(/^([^\s#].*)$/)?.[1] : undefined);
+    if (!declaration) {
+      continue;
+    }
+    const unwrapped = declaration.replace(/^(?:\*\*|__|\*|_)/, "");
+    const marker = markers.find((candidate) => {
+      if (!unwrapped.startsWith(candidate)) {
+        return false;
+      }
+      const remainder = unwrapped.slice(candidate.length).replace(/^(?:\*\*|__|\*|_)/, "");
+      return (
+        !(candidate === "FAILED" && /^\/0\b/.test(remainder)) &&
+        /^(?:$|[\s:—–/-])/.test(remainder) &&
+        !/^[:\s—–-]+none\b/i.test(remainder)
+      );
+    });
+    if (marker) {
+      return marker;
+    }
+  }
+  return undefined;
+}
 
 export async function finalizeCronRun(params: {
   prepared: PreparedCronRunContext;
@@ -222,6 +256,12 @@ export async function finalizeCronRun(params: {
     hasFatalErrorPayload,
     embeddedRunError,
   } = cronPayloadOutcome;
+  const failureMarker = findDeclaredCronFailureMarker(
+    finalRunResult.meta?.finalAssistantVisibleText ?? outputText,
+    prepared.cfgWithAgentDefaults.cron?.agentTurnFailureMarkers ??
+      DEFAULT_AGENT_TURN_FAILURE_MARKERS,
+  );
+  const hasFailedAgentReply = failureMarker !== undefined;
   if (includeReasoning && !hasFatalErrorPayload && deliveryDisposition.kind === "visible") {
     deliveryPayloads = [
       ...(finalRunResult.payloads ?? []).filter(shouldSuppressReasoningPayload),
@@ -234,7 +274,7 @@ export async function finalizeCronRun(params: {
     summary = CODE_MODE_MCP_CATALOG_MISS_MESSAGE;
   }
   const agentDiagnostics = createCronRunDiagnosticsFromAgentResult(finalRunResult, {
-    finalStatus: hasFatalErrorPayload ? "error" : "ok",
+    finalStatus: hasFatalErrorPayload || hasFailedAgentReply ? "error" : "ok",
   });
   const runDiagnostics = mergeCronRunDiagnostics(prepared.preflightDiagnostics, agentDiagnostics);
   const resolveRunOutcome = (
@@ -246,8 +286,12 @@ export async function finalizeCronRun(params: {
         ? disposition
         : undefined;
     // Delivery-target failures cannot replace the agent's execution outcome.
-    const useRunFailure = hasFatalErrorPayload && !failure;
-    const runError = embeddedRunError ?? "cron isolated run returned an error payload";
+    const useRunFailure = (hasFatalErrorPayload || hasFailedAgentReply) && !failure;
+    const runError =
+      embeddedRunError ??
+      (failureMarker
+        ? `cron agent reply reported ${failureMarker}`
+        : "cron isolated run returned an error payload");
     const deliveryError = disposition && useRunFailure ? undefined : result?.deliveryError;
     const deliveryDiagnosticError = deliveryError ?? failure?.error;
     const output = failure
@@ -256,10 +300,10 @@ export async function finalizeCronRun(params: {
         ? { summary: result?.summary, outputText: result?.outputText }
         : { summary, outputText };
     return prepared.withRunSession({
-      status: failure || hasFatalErrorPayload ? "error" : "ok",
+      status: failure || hasFatalErrorPayload || hasFailedAgentReply ? "error" : "ok",
       ...(failure
         ? { error: failure.error, ...(failure.errorKind ? { errorKind: failure.errorKind } : {}) }
-        : hasFatalErrorPayload
+        : hasFatalErrorPayload || hasFailedAgentReply
           ? { error: runError }
           : {}),
       ...output,
@@ -271,6 +315,7 @@ export async function finalizeCronRun(params: {
       !pendingContinuation &&
       !spawnOnlyHandoff &&
       !hasFatalErrorPayload &&
+      !hasFailedAgentReply &&
       !failure &&
       disposition?.kind !== "pending"
         ? {
@@ -304,7 +349,8 @@ export async function finalizeCronRun(params: {
     });
   };
   const acceptedSessionSpawn = hasAcceptedSessionSpawn(finalRunResult.acceptedSessionSpawns);
-  const quietResponse = !hasFatalErrorPayload && deliveryDisposition.kind !== "visible";
+  const quietResponse =
+    !hasFatalErrorPayload && !hasFailedAgentReply && deliveryDisposition.kind !== "visible";
   const spawnOnlyHandoff =
     acceptedSessionSpawn &&
     (quietResponse ||
@@ -321,6 +367,7 @@ export async function finalizeCronRun(params: {
   const noChange =
     params.automationResult?.outcome === "no_change" &&
     !hasFatalErrorPayload &&
+    !hasFailedAgentReply &&
     !pendingContinuation &&
     !spawnOnlyHandoff;
   const policySuppression = !prepared.resolvedDelivery.ok
@@ -370,7 +417,10 @@ export async function finalizeCronRun(params: {
     resolvedDelivery: prepared.resolvedDelivery,
     deliveryPlan: prepared.deliveryPlan,
     deliveryRequested: prepared.deliveryRequested,
-    undeliveredRunStatus: hasFatalErrorPayload || pendingPresentationWarningError ? "error" : "ok",
+    undeliveredRunStatus:
+      hasFatalErrorPayload || hasFailedAgentReply || pendingPresentationWarningError
+        ? "error"
+        : "ok",
     skipDelivery:
       policySuppression ??
       (noChange

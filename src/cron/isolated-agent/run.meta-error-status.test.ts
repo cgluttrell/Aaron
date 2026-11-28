@@ -62,6 +62,34 @@ async function useRealOutcome() {
 describe("runCronIsolatedAgentTurn - meta.error status propagation", () => {
   setupRunCronIsolatedAgentTurnSuite();
 
+  it.each([
+    { text: "FAILED: processing stopped", status: "error" },
+    { text: "Summary\n## BLOCKED: approval needed", status: "error" },
+    { text: "PARTIAL FAILURE/BLOCKED: one source was unavailable", status: "error" },
+    { text: "FAILED/0 items", status: "ok" },
+    { text: "## FAILED/0 items", status: "ok" },
+    { text: "FAILED/1 item", status: "error" },
+    { text: "**PARTIAL FAILURE**/x", status: "error" },
+    { text: "PARTIAL FAILURE: none", status: "ok" },
+    { text: "All checks passed\n> FAILED: quoted example", status: "ok" },
+    { text: "All checks passed\nFAILED: quoted example", status: "ok" },
+  ])("settles declared failure text through the cron turn: $text", async ({ text, status }) => {
+    await useRealOutcome();
+    mockAgentRun({ payloads: [{ text }], meta: { finalAssistantVisibleText: text } });
+    const result = await runTurn();
+    expectObjectFields(result, {
+      status,
+      error: status === "error" ? expect.stringContaining("cron agent reply reported") : undefined,
+    });
+  });
+
+  it("honors an empty configured failure-marker list", async () => {
+    await useRealOutcome();
+    mockAgentRun({ payloads: [{ text: "FAILED: processing stopped" }] });
+    const result = await runTurn({ cfg: { cron: { agentTurnFailureMarkers: [] } } });
+    expectObjectFields(result, { status: "ok", error: undefined });
+  });
+
   it.each([false, true])(
     "keeps delivery target failure separate from execution (agent failed: %s)",
     async (agentFailed) => {
