@@ -265,4 +265,18 @@ describe("runCodexAppServerSideQuestion cache-parity fork", () => {
       expect(toolExecuteMock).not.toHaveBeenCalled();
     },
   );
+
+  it("fails closed on side-question tool denial when the operator disables the relay", async () => {
+    vi.stubEnv("OPENCLAW_CODEX_NATIVE_HOOK_RELAY", "0");
+    try {
+      await expect(
+        runCodexAppServerSideQuestion(sideParams({ toolCalls: "deny" }), {
+          nativeHookRelay: { enabled: true },
+        }),
+      ).rejects.toThrow("tool denial requires the Codex native hook relay");
+      expect(toolExecuteMock).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
 });

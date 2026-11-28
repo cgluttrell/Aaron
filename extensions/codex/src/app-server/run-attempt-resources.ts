@@ -22,6 +22,7 @@ import {
   CODEX_NATIVE_HOOK_RELAY_TTL_GRACE_MS,
   createCodexNativeHookRelay,
   type CodexNativeHookRelay,
+  isCodexNativeHookRelayDisabledByEnv,
 } from "./native-hook-relay.js";
 import { createCodexNativePreToolUseFailureBuffer } from "./native-pre-tool-use-failures.js";
 import { CodexNativeProcessAuthority } from "./native-process-authority.js";
@@ -577,8 +578,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     connection.assertCurrent();
     const requiresProcessAdmission =
       nativeProcessAuthority?.requiresProcessAdmission && runtime.nativeToolSurfaceEnabled;
-    const requiresModelAdmission =
-      nativeModelAdmission !== undefined && decision.nativeModelInputTools !== undefined;
+    const needsModelAdmission = Boolean(nativeModelAdmission && decision.nativeModelInputTools);
     const workspaceReadiness = runtime.nativeToolSurfaceEnabled
       ? params.hostCapabilities.workspaceReadiness
       : undefined;
@@ -591,7 +591,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
       connection.assertCurrent();
     }
     const requiresExecutionAdmission =
-      requiresProcessAdmission || requiresModelAdmission || requiresWorkspaceAdmission;
+      requiresProcessAdmission || needsModelAdmission || requiresWorkspaceAdmission;
     const relayEvents =
       requiresExecutionAdmission && !nativeHookRelayEvents.includes("pre_tool_use")
         ? [...nativeHookRelayEvents, "pre_tool_use" as const]
@@ -603,7 +603,9 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
         nativeHookRelayGeneration: undefined,
       };
     }
+    const disabledByEnv = isCodexNativeHookRelayDisabledByEnv();
     state.nativeHookRelay = createCodexNativeHookRelay({
+      disabledByEnv,
       options: requiresExecutionAdmission
         ? { ...options.nativeHookRelay, enabled: true }
         : options.nativeHookRelay,
@@ -640,7 +642,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
       nativeProcessAuthority: requiresProcessAdmission
         ? { owner: nativeProcessAuthority, client: () => relayClient }
         : undefined,
-      nativeModelAdmission: requiresModelAdmission
+      nativeModelAdmission: needsModelAdmission
         ? {
             client: () => relayClient,
             threadId: () => state.thread?.threadId,
@@ -691,7 +693,7 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
               ? Math.max(options.nativeHookRelay?.hookTimeoutSec ?? 0, params.timeoutMs / 1_000)
               : options.nativeHookRelay?.hookTimeoutSec,
           })
-        : options.nativeHookRelay?.enabled === false
+        : options.nativeHookRelay?.enabled === false || disabledByEnv
           ? buildCodexNativeHookRelayDisabledConfig()
           : undefined,
       nativeHookRelayGeneration: state.nativeHookRelay?.generation,
