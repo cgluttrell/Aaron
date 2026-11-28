@@ -114,7 +114,7 @@ it.each([
   ["unparseable output", "unrecognized output", "unparseable-output"],
   ["output-limit", "2.1.400", undefined],
   ["prerelease", "2.1.400-beta.1 (Claude Code)", undefined],
-])("preserves and caches the transport floor after %s (#157541)", async (mode, stdout, warning) => {
+])("preserves the transport floor after %s (#157541)", async (mode, stdout, warning) => {
   const runner = vi
     .fn<CommandRunner>()
     .mockResolvedValue(
@@ -195,7 +195,7 @@ it("shares lazy CLI discovery across native execution and both OAuth wrappers", 
   expect(fixture.args()).toContain("--exclude-dynamic-system-prompt-sections");
 });
 
-it("bounds requests even while process cleanup is pending and caches the fallback", async () => {
+it("bounds requests while cleanup is pending, then retains a late complete result", async () => {
   vi.useFakeTimers();
   const pending = createDeferred<CommandResult>();
   const runner = vi.fn<CommandRunner>(() => pending.promise);
@@ -204,15 +204,16 @@ it("bounds requests even while process cleanup is pending and caches the fallbac
   const response = request.run();
   await vi.advanceTimersByTimeAsync(1_499);
   expect(request.base).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(1);
+  await vi.advanceTimersByTimeAsync(201);
   await response;
   expect(request.headers()).toEqual(oauthOptions.headers);
   await request.run();
   expect(runner).toHaveBeenCalledOnce();
   pending.resolve(commandResult({ stdout: "2.1.400 (Claude Code)" }));
   await request.run();
-  expect(request.headers(2)).toEqual(oauthOptions.headers);
-});
+  expect(request.headers(2)?.["user-agent"]).toBe("claude-cli/2.1.400");
+  expect(runner).toHaveBeenCalledOnce();
+}, 5_000);
 
 it("recognizes environment OAuth credentials while an explicit API key wins", async () => {
   vi.stubEnv("ANTHROPIC_OAUTH_TOKEN", oauthOptions.apiKey);
@@ -222,4 +223,44 @@ it("recognizes environment OAuth credentials while an explicit API key wins", as
   expect(fixture.runCommandWithTimeout).not.toHaveBeenCalled();
   await request.wrapper(model, context);
   expect(request.headers(1)?.["user-agent"]).toBe("claude-cli/2.1.400");
+});
+
+it("uses installed CLI identity when OAuth arrives after an initial CLI probe failure", async () => {
+  vi.useFakeTimers();
+  const runner = vi
+    .fn<CommandRunner>()
+    .mockRejectedValueOnce(new Error("synthetic launch failure"))
+    .mockResolvedValue(commandResult({ stdout: "2.1.400 (Claude Code)" }));
+  const fixture = register(runner);
+  await fixture.prepare();
+  expect(runner).toHaveBeenCalledOnce();
+  await vi.advanceTimersByTimeAsync(60_000);
+  const request = capture(fixture.provider);
+  await request.run();
+  expect(request.headers()?.["user-agent"]).toBe("claude-cli/2.1.400");
+  expect(runner).toHaveBeenCalledTimes(2);
+  await request.run({ apiKey: "sk-ant-api-synthetic", headers: oauthOptions.headers });
+  expect(request.headers(1)?.["user-agent"]).toBeUndefined();
+});
+
+it("retries a failed version probe after 60 seconds, not before", async () => {
+  vi.useFakeTimers();
+  const runner = vi
+    .fn<CommandRunner>()
+    .mockRejectedValueOnce(new Error("synthetic launch failure"))
+    .mockResolvedValue(commandResult({ stdout: "2.1.400 (Claude Code)" }));
+  const fixture = register(runner);
+  const request = capture(fixture.provider);
+  await request.run();
+  await vi.advanceTimersByTimeAsync(59_999);
+  await request.run();
+  expect(runner).toHaveBeenCalledOnce();
+  expect(request.headers(1)).toEqual(oauthOptions.headers);
+  await vi.advanceTimersByTimeAsync(1);
+  await request.run();
+  expect(runner).toHaveBeenCalledTimes(2);
+  expect(request.headers(2)?.["user-agent"]).toBe("claude-cli/2.1.400");
+  await vi.advanceTimersByTimeAsync(120_000);
+  await request.run();
+  expect(runner).toHaveBeenCalledTimes(2);
 });
