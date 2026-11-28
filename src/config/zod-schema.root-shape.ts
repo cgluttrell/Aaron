@@ -406,6 +406,8 @@ export const OpenClawSchemaShape = {
        * Default: "24h".
        */
       sessionRetention: z.union([z.string(), z.literal(false)]).optional(),
+      /** Final-reply markers that classify an isolated agent turn as failed; [] disables matching. */
+      agentTurnFailureMarkers: z.array(z.string().min(1)).optional(),
       failureAlert: z
         .strictObject({
           enabled: z.boolean().optional(),
