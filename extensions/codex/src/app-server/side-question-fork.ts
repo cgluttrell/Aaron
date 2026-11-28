@@ -70,6 +70,7 @@ type SideQuestionRelayPreparation = NativeHookRelayCommandPlan & {
 };
 
 export async function prepareCodexSideQuestionRelay(params: {
+  disabledByEnv: boolean;
   relay: SideQuestionRelayPreparation | undefined;
   events: readonly NativeHookRelayEvent[];
   options: CodexRunAttemptOptions["nativeHookRelay"];
@@ -84,13 +85,14 @@ export async function prepareCodexSideQuestionRelay(params: {
         hookTimeoutSec: params.options?.hookTimeoutSec,
         clearOmittedEvents: true,
       })
-    : params.options?.enabled === false
+    : params.options?.enabled === false || params.disabledByEnv
       ? buildCodexNativeHookRelayDisabledConfig()
       : undefined;
 }
 
 export function registerCodexSideQuestionRelay(
   params: {
+    disabledByEnv: boolean;
     denyToolCalls: boolean;
     appServer: CodexAppServerRuntimeOptions;
     options: CodexRunAttemptOptions["nativeHookRelay"];
@@ -112,7 +114,7 @@ export function registerCodexSideQuestionRelay(
     | "channelId"
   >,
 ) {
-  if (!params.options || params.options.enabled === false) {
+  if (!params.options || params.options.enabled === false || params.disabledByEnv) {
     return undefined;
   }
   const sideParams = params.sideParams;

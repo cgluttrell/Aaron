@@ -65,6 +65,7 @@ import { createCodexElicitationResponse } from "./elicitation-response.js";
 import { CodexEphemeralTurn } from "./ephemeral-turn.js";
 import { CodexNativeToolLifecycleProjector } from "./event-projector-native-tool-lifecycle.js";
 import { prepareCodexNativeExecutionPolicyForRun } from "./native-execution-policy.js";
+import { isCodexNativeHookRelayDisabledByEnv } from "./native-hook-relay.js";
 import { createCodexNativePreToolUseFailureBuffer } from "./native-pre-tool-use-failures.js";
 import {
   mergeCodexThreadConfigs,
@@ -156,7 +157,11 @@ export async function runCodexAppServerSideQuestion(
     config: params.cfg,
   });
   const denyToolCalls = params.toolCalls === "deny";
-  if (denyToolCalls && (!options.nativeHookRelay || options.nativeHookRelay.enabled === false)) {
+  const disabledByEnv = isCodexNativeHookRelayDisabledByEnv();
+  if (
+    denyToolCalls &&
+    (!options.nativeHookRelay || options.nativeHookRelay.enabled === false || disabledByEnv)
+  ) {
     throw new Error("Session fork tool denial requires the Codex native hook relay to be enabled.");
   }
   const { binding, authority, release } = await resolveCodexSessionBinding({
@@ -654,6 +659,7 @@ export async function runCodexAppServerSideQuestion(
       });
       nativeHookRelay = registerCodexSideQuestionRelay(
         {
+          disabledByEnv,
           denyToolCalls,
           appServer,
           options: options.nativeHookRelay,
@@ -683,6 +689,7 @@ export async function runCodexAppServerSideQuestion(
         },
       );
       const nativeHookRelayConfig = await prepareCodexSideQuestionRelay({
+        disabledByEnv,
         relay: nativeHookRelay,
         events: nativeHookRelayEvents,
         options: options.nativeHookRelay,

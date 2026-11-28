@@ -14,6 +14,7 @@ import {
   addTimerTimeoutGraceMs,
   finiteSecondsToTimerSafeMilliseconds,
 } from "openclaw/plugin-sdk/number-runtime";
+import { parseBooleanValue } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { escapeRegExp } from "openclaw/plugin-sdk/text-utility-runtime";
 import { racePromiseWithAbortSignal } from "openclaw/plugin-sdk/time-runtime";
 import type { PluginHookToolContext } from "openclaw/plugin-sdk/types";
@@ -170,7 +171,12 @@ export function emitCodexNativePreToolUseFailureDiagnostic(params: {
   });
 }
 
+export function isCodexNativeHookRelayDisabledByEnv(env: NodeJS.ProcessEnv = process.env): boolean {
+  return parseBooleanValue(env.OPENCLAW_CODEX_NATIVE_HOOK_RELAY) === false;
+}
+
 export function createCodexNativeHookRelay(params: {
+  disabledByEnv?: boolean;
   options:
     | {
         enabled?: boolean;
@@ -222,7 +228,10 @@ export function createCodexNativeHookRelay(params: {
     assertCurrent: () => void,
   ) => Promise<void>;
 }): CodexNativeHookRelay | undefined {
-  if (params.options?.enabled === false) {
+  if (
+    params.options?.enabled === false ||
+    (params.disabledByEnv ?? isCodexNativeHookRelayDisabledByEnv())
+  ) {
     return undefined;
   }
   const onNativeSubagentSubmission = params.onNativeSubagentSubmission;

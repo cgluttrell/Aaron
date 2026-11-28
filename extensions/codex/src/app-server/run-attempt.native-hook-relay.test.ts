@@ -85,6 +85,43 @@ function invokeCommand(relayId: string, toolUseId: string, generation?: string, 
 }
 
 describe("runCodexAppServerAttempt native hook relay", () => {
+  it.each([
+    { value: "0", disabled: true },
+    { value: undefined, disabled: false },
+  ])(
+    "honors the operator relay switch on a Codex tool turn ($value)",
+    async ({ value, disabled }) => {
+      vi.stubEnv("OPENCLAW_CODEX_NATIVE_HOOK_RELAY", value);
+      const sessionFile = path.join(tempDir, `relay-switch-${disabled}.jsonl`);
+      const harness = createStartedThreadHarness();
+      const run = runCodexAppServerAttempt(
+        createParams(sessionFile, path.join(tempDir, `relay-switch-workspace-${disabled}`)),
+        preToolUse,
+      );
+      try {
+        await harness.waitForMethod("turn/start");
+        const startRequest = threadRequest(harness);
+        const config = (startRequest as { config?: Record<string, unknown> } | undefined)?.config;
+        const relayId = disabled ? undefined : extractRelayIdFromThreadRequest(startRequest);
+        const registration = relayId
+          ? nativeHookRelayTesting.getNativeHookRelayRegistrationForTests(relayId)
+          : undefined;
+        await harness.completeTurn({ threadId: "thread-1", turnId: "turn-1" });
+        await run;
+        if (disabled) {
+          expect(config).toMatchObject({ "features.hooks": false, "hooks.PreToolUse": [] });
+          expect(JSON.stringify(config)).not.toContain("hooks relay --provider codex");
+        } else {
+          expect(registration).toBeDefined();
+          expect(JSON.stringify(config)).toContain("hooks relay --provider codex");
+        }
+      } finally {
+        vi.unstubAllEnvs();
+        await run.catch(() => undefined);
+      }
+    },
+  );
+
   it("rejects Guardian review when the running server resolves an untrusted managed endpoint", async () => {
     const sessionFile = path.join(tempDir, "managed-review-endpoint.jsonl");
     const workspaceDir = path.join(tempDir, "managed-review-endpoint-workspace");
